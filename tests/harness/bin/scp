@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+// PATH 模式垫片（14 §1.1）。见 README.md。
+import('../fake-scp.js');

@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+// PATH 模式垫片（14 §1.1）：把本目录前置到 PATH 即可让 manager 零改动走假远端。
+// 注意：集成测试不用这条路径——见 ../bin/README.md（shebang 子进程收不到信号）。
+import('../fake-ssh.js');

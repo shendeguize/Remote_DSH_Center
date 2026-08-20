@@ -1,0 +1,150 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import * as store from '../src/store.js';
+import { applyProbe, interpretProbe, parseRunningBlock } from '../src/prober.js';
+import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
+import { _resetForTest } from '../src/lib/bus.js';
+
+const ok = (stdout) => ({ code: 0, stdout, stderr: '', timedOut: false, aborted: false });
+
+/** 12 §1.1 协议的典型 stdout 样本。 */
+const READY_SAMPLE = [
+  'DSH_BIN=/usr/bin/dsh',
+  'DSH_VERSION=0.1.0-rc.7',
+  'DSH_HOME=/root/.dsh',
+  'PROFILE_WEB=yes',
+  'RUNNING_DSH_WEB<<EOF',
+  ' 60768 dsh web --no-open --host 127.0.0.1 --port 8899',
+  'EOF',
+  'PROBE_DONE=yes',
+  '',
+].join('\n');
+
+test('interpretProbe：ready 全字段', () => {
+  const r = interpretProbe(ok(READY_SAMPLE));
+  assert.equal(r.ok, true);
+  assert.equal(r.phase, 'ready');
+  assert.equal(r.dshPath, '/usr/bin/dsh');
+  assert.equal(r.version, '0.1.0-rc.7');
+  assert.equal(r.dshHome, '/root/.dsh');
+  assert.equal(r.profileWeb, true);
+  assert.equal(r.noDshReason, null);
+  assert.deepEqual(r.manualInstances, [{ pid: 60768, args: 'dsh web --no-open --host 127.0.0.1 --port 8899' }]);
+});
+
+test('interpretProbe：no_dsh 两种原因可区分', () => {
+  const missing = interpretProbe(ok('DSH_BIN=MISSING\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
+  assert.equal(missing.phase, 'no_dsh');
+  assert.equal(missing.noDshReason, 'missing-bin');
+  assert.equal(missing.dshPath, null);
+
+  const noProfile = interpretProbe(ok('DSH_BIN=/usr/bin/dsh\nDSH_VERSION=0.1.0\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
+  assert.equal(noProfile.phase, 'no_dsh');
+  assert.equal(noProfile.noDshReason, 'no-web-profile');
+  assert.equal(noProfile.dshPath, '/usr/bin/dsh', 'dsh 在，只是 profile 缺');
+});
+
+test('interpretProbe：ssh 失败/超时 → unreachable，stderr 保留', () => {
+  const refused = interpretProbe({ code: 255, stdout: '', stderr: 'Connection refused', timedOut: false, aborted: false });
+  assert.equal(refused.phase, 'unreachable');
+  assert.equal(refused.stderr, 'Connection refused');
+
+  const timeout = interpretProbe({ code: null, stdout: '', stderr: '', timedOut: true, aborted: false });
+  assert.equal(timeout.phase, 'unreachable');
+});
+
+test('interpretProbe：缺哨兵（输出被截断）→ unreachable 且留证原文', () => {
+  const r = interpretProbe(ok('DSH_BIN=/usr/bin/dsh\nDSH_HOME=/root/.dsh\n'));
+  assert.equal(r.phase, 'unreachable');
+  assert.match(r.stderr, /DSH_BIN=\/usr\/bin\/dsh/, 'detail 带原始输出便于诊断');
+});
+
+test('interpretProbe：多行 version 已在远端 head -n 1，此处按单行处理', () => {
+  const r = interpretProbe(ok('DSH_BIN=/usr/bin/dsh\nDSH_VERSION=dsh 0.1.0-rc.7 (build abc)\nDSH_HOME=/root/.dsh\nPROFILE_WEB=yes\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
+  assert.equal(r.version, 'dsh 0.1.0-rc.7 (build abc)');
+});
+
+test('parseRunningBlock：ps 行解析、忽略噪声行', () => {
+  assert.deepEqual(
+    parseRunningBlock('  123 dsh web --port 1\n\nnot a ps line\n 456   dsh web --port 2  '),
+    [
+      { pid: 123, args: 'dsh web --port 1' },
+      { pid: 456, args: 'dsh web --port 2' },
+    ],
+  );
+  assert.deepEqual(parseRunningBlock(''), []);
+  assert.deepEqual(parseRunningBlock(null), []);
+});
+
+async function storeFixture(t, hosts = { 'gpu-1': null }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-prober-'));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    configVersion: CONFIG_VERSION,
+    setupCompleted: true,
+    manager: { port: 7788 },
+    defaults: { remoteWebPort: 8899, localPortRange: [17701, 17799] },
+    hosts: Object.fromEntries(Object.keys(hosts).map((n) => [n, {
+      enabled: true, autoStart: false, localPort: null, remoteWebPort: null,
+      inject: { env: {}, extraArgs: [], patches: [] },
+    }])),
+  }));
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'warn', () => {});
+  t.after(() => {
+    store._reset();
+    _resetForTest();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  await store.init({ pathsOverride: resolvePaths({ DSHC_HOME: dir }, os.homedir()) });
+}
+
+test('applyProbe：三分类正确写 phase 与 probe 详情', async (t) => {
+  await storeFixture(t);
+
+  applyProbe('gpu-1', interpretProbe(ok(READY_SAMPLE)));
+  assert.equal(store.getPhase('gpu-1'), 'ready');
+  const probe = store.getHostState('gpu-1').probe;
+  assert.equal(probe.version, '0.1.0-rc.7');
+  assert.equal(probe.errorSummary, null);
+  assert.match(probe.at, /^\d{4}-/);
+
+  applyProbe('gpu-1', interpretProbe(ok('DSH_BIN=MISSING\nDSH_HOME=/x\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n')));
+  assert.equal(store.getPhase('gpu-1'), 'no_dsh');
+  assert.equal(store.getHostState('gpu-1').probe.noDshReason, 'missing-bin');
+
+  applyProbe('gpu-1', interpretProbe({ code: 255, stdout: '', stderr: 'ssh: connect failed\nmore detail', timedOut: false, aborted: false }));
+  assert.equal(store.getPhase('gpu-1'), 'unreachable');
+  assert.equal(store.getHostState('gpu-1').probe.errorSummary, 'ssh: connect failed', '摘要取首行');
+});
+
+test('applyProbe：starting/running/degraded 期间不改 phase，只刷 manualInstances', async (t) => {
+  await storeFixture(t);
+  store.setPhase('gpu-1', 'ready', 't');
+  store.setPhase('gpu-1', 'starting', 't');
+  store.setPhase('gpu-1', 'running', 't');
+
+  applyProbe('gpu-1', interpretProbe(ok(READY_SAMPLE)));
+  assert.equal(store.getPhase('gpu-1'), 'running', '探测不得打断运行态');
+  assert.equal(store.getHostState('gpu-1').manualInstances.length, 1);
+  assert.ok(store.getHostState('gpu-1').probe, 'probe 详情照常刷新');
+});
+
+test('applyProbe：受管 PID 不进 manualInstances', async (t) => {
+  await storeFixture(t);
+  store.mutateHostState('gpu-1', (e) => { e.web = { pid: 60768, port: 8899, startedByUs: true }; });
+
+  applyProbe('gpu-1', interpretProbe(ok(READY_SAMPLE)));
+  assert.deepEqual(store.getHostState('gpu-1').manualInstances, [], '自己拉起的进程不算手动实例');
+});
+
+test('applyProbe：unreachable 后再探测可回到 ready（终态互迁）', async (t) => {
+  await storeFixture(t);
+  applyProbe('gpu-1', interpretProbe({ code: 255, stdout: '', stderr: 'x', timedOut: false, aborted: false }));
+  assert.equal(store.getPhase('gpu-1'), 'unreachable');
+  applyProbe('gpu-1', interpretProbe(ok(READY_SAMPLE)));
+  assert.equal(store.getPhase('gpu-1'), 'ready');
+});

@@ -1,0 +1,333 @@
+/**
+ * 本机集成测试脚手架（14 §3）：把 manager 整机跑在进程内，远端换成假装置。
+ *
+ * 单进程内模块是单例，故每次 boot 前后都要把 store/tunnel/bus/队列 显式复位——
+ * 否则跨用例串味（上一例的 phase 会让下一例的 preflight 失败）。
+ */
+
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import path from 'node:path';
+
+import { createHarness, newHostState } from '../harness/index.js';
+import { assertSseStream, assertShape, errorBody } from '../contract/schemas.js';
+import { CONFIG_VERSION } from '../../src/defaults.js';
+
+import * as bus from '../../src/lib/bus.js';
+import * as ssh from '../../src/lib/ssh.js';
+import * as store from '../../src/store.js';
+import * as tunnel from '../../src/tunnel.js';
+import * as launcher from '../../src/launcher.js';
+import * as ports from '../../src/ports.js';
+import * as monitor from '../../src/monitor.js';
+import * as server from '../../src/server.js';
+
+export { store, tunnel, launcher, monitor, server, bus };
+
+/** 假远端的启动轮询无需真等 1s + 2s。 */
+const FAST_WAIT = (ms) => new Promise((r) => { const t = setTimeout(r, Math.min(ms, 30)); t.unref?.(); });
+
+/**
+ * 端口分段：测试文件各自一个进程并行跑，若都从内核借临时端口（49152+）会互相撞——
+ * 借到手与真正 bind 之间有窗口，且区间会重叠。改为按 pid 切出互不重叠的固定段：
+ * 本机映射端口一段、假 dsh web 的「远端」端口另一段。
+ */
+const SLOT = process.pid % 380;
+const LOCAL_BASE = 20_000 + SLOT * 50;
+const REMOTE_BASE = 40_000 + SLOT * 50;
+const LOCAL_RANGE_WIDTH = 45;
+
+let remoteCursor = 0;
+
+function portFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, '127.0.0.1');
+  });
+}
+
+/** 本段内取下一个空闲端口给假 dsh web 用。 */
+async function nextRemotePort() {
+  for (let i = 0; i < 50; i += 1) {
+    const port = REMOTE_BASE + (remoteCursor % 45);
+    remoteCursor += 1;
+    // eslint-disable-next-line no-await-in-loop -- 顺序探测
+    if (await portFree(port)) return port;
+  }
+  throw new Error(`测试端口段 ${REMOTE_BASE} 已无空闲端口`);
+}
+
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {{hosts?:Record<string,object>, hostConfig?:Record<string,object>,
+ *   defaults?:object, setupCompleted?:boolean, skipBoot?:boolean, quiet?:boolean,
+ *   state?:object, localPortRange?:[number,number]}} [opts]
+ */
+export async function bootServer(t, opts = {}) {
+  const {
+    hosts = { 'gpu-1': newHostState() },
+    hostConfig = {},
+    setupCompleted = true,
+    skipBoot = false,
+    quiet = true,
+    state = null,
+    localPortRange = null,
+  } = opts;
+
+  const range = localPortRange ?? [LOCAL_BASE, LOCAL_BASE + LOCAL_RANGE_WIDTH];
+
+  if (quiet) {
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'warn', () => {});
+  }
+
+  const harness = createHarness({ hosts });
+  const restore = harness.activate();
+
+  const cfgHosts = {};
+  for (const name of Object.keys(hosts)) {
+    cfgHosts[name] = {
+      enabled: true,
+      autoStart: false,
+      localPort: null,
+      // 每台主机一个独占端口：假 dsh web 真的在本机 bind，同端口会互相 EADDRINUSE，
+      // 还会被误判成「端口被占降级」路径
+      // eslint-disable-next-line no-await-in-loop -- 逐台取一个，数量个位数
+      remoteWebPort: await nextRemotePort(),
+      workdir: null,
+      inject: { env: {}, extraArgs: [], patches: [] },
+      ...(hostConfig[name] ?? {}),
+    };
+  }
+
+  fs.writeFileSync(path.join(harness.homeDir, 'config.json'), `${JSON.stringify({
+    configVersion: CONFIG_VERSION,
+    setupCompleted,
+    // 实际监听端口由 portOverride=0 决定（临时端口），此处只满足 schema
+    manager: { port: 7788 },
+    defaults: { remoteWebPort: 8899, localPortRange: range, ...(opts.defaults ?? {}) },
+    hosts: cfgHosts,
+  }, null, 2)}\n`);
+
+  if (state) {
+    fs.writeFileSync(path.join(harness.homeDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
+  }
+
+  reset();
+  launcher._setWait(FAST_WAIT);
+
+  const sseClients = [];
+
+  const ctx = {
+    harness,
+    port: null,
+    base: '',
+    setupGate: false,
+    hostNames: Object.keys(cfgHosts),
+    remotePortOf: (name) => cfgHosts[name].remoteWebPort,
+    api: (method, p, body) => request(ctx.base, method, p, body),
+    get: (p) => request(ctx.base, 'GET', p),
+    async sse() {
+      const c = await openSse(ctx.base);
+      sseClients.push(c);
+      return c;
+    },
+    /** 模拟 manager 重启：拆服务（隧道子进程随之被杀）→ 复位单例 → 重跑启动序列。 */
+    async reboot() {
+      for (const c of sseClients.splice(0)) {
+        assertSseStream(c.frames, { label: 'SSE(重启前)' });
+        c.close();
+      }
+      await server._shutdownForTest();
+      reset();
+      launcher._setWait(FAST_WAIT);
+      return start();
+    },
+  };
+
+  async function start() {
+    const booted = await server.main({ portOverride: 0, skipBoot });
+    ctx.port = booted.port;
+    ctx.base = `http://127.0.0.1:${booted.port}`;
+    ctx.setupGate = booted.setupGate;
+    return booted;
+  }
+
+  await start();
+
+  t.after(async () => {
+    // 契约校验（TST-05）：本用例收到的每一帧都必须过 13 章的校验器
+    for (const [i, c] of sseClients.entries()) {
+      assertSseStream(c.frames, { label: `SSE#${i}` });
+      c.close();
+    }
+    await server._shutdownForTest();
+    reset();
+    launcher._setWait(null);
+    harness.cleanup();
+    restore();
+  });
+
+  return ctx;
+}
+
+function reset() {
+  store._reset();
+  tunnel._reset();
+  monitor.stopLoop();
+  ssh._resetQueues();
+  bus._resetForTest();
+  ports._setProbe(null);
+}
+
+// ── HTTP 客户端 ──────────────────────────────────────────────────────────
+
+/** @returns {Promise<{status:number, headers:object, text:string, json:any}>} */
+export function request(base, method, p, body) {
+  const url = new URL(p, base);
+  const payload = body === undefined ? null : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {},
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => {
+        let json = null;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = null;
+        }
+        // 错误体的形状是全端点统一契约（13 §1.1），无需用例逐个声明即可自动校验
+        if (res.statusCode >= 400 && json !== null) {
+          assertShape(errorBody, json, `${method} ${p} 错误体`);
+        }
+        resolve({ status: res.statusCode, headers: res.headers, text, json });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/** 裸 HTTP GET（隧道连通性验证用：目标是假 dsh web，不是 manager）。 */
+export function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => resolve({ status: res.statusCode, text }));
+    });
+    req.on('error', reject);
+  });
+}
+
+// ── SSE 客户端（手写分帧解析器，CLI 侧 §6.2 同款） ───────────────────────
+
+export function openSse(base) {
+  const url = new URL('/api/events', base);
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: url.hostname, port: url.port, path: url.pathname }, (res) => {
+      if (res.statusCode !== 200) {
+        reject(new Error(`SSE 连接失败 ${res.statusCode}`));
+        return;
+      }
+      const frames = [];
+      const waiters = new Set();
+      let buffer = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        buffer += chunk;
+        let idx = buffer.indexOf('\n\n');
+        while (idx !== -1) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const frame = parseFrame(raw);
+          if (frame) {
+            frames.push(frame);
+            for (const w of [...waiters]) {
+              if (w.match(frame)) {
+                waiters.delete(w);
+                w.resolve(frame);
+              }
+            }
+          }
+          idx = buffer.indexOf('\n\n');
+        }
+      });
+
+      resolve({
+        frames,
+        of: (type) => frames.filter((f) => f.type === type),
+        /** @param {(f:{type:string,data:any})=>boolean} match */
+        wait(match, { timeoutMs = 20_000 } = {}) {
+          const hit = frames.find(match);
+          if (hit) return Promise.resolve(hit);
+          return new Promise((res2, rej2) => {
+            const w = { match, resolve: res2 };
+            waiters.add(w);
+            const timer = setTimeout(() => {
+              waiters.delete(w);
+              rej2(new Error(`SSE 等待超时 ${timeoutMs}ms；已收到：${frames.map((f) => f.type).join(',')}`));
+            }, timeoutMs);
+            timer.unref?.();
+          });
+        },
+        close() {
+          req.destroy();
+          res.destroy();
+        },
+      });
+    });
+    req.on('error', reject);
+  });
+}
+
+function parseFrame(raw) {
+  let type = 'message';
+  const dataLines = [];
+  for (const line of raw.split('\n')) {
+    if (line.startsWith(':')) continue; // 心跳注释
+    if (line.startsWith('event:')) type = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { type, data: JSON.parse(dataLines.join('\n')) };
+  } catch {
+    return null;
+  }
+}
+
+// ── 轮询断言 ─────────────────────────────────────────────────────────────
+
+/** 等某主机进入目标 phase（比 SSE 更适合「不关心中间过程」的断言）。 */
+export async function waitPhase(ctx, name, phases, { timeoutMs = 20_000 } = {}) {
+  const want = Array.isArray(phases) ? phases : [phases];
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- 轮询
+    const res = await ctx.get('/api/hosts');
+    last = res.json.hosts.find((h) => h.name === name);
+    if (last && want.includes(last.phase)) return last;
+    if (Date.now() > deadline) {
+      throw new Error(`等待 ${name} 进入 ${want.join('/')} 超时，当前 ${last?.phase}`);
+    }
+    // eslint-disable-next-line no-await-in-loop -- 同上
+    await new Promise((r) => { const t = setTimeout(r, 50); t.unref?.(); });
+  }
+}
+
+export { newHostState };

@@ -1,0 +1,231 @@
+# 覆盖矩阵（14 §6 / TST-03、TST-07）
+
+行 = 状态机迁移 / 协议分支 / 故障场景 / 前端边界；列 = 覆盖它的测试。
+「仅真机」列出 IT 编号；逐项结论记在本机的验收记录里（设计语料与验收记录不入库，
+复跑方式见下方命令）。
+
+- 一条命令跑全：`npm run check`（测试+覆盖率 → 真浏览器 → 打包产物 → CLI 入口）
+- 全量单测与集成：`npm test`（409 项）
+- 覆盖率门槛核对：`npm run coverage:gate`
+- 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，10 项）
+- 真机验收：`npm run acceptance:real -- --host <ssh-host>`
+
+## 1. 主机状态机迁移（`src/lib/machine.js` TRANSITIONS 全表）
+
+自环恒许可（只刷数据不算迁移），下表为 8 态间的全部合法迁移。
+
+| from → to | 触发者 | 覆盖 |
+|---|---|---|
+| unknown → ready/no_dsh/unreachable | 探测三分类 | `tests/prober.test.js`（applyProbe 三分类）、`tests/integration/flows.test.js`（探测流程）、IT-01 |
+| unreachable → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`「unreachable 后再探测可回到 ready」 |
+| no_dsh → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`（no_dsh 两种原因）、`tests/harness/harness.test.js`（PROBE 三分类） |
+| ready → starting | start / autoStart | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-02 |
+| ready → ready/no_dsh/unreachable | 探测覆盖 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
+| starting → running | 拉起成功 | `tests/integration/flows.test.js`、`tests/integration/loop.test.js`、IT-02、IT-03 |
+| starting → ready | 拉起失败回滚 | `tests/integration/flows.test.js`（launch-dies）、`tests/integration/cli.test.js`（退出码 1）、假远端 `bind-busy-twice` |
+| running → degraded | 隧道断联 | `tests/integration/resilience.test.js`、IT-06 |
+| running → crashed | 深复核判死 | `tests/integration/resilience.test.js`（两条：隧道同时断 / 隧道照活）、IT-07 |
+| running → ready | stop | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-05 |
+| degraded → running | 重连成功 / 巡检重建子进程 | `tests/integration/resilience.test.js`、IT-06 |
+| degraded → crashed | 重连前复核判死 | `tests/integration/resilience.test.js` |
+| degraded → ready | 挂起/重连期间 stop | `tests/integration/resilience.test.js`「degraded 期间 stop」 |
+| crashed → starting | 直接再 start（视作重启） | `tests/integration/resilience.test.js`、IT-05 后续 |
+| crashed → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
+| 非法迁移一律拒绝 | 三层守卫 | `tests/lib/machine.test.js`（8×8 快照）、`tests/store.test.js`（setPhase 守卫零改动） |
+
+## 2. 远端协议分支（12 §1）
+
+| 协议 / 分支 | 覆盖 |
+|---|---|
+| PROBE 模板逐字一致 | `tests/lib/proto.test.js` §1.1 |
+| PROBE → ready（dsh 路径/版本/web profile） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-01 |
+| PROBE → no_dsh（缺二进制 / 缺 web profile 两种原因） | `tests/harness/harness.test.js`、`tests/prober.test.js` |
+| PROBE → unreachable（ssh 失败 / 超时 / 输出截断缺哨兵） | `tests/lib/ssh.test.js`、`tests/prober.test.js`、IT-01 |
+| PROBE 发现手动实例（RUNNING_DSH_WEB → manualInstances） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-05（拒杀演练） |
+| LISTEN=unknown（远端无 ss）不作否定证据 | `tests/harness/harness.test.js`（no-ss） |
+| LAUNCH 模板逐字一致 + 双层转义算例 + `sh -n` 语法 | `tests/lib/proto.test.js` §1.2 |
+| LAUNCH `--patch` 紧跟 `web`（启动器旗标顺序） | `tests/lib/proto.test.js` §1.2、IT-09 |
+| LAUNCH 注入 env / extraArgs 抵达远端命令行与指纹 | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-09 |
+| LAUNCH `workdir=null` 时模板逐字不含 cd（回归锁） | `tests/lib/proto.test.js` §1.2、`tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
+| LAUNCH cd 段：绝对路径 / `~` 拼接抵达远端并还原真实目录 | `tests/lib/shq.test.js`（真 `sh` 还原为单个词）、`tests/lib/proto.test.js` §1.2、`tests/harness/harness.test.js` |
+| LAUNCH `ERR=workdir` + 退出码 8 → LAUNCH_FAILED（不误报 unreachable，phase 回 ready） | `tests/harness/harness.test.js`（workdir-missing）、`tests/integration/flows.test.js` |
+| workdir 形态校验拦在 manager 侧（非法即不拼装脚本） | `tests/lib/shq.test.js`、`tests/lib/proto.test.js` §1.2、`tests/lib/validate.test.js` |
+| VERIFY 回读 CWD → `state.web.cwd`；不可读降级 null 且不进 kill 判据 | `tests/lib/proto.test.js` §1.3、`tests/harness/harness.test.js`（no-proc-cwd，含「cwd 变了照样按指纹停掉」） |
+| POLL 三元组（URL / ALIVE / BIND_ERR） | `tests/lib/proto.test.js` §1.2、`tests/harness/harness.test.js` |
+| 固定端口拉起成功 | `tests/integration/flows.test.js`、IT-02 |
+| 端口占用降级 `--port 0`（logName 换 auto 命名） | `tests/harness/harness.test.js`（bind-busy-once）、IT-03 |
+| 两次拉起均绑定失败 → LAUNCH_FAILED（含两份日志尾） | `tests/harness/harness.test.js` + `tests/integration/flows.test.js`（bind-busy-twice）；**IT-04 豁免**（真机无法构造） |
+| 起来即崩 → 不等满 5 拍快败 | `tests/harness/harness.test.js`（launch-dies）、`tests/integration/cli.test.js` |
+| VERIFY 模板 + 指纹全等判定 | `tests/lib/proto.test.js` §1.3、`tests/harness/harness.test.js` |
+| VERIFY ALIVE=no（远端已消失） | `tests/harness/harness.test.js`（remote-crash）、`tests/integration/resilience.test.js`、IT-07 |
+| STOP → killed / already-dead | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-05 |
+| STOP 指纹不符 → 拒杀（KILL_REFUSED，不清 state） | `tests/harness/harness.test.js`（pid-reuse）、`tests/integration/flows.test.js`、IT-05 |
+| STOP 缺指纹拒绝拼装 | `tests/lib/proto.test.js` §1.3 |
+| LOG 尾部读取 / 文件缺失 → `(no log)` | `tests/lib/proto.test.js` §1.4、`tests/harness/harness.test.js`、`tests/integration/cli.test.js` |
+| patch 清理协议（空格包裹匹配 + 兼职 mkdir） | `tests/lib/proto.test.js` §1.5 |
+| patch 同步：首传 / hash 未变跳过 / 改内容换名 / 旧文件清理 | `tests/harness/harness.test.js`、IT-09 |
+| patch 本地不可读 → VALIDATION 快败；scp 失败 → 整体快败 | `tests/harness/harness.test.js`（scp-fail） |
+| ssh 统一参数、`sh -c <shq(body)>` 双层包装 | `tests/lib/ssh.test.js`、`tests/lib/shq.test.js` |
+| ssh 超时 TERM→2s→KILL 强杀链 | `tests/lib/ssh.test.js`、`tests/harness/harness.test.js`（conn-timeout） |
+| 每主机串行队列（串行 / 前序失败不阻断 / 跨主机并行 / 队列超时） | `tests/lib/ssh.test.js` |
+
+## 3. 隧道与巡检分支（11 §5）
+
+| 分支 | 覆盖 |
+|---|---|
+| 隧道就绪判据（本机监听可连） | `tests/integration/flows.test.js`、IT-02 |
+| 子进程退出分类：主动杀 / 本机端口被占 / 转发被拒 / network | `tests/tunnel.test.js`、`tests/harness/harness.test.js` |
+| 退避重连 1,2,4,8,16,30…（30s 封顶）与恢复归零 | `tests/tunnel.test.js`、`tests/integration/resilience.test.js` |
+| 转发被拒 → 挂起 forward-disabled，不进退避环；手动 reconnect 可再试 | `tests/integration/resilience.test.js`；**IT-10 豁免**（需改共享节点 sshd） |
+| 本机端口占用 → 隧道启动失败并报 cannot listen | `tests/harness/harness.test.js`、`tests/ports.test.js` |
+| 巡检：转发通道探活通过 → 不动手 | `tests/integration/resilience.test.js` |
+| 巡检：本地监听半死但远端活 → 重建子进程 | `tests/integration/resilience.test.js`（SIGUSR2 只关监听） |
+| 巡检：ssh 仍在 accept 但远端已死 → crashed | `tests/integration/resilience.test.js`、IT-07 |
+| localPort 一次分配后固定、区间耗尽 → PORT_EXHAUSTED | `tests/ports.test.js`、`tests/integration/loop.test.js` |
+| manager 重启：running 不重拉、只重建隧道；已运行则跳过 autoStart | `tests/integration/resilience.test.js`、IT-08 |
+
+## 4. 故障注入场景库（`tests/harness/scenarios.js` 15 个）
+
+| 场景 | 覆盖它的用例 |
+|---|---|
+| healthy | 全部集成主干（flows / loop / cli / sse / setup） |
+| no-dsh-missing-bin | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
+| no-dsh-no-profile | 同上 |
+| unreachable | 同上 + IT-01 |
+| hostkey-fail | `tests/harness/harness.test.js` |
+| conn-timeout | `tests/harness/harness.test.js`（强杀链） |
+| bind-busy-once | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-03 |
+| bind-busy-twice | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`（IT-04 的替身） |
+| launch-dies | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
+| forward-disabled | `tests/integration/resilience.test.js`（两条：挂起不退避 / 挂起期间 stop；IT-10 的替身） |
+| no-ss | `tests/harness/harness.test.js` |
+| workdir-missing | `tests/harness/harness.test.js`（含「对 workdir=null 无效」）、`tests/integration/flows.test.js`；真机侧见 IT-14（用户手动） |
+| no-proc-cwd | `tests/harness/harness.test.js`（CWD 降级 + 不误杀判据不受影响）、`tests/web/mount.test.js`（UI 显示「—」） |
+| scp-fail | `tests/harness/harness.test.js` |
+| slow-probe | `tests/harness/harness.test.js`（并行探测不互相阻塞） |
+
+## 5. HTTP / SSE 契约（13 文档，TST-05）
+
+| 面 | 覆盖 |
+|---|---|
+| 全部 REST 响应逐一过 schema 校验 | `tests/contract/schemas.js` 接入 `tests/integration/*.test.js` |
+| 契约漂移检测（改名 / 多键 / 枚举越界 / null 语义 / 时间戳形态） | `tests/contract/schemas.test.js` |
+| 202 受理体（accepted + operationId uuid v4） | `tests/contract/schemas.test.js`、`tests/integration/flows.test.js` |
+| SSE snapshot 首帧 / 心跳 / 断开摘除 / debounce 合并 | `tests/api.test.js`、`tests/integration/sse.test.js` |
+| SSE revision 单调 + 帧类型白名单 | `tests/integration/sse.test.js`、`tests/contract/schemas.test.js` |
+| 请求体解析边界（空体 / 非法 JSON / 超限 → VALIDATION） | `tests/api.test.js` |
+| 错误码族与 HTTP 状态映射（VALIDATION/PHASE_CONFLICT/KILL_REFUSED/NOT_FOUND/SETUP_REQUIRED…） | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
+| setup 门禁：未初始化时白名单外全 409 | `tests/integration/setup.test.js`、IT-12（页面侧人工） |
+
+## 6. CLI 与守护（11 §6、02 §9）
+
+| 面 | 覆盖 |
+|---|---|
+| 参数解析 / 命令表 / 用法错误退出码 3 | `tests/cli.test.js` |
+| 终态等待表（含 start/restart 的 ready 需在 starting 之后才算失败） | `tests/cli.test.js`、`tests/integration/cli.test.js`、IT-09、IT-13 |
+| 退出码 0/1/2/3 全覆盖 | `tests/integration/cli.test.js`、IT-13 |
+| `--no-wait` 立即返回 | `tests/integration/cli.test.js`、IT-13 |
+| 主机名前缀匹配（唯一 / 歧义 / 不存在） | `tests/cli.test.js`、`tests/integration/cli.test.js` |
+| `config set hosts.<主机>.workdir`：点路径路由、落盘、空串/`null` 清空、非法值报错 | `tests/cli.test.js`（`buildHostPatchFor` 形态边界）、`tests/integration/cli.test.js`（三分支端到端） |
+| up / status / down / restart / stale pidfile 自愈 | `tests/integration/daemon.test.js` |
+| `POST /api/manager/restart` 裸后台继任 | `tests/integration/daemon.test.js` |
+| launchd plist 快照（KeepAlive / DSHC_MODE / DSHC_HOME 注入） | `tests/integration/daemon.test.js`；真机接管与 kill -9 拉回见 IT-11 |
+| `dshc init` 向导脚本化（默认值 / 重问 / --force 预填 / 取消） | `tests/setup-wizard.test.js` |
+
+## 7. 前端逻辑与边界（10 §7 的 20 条）
+
+| 边界（10 §7 编号） | 覆盖 |
+|---|---|
+| 1 iframe 崩溃不自判 / crashed 后只 reload 一次 | `tests/web/panes.test.js` |
+| 2 localPort 变更整只重建 | `tests/web/panes.test.js` |
+| 3 探测中途提交向导（冻结快照、迟到结果不改） | `tests/web/setup-mount.test.js`、`tests/web/setup-wizard.test.js` |
+| 4 双标签与脏草稿冲突提示 | `tests/web/drawer.test.js`、`tests/web/mount.test.js` |
+| 5 断线期间禁写 | `tests/web/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js` |
+| 6 请求超时但后端继续 | `tests/web/store.test.js`（pending 超时只解 loading） |
+| 7 手动实例禁 stop/restart | `tests/web/utils.test.js`、`tests/web/tabbar.test.js`、`tests/web/actions.test.js` |
+| 8 主机从 ssh config 消失 → orphaned | `tests/store.test.js`（mergeSshHosts）、`tests/web/utils.test.js` |
+| 9 主机名特殊字符（dataset + encodeURIComponent） | `tests/web/router.test.js` |
+| 10 SSE 乱序 / 重复（revision 丢旧） | `tests/web/store.test.js`、`tests/integration/sse.test.js` |
+| 11 连续点击同一危险动作 | `tests/web/actions.test.js` |
+| 12 degraded 已自愈时不再发重连 | `tests/web/actions.test.js` |
+| 13 stop 后当前正显示 iframe | `tests/web/panes.test.js` |
+| 14 配置草稿与运行态分离 | `tests/web/drawer.test.js`、`tests/web/form.test.js` |
+| 启动目录输入：非法值就地报错且不发请求、空串提交 null、只提交改动键 | `tests/web/form.test.js`（`parseWorkdir`/`buildHostPatch`）、`tests/web/mount.test.js` |
+| 「重启后生效」徽标只在运行实例值与已存配置不一致时出现 | `tests/web/drawer.test.js`（`workdirPending`）、`tests/web/mount.test.js` |
+| 实际工作目录展示：有值即显示，不可读显示「—」不编造 | `tests/web/mount.test.js`、`tests/integration/flows.test.js`（后端侧 `web.cwd`） |
+| 15 patch 路径无效 / 同步失败提示 | `tests/web/form.test.js`、`tests/web/actions.test.js`（错误 detail 展开） |
+| 16 事件洪峰 50 条环形缓冲 | `tests/web/store.test.js` |
+| 17 前台模式 manager restart 被拒 | `tests/web/actions.test.js`、`tests/web/mount.test.js`（确认后才发请求）、`tests/integration/setup.test.js`（前台只给 restartRequired） |
+| 18 setup JSON 手工删字段 | `tests/web/setup-wizard.test.js`、`tests/web/setup-mount.test.js` |
+| 19 新端口迁移超时 | `tests/web/setup-mount.test.js`、`tests/web/setup-wizard.test.js` |
+| 20 GET 首屏与 SSE 全量交错 | `tests/web/store.test.js`（mergeFetchedHosts） |
+| 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
+
+`tests/web/*` 喂的是手写 fixture，抓不到「后端改了字段名 / 少一层对象」这类漂移。
+`tests/integration/ui-live.test.js` 把 DOM 垫片接到真 manager（真 HTTP + 真 SSE 分帧，
+只有 ssh 那一层是假的），补上前后端接缝：
+
+| 接缝 | 覆盖 |
+|---|---|
+| 首屏三个 GET 全为同源相对路径（无硬编码端口） | `tests/integration/ui-live.test.js`；静态扫描另见 `tests/architecture.test.js` |
+| 真 probe 结果渲染成徽章 + 真 revision 不落后于 GET | 同上 |
+| 页面点「拉起」→ 真起真隧道 → iframe src 用后端给的 mappedUrl → 「关停」销毁 pane | 同上（UI-28 第 9、12 项的无头部分） |
+| 未初始化时后端门禁把页面按到 `#/setup`，且不越权拉主机清单 | 同上（UI-28 第 1 项的后端侧） |
+| manager 掉线 → 横幅出现、写按钮全禁用 | 同上（UI-28 第 13 项的无头部分） |
+
+垫片判不了真样式表、真焦点环、真跨 origin iframe，这三样由 `npm run ui:smoke`
+（无头 Chrome + CDP，远端仍是假装置）盯住：
+
+| 真浏览器检查 | 覆盖 |
+|---|---|
+| 首屏零控制台错误、零 4xx/5xx（含 favicon 声明可取） | `scripts/ui-smoke.mjs` S1；静态侧回归 `tests/integration/static.test.js` |
+| 徽章「颜色 + 文字 + 形状」三重标识 | S2 |
+| 1024 / 1440 宽不横向溢出（附截图） | S3 |
+| Tab → 主机行 → Enter 开抽屉 → Esc 关且焦点归位 | S4（暴露过「抽屉一开即脏草稿」，回归见 `tests/web/drawer.test.js`） |
+| 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
+| 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
+| 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |
+| `prefers-reduced-motion: reduce` 下动画真为 none | S8 |
+| 掉线横幅 + 禁写 + 不堆 `/api/events` 连接 | S9 |
+
+## 8. 架构约束（ENG-24）
+
+| 约束 | 覆盖 |
+|---|---|
+| `src/` 内部依赖图无环 | `tests/architecture.test.js` |
+| 分层不倒挂（lib 不依赖上层、前端不依赖后端） | 同上 |
+| 前端不碰 node 内置模块 | 同上 |
+| 零 npm 依赖（运行时与测试） | 同上 |
+| `setup-schema.js` 零 import（双侧共用） | 同上 |
+| 覆盖率三档门槛判定逻辑 | 同上（parseLcov / 门槛表），执行入口 `npm run coverage:gate` |
+
+## 8.1 工程化工具链（ENG-24 的交付面）
+
+| 约束 | 覆盖 |
+|---|---|
+| 入口判定认软链（装到 PATH 的 dshc 是软链，判错就静默退 0） | `tests/tooling.test.js`（`isMainEntry` + 真软链跑 `dshc --help`） |
+| 安装脚本不覆盖非本仓库的 dshc、PATH 缺失时当场提示 | 同上（`linkPlan` / `prefixInPath` / `pathHint`） |
+| 闸门关卡选择与摘要、`--only/--skip` 打错字要报错 | 同上（`selectStages` / `summarize`） |
+| 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check --only pack` |
+| Chrome 查找跨平台（显式指定优先，缺了可跳过） | 同上（`findChrome`） |
+
+## 9. 门槛核对结果（最近一次 `npm run coverage:gate`）
+
+| 档位 | 行覆盖 | 门槛 | 结果 |
+|---|---|---|---|
+| `src/lib/**` | 99.20% | ≥ 90% | 达标 |
+| `src/*.js` | 88.63% | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 95.40% | ≥ 80% | 达标 |
+| `src/web/components/**` | 92.19% | 仅报告 | DOM 组件不设卡（最低 `host-drawer.js` 82.24%） |
+
+## 10. 未覆盖行说明
+
+矩阵内没有「未覆盖且非仅真机」的行。五处仅真机 / 仅人工，理由与替身：
+
+| 项 | 原因 | 替身覆盖 |
+|---|---|---|
+| IT-04 两次拉起失败 | 真机无法让 `--port 0` 也绑定失败 | 假远端 `bind-busy-twice` |
+| IT-14 启动目录真机验收（补丁 v0.0.1/01 的 WS-01/WS-10） | 需真远端 + 浏览器内确认 dsh 的 workspace picker 默认根与 AGENTS.md 加载——这是 dsh 自身行为，假远端无从模拟 | 我们这侧的全链（脚本 cd 段、state/HostView 回写、失败分类、UI、CLI）已全自动化；假远端只能证明「cd 到了那里」，证不了「dsh 因此把它当工作区根」 |
+| IT-10 远端禁止转发 | 需改共享节点 sshd 配置并重启服务 | 假远端 `forward-disabled` |
+| IT-12 页面向导 | 需人工点击（UI-28 清单第 1 项） | CLI 侧向导 `tests/setup-wizard.test.js`、挂载测试 `tests/web/setup-mount.test.js`、门禁跳转 `tests/integration/ui-live.test.js` |
+| UI 观感（字号/对比度/留白）与灰度可辨 | 好不好看只能人眼判 | `npm run ui:smoke` 出两个宽度的截图供人过目；结构性判据（文字+形状、不溢出）已自动化 |
