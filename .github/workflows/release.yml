@@ -215,6 +215,10 @@ jobs:
       - name: 建 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # 这个 job 故意不 checkout（只需要上游的 artifact），所以 gh 没法从 .git 推断
+          # 仓库——必须显式告诉它是哪个仓库，否则连 --verify-tag 都会去跑 git 然后报
+          # 「not a git repository」
+          GH_REPO: ${{ github.repository }}
           # tag 带预发布后缀时挂 --prerelease，判定来自守卫（semver 那一份口径）
           PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
@@ -229,4 +233,5 @@ jobs:
       - name: 附件核对
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release view "$GITHUB_REF_NAME" --json isPrerelease,assets

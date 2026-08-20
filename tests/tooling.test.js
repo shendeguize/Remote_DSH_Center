@@ -362,6 +362,41 @@ test('evaluateGuards：预发布不要求打在 release HEAD 上，但仍要求�
   assert.match(asFinal.problems.join(''), /正式版 tag 只许打在 release HEAD 上/);
 });
 
+/**
+ * 回归（先红后绿）：v0.2.0-rc.1 那次发版，build 与 verify 全绿，最后一步
+ * `gh release create` 死在 "fatal: not a git repository" ——release job 故意不
+ * checkout（只要上游 artifact），而 gh 会去 .git 里推断仓库。这种错只在**真推 tag**
+ * 时才暴露，是最贵的暴露位置，所以拿一条用例把它钉住。
+ *
+ * 判据用文本切 job 而不是解析 YAML（零依赖，没有 yaml parser）：按两空格缩进的
+ * job 名切段，段内出现 `gh ` 命令的，必须要么自带 checkout，要么显式给 GH_REPO。
+ */
+test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO', () => {
+  const dir = path.join(ROOT, '.github', 'workflows');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml'));
+  assert.ok(files.length >= 2, `只找到 ${files.length} 个 workflow，判据恐怕在空转`);
+
+  const problems = [];
+  for (const file of files) {
+    const text = fs.readFileSync(path.join(dir, file), 'utf8');
+    const jobsAt = text.indexOf('\njobs:');
+    if (jobsAt === -1) continue;
+
+    // 段头 = 两空格缩进的键（jobs 下的 job 名）
+    const body = text.slice(jobsAt);
+    const heads = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)];
+    for (const [i, head] of heads.entries()) {
+      const from = head.index;
+      const to = i + 1 < heads.length ? heads[i + 1].index : body.length;
+      const chunk = body.slice(from, to);
+      if (!/(^|\s)gh\s+\w/.test(chunk)) continue;
+      if (/actions\/checkout@/.test(chunk) || /GH_REPO:/.test(chunk)) continue;
+      problems.push(`${file} 的 job「${head[1]}」跑了 gh 却既没 checkout 也没给 GH_REPO`);
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
 test('findChrome：显式指定优先，找不到给 null', () => {
   const exists = (p) => ['/usr/bin/chromium', '/custom/chrome'].includes(p);
   assert.equal(findChrome({ env: { DSHC_CHROME: '/custom/chrome' }, exists }), '/custom/chrome');
