@@ -14,8 +14,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 import * as daemon from './daemon.js';
+import * as updater from './updater.js';
 import { FACTORY_DEFAULTS, newFactoryConfig, resolvePaths } from './defaults.js';
 import { isMainEntry } from './lib/entry.js';
+import {
+  RELEASE_REPO, SUMS_FILE, assetUrl, releasesUrl,
+} from './lib/bundle.js';
 import {
   SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, previewJson, setByPath,
 } from './web/setup-schema.js';
@@ -33,6 +37,9 @@ const FLAG_SPEC = {
   verbose: 'boolean',
   n: 'number',
   f: 'boolean',
+  pre: 'boolean',
+  ref: 'string',
+  restart: 'boolean',
 };
 
 export class UsageError extends Error {}
@@ -595,6 +602,84 @@ async function cmdService({ positionals }) {
   return st.loaded ? EXIT.ok : EXIT.failed;
 }
 
+// ── 版本与更新 ───────────────────────────────────────────────────────────
+
+async function cmdVersion({ flags }) {
+  const info = await updater.collectVersionInfo();
+  if (flags.json) {
+    out(JSON.stringify(info, null, 2));
+    return EXIT.ok;
+  }
+  out(`dsh-center ${info.version ?? '（版本号读不出来）'}`);
+  out(`安装通道：${info.channelDetail}`);
+  // 运行时路径是 bundle 安装的自证：指向 <bundle 根>/runtime/bin/node 才算真用上自带运行时
+  out(`Node 运行时：${info.node.version}（${info.node.execPath}）`);
+  out(`安装位置：${info.root}`);
+  return info.channel === 'unknown' ? EXIT.failed : EXIT.ok;
+}
+
+/** 更新完要不要重启：默认只提示——重启会瞬断所有隧道页签，时机该由人挑。 */
+async function offerRestart(flags) {
+  const check = await daemon.aliveCheck();
+  if (!check.alive) return EXIT.ok;
+  if (!flags.restart) {
+    out('manager 还在跑旧代码，改动下次重启才生效：dshc restart');
+    return EXIT.ok;
+  }
+  out('正在重启 manager（隧道会瞬断，页签会自愈重连）…');
+  // 复用 restart 的既有分支（launchd 走 API 自我重启，普通模式停了再起）
+  return cmdRestart({ positionals: [], flags });
+}
+
+async function cmdUpdate({ flags }) {
+  const install = updater.resolveInstall();
+
+  if (install.channel === 'unknown') {
+    errOut(`认不出这是怎么装的，不敢动：${install.reason}`);
+    errOut('重装一次最省事：curl -fsSL https://raw.githubusercontent.com/'
+      + `${RELEASE_REPO}/main/install.sh | bash`);
+    return EXIT.failed;
+  }
+
+  if (install.channel === 'git') {
+    const ref = flags.ref ?? updater.DEFAULT_GIT_REF;
+    const res = await updater.updateGit({ root: install.root, ref });
+    if (!res.ok) {
+      errOut(`更新失败：${res.problem}`);
+      return EXIT.failed;
+    }
+    if (res.action === 'up-to-date') {
+      out(`已是 origin/${ref} 的最新提交（${res.from.slice(0, 8)}，版本 ${res.fromVersion}）。`);
+      return EXIT.ok;
+    }
+    out(`已更新：${res.from.slice(0, 8)} → ${res.to.slice(0, 8)}`);
+    out(`版本：${res.fromVersion} → ${res.toVersion}（跟的是 origin/${ref}）`);
+    return offerRestart(flags);
+  }
+
+  const res = await updater.updateBundle({
+    root: install.root,
+    bundleInfo: install.bundleInfo,
+    releasesUrl: releasesUrl(),
+    assetUrlFor: ({ tag, name }) => assetUrl({ tag, name }),
+    sumsUrlFor: ({ tag }) => assetUrl({ tag, name: SUMS_FILE }),
+    includePrerelease: Boolean(flags.pre),
+    pinned: flags.ref ?? null,
+  });
+
+  if (res.action === 'none') {
+    errOut(`没找到可装的版本：${res.reason}`);
+    return EXIT.failed;
+  }
+  if (res.action === 'up-to-date') {
+    out(`已是最新：v${res.from}${flags.pre ? '（含预发布口径）' : ''}。`);
+    return EXIT.ok;
+  }
+  out(`已更新：v${res.from} → v${res.to}`);
+  out(`上一版留在 ${res.previous}（要回滚就把它换回来）。`);
+  return offerRestart(flags);
+}
+
 // ── 主机操作命令（ENG-22） ──────────────────────────────────────────────
 
 /** 需要 manager 在跑的命令统一入口：拿端口 + 统一错误处理。 */
@@ -1016,6 +1101,8 @@ export const COMMANDS = {
   status: { usage: 'dshc status [--json]', needsServer: false, run: cmdStatus },
   logs: { usage: 'dshc logs [-f] [-n N]', needsServer: false, run: cmdLogs },
   service: { usage: 'dshc service install|uninstall|status', needsServer: false, run: cmdService },
+  version: { usage: 'dshc version [--json]', needsServer: false, run: cmdVersion },
+  update: { usage: 'dshc update [--pre] [--ref <分支|tag>] [--restart]', needsServer: false, run: cmdUpdate },
 
   ls: { usage: 'dshc ls [--json]', needsServer: true, run: cmdLs },
   probe: { usage: 'dshc probe [<host>]', needsServer: true, run: cmdProbe },
@@ -1029,7 +1116,7 @@ export const COMMANDS = {
 
 export function usageText() {
   const lines = ['dshc —— DSH Center 本机入口', '', '生命周期：'];
-  for (const key of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service']) lines.push(`  ${COMMANDS[key].usage}`);
+  for (const key of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service', 'version', 'update']) lines.push(`  ${COMMANDS[key].usage}`);
   lines.push('', '主机操作：');
   for (const key of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log', 'open', 'config']) lines.push(`  ${COMMANDS[key].usage}`);
   lines.push('', '退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误');

@@ -83,10 +83,13 @@ test('终态表覆盖五个受理型操作（11 §6.2）', () => {
 });
 
 test('命令表覆盖 02 §9.2 与 §10 的全部子命令', () => {
-  for (const name of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service']) {
+  for (const name of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service', 'version', 'update']) {
     assert.ok(COMMANDS[name], `缺生命周期命令 ${name}`);
     assert.equal(COMMANDS[name].needsServer, false, `${name} 必须在 manager 未运行时也能用`);
   }
+  // version / update 得出现在用法里，否则装了也没人知道有这两条
+  assert.match(usageText(), /dshc version/);
+  assert.match(usageText(), /dshc update/);
   for (const name of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log']) {
     assert.equal(COMMANDS[name].needsServer, true, `${name} 应先探活 manager`);
   }

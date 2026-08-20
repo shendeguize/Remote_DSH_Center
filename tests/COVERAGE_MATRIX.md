@@ -209,14 +209,35 @@
 | 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check --only pack` |
 | Chrome 查找跨平台（显式指定优先，缺了可跳过） | 同上（`findChrome`） |
 
+## 8.2 版本自证与自更新（补丁集 0.1.0）
+
+失败方式都不响：通道认错会动错目录，快进判据松了会冲掉本地提交，校验和不核
+等于让人装未经核对的二进制。所以逐条钉住：
+
+| 约束 | 覆盖 |
+|---|---|
+| SemVer 解析 + pre-release 优先级四条规则（数值比 / 字典序 / 数字段小于字母段 / 字段少的更小 / 正式版大于预发布） | `tests/lib/semver.test.js`（含规范完整序列一次跑通） |
+| 稳定口径不挑 pre-release，`--pre` 才看得见 | 同上（`pickLatest`）、`tests/updater.test.js`（`chooseTarget` 与 `updateBundle` 双层） |
+| 产物名与 `SHA256SUMS` 格式的逐字形态（改名 = 下载 404，静默） | `tests/lib/bundle.test.js` |
+| 发布仓库单一源：`install.sh` 默认 URL == `RELEASE_REPO` | 同上（跨语言一致性用例） |
+| 安装通道识别：git / bundle / 认不出（含 `BUNDLE_INFO.json` 坏掉） | `tests/updater.test.js`（`resolveInstall`、`collectVersionInfo`） |
+| git 通道**只快进**：脏工作区拒、非后代拒、ref 不存在报清楚、detached HEAD 形态下成立 | 同上（本地一对真仓库演练，PV-5） |
+| bundle 通道：校验和不符 / SUMS 缺项 / HTTP 非 200 一律拒装 | 同上（假 Releases 服务，PV-12） |
+| bundle 通道原子换目录：`.new` 解包 → 改名，旧版留 `.prev`；结构不对时原安装一字节不动 | 同上（`installBundle`，PV-6 / PV-10 的自动化部分） |
+| 架构归一与不支持架构的拦截（拦在下载之前） | `tests/lib/bundle.test.js`、`tests/updater.test.js` |
+| `version` / `update` 在命令表与用法文本里 | `tests/cli.test.js` |
+
+假 Releases 服务（`tests/harness/fake-releases.js`）挂的是**真 tar.gz**（系统 tar 打的
+最小 bundle 骨架），所以下载、校验、解包、换目录四段都是真跑，只有「网那头是谁」是假的。
+
 ## 9. 门槛核对结果（最近一次 `npm run coverage:gate`）
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---|---|---|
-| `src/lib/**` | 99.20% | ≥ 90% | 达标 |
-| `src/*.js` | 88.63% | ≥ 75% | 达标 |
-| `src/web/`（不含 components） | 95.40% | ≥ 80% | 达标 |
-| `src/web/components/**` | 92.19% | 仅报告 | DOM 组件不设卡（最低 `host-drawer.js` 82.24%） |
+| `src/lib/**` | 99.37% | ≥ 90% | 达标（新增 `semver.js` 100%、`bundle.js` 100%） |
+| `src/*.js` | 88.79% | ≥ 75% | 达标（新增 `updater.js` 95.91%；最低仍是 `cli.js` 74.24%） |
+| `src/web/`（不含 components） | 96.20% | ≥ 80% | 达标 |
+| `src/web/components/**` | 93.97% | 仅报告 | DOM 组件不设卡（最低 `iframe-pane.js` 86.28%） |
 
 ## 10. 未覆盖行说明
 
