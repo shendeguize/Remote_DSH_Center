@@ -1,0 +1,59 @@
+/**
+ * 统一错误形状（11 §7.1）。零依赖叶子模块：全库可 import，自身不 import 任何本地模块，
+ * 故不参与依赖环（ENG-24 的防环 lint 对本文件豁免 lib 互不 import 规则）。
+ */
+
+/** 错误码 → 默认 HTTP 状态（11 §7.2）。 */
+export const ERROR_HTTP_STATUS = Object.freeze({
+  VALIDATION: 400,
+  NOT_FOUND: 404,
+  SETUP_REQUIRED: 409,
+  PHASE_CONFLICT: 409,
+  NOT_ALLOWED: 409,
+  PORT_EXHAUSTED: 409,
+  SSH_UNREACHABLE: 502,
+  SSH_TIMEOUT: 504,
+  PROTO_PARSE: 500,
+  LAUNCH_FAILED: 500,
+  KILL_REFUSED: 409,
+  TUNNEL_FORWARD_DISABLED: 500,
+  TUNNEL_PORT_BUSY: 500,
+  STATE_ILLEGAL_TRANSITION: 500,
+  INTERNAL: 500,
+});
+
+export class DshError extends Error {
+  /**
+   * @param {keyof typeof ERROR_HTTP_STATUS | string} code
+   * @param {string} message 一句话摘要（用户可读，单行）
+   * @param {{host?:string|null, detail?:string|null, cause?:Error}} [extra]
+   */
+  constructor(code, message, extra = {}) {
+    super(message, extra.cause ? { cause: extra.cause } : undefined);
+    this.name = 'DshError';
+    this.code = code;
+    this.host = extra.host ?? null;
+    this.detail = extra.detail ?? null;
+  }
+
+  get httpStatus() {
+    return ERROR_HTTP_STATUS[this.code] ?? 500;
+  }
+
+  /** HTTP 响应体形状（13 §1.1）。 */
+  toBody() {
+    const body = { error: this.message, code: this.code };
+    if (this.detail) body.detail = this.detail;
+    return body;
+  }
+}
+
+/** 把任意异常规整为 DshError（api/queue 边界用，11 §7.1）。 */
+export function asDshError(err, fallbackCode = 'INTERNAL') {
+  if (err instanceof DshError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  return new DshError(fallbackCode, message, {
+    cause: err instanceof Error ? err : undefined,
+    detail: err instanceof Error && err.stack ? err.stack : null,
+  });
+}
