@@ -51,9 +51,16 @@
 curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash
 ```
 
-脚本只做引导：检查 `git` 与 `node ≥ 22` → clone 到 `~/.dsh_center/app`（已存在就 `git pull`）
+脚本只做引导：检查 `git` 与 `node ≥ 22` → clone 到 `~/.dsh_center/app`（已存在就更新）
 → 调用仓库里的 `scripts/install.mjs` 把 `dshc` 软链进 `~/.local/bin`。
 **重跑即升级**，不会重复安装。想看它到底干了什么，读 [install.sh](install.sh)，一百行。
+
+装的是 `release` 分支——只有发过版的提交才会到那儿。想跟开发进度或钉死某个版本：
+
+```bash
+curl -fsSL <上面那个 URL> | DSHC_REF=main bash      # 跟主干，尝鲜
+curl -fsSL <上面那个 URL> | DSHC_REF=v0.1.0 bash    # 钉死某个版本
+```
 
 传参给底层安装脚本（经管道时用 `bash -s --`）：
 
@@ -65,7 +72,7 @@ curl -fsSL <上面那个 URL> | bash -s -- --prefix /usr/local/bin # 换软链�
 不想让脚本碰你的机器，手动装等价：
 
 ```bash
-git clone https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
+git clone -b release https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
 cd ~/.dsh_center/app && npm run install:cli
 ```
 
@@ -204,7 +211,8 @@ launchd 专属，Linux 上用不了——自己写 systemd unit 指向 `dshc up 
 要停就显式 `stop`，或让 manager 停（`dshc down` 会先关掉它拉起的隧道）。
 
 **能升级吗？** 重跑一键安装脚本，或直接 `git -C ~/.dsh_center/app pull`——装的是软链，
-代码更新即生效。
+代码更新即生效。默认跟的是 `release` 分支（只有发过版的提交），每版的变化见
+[CHANGELOG.md](CHANGELOG.md)；想回退某个版本 `git -C ~/.dsh_center/app checkout v0.1.0` 即可。
 
 ## 彻底卸载
 
@@ -265,6 +273,10 @@ npm run acceptance:real -- --host <ssh-host> --only IT-06,IT-09 --keep
 CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）在 macOS 与 Ubuntu 上各跑一次
 `npm run check`：Ubuntu 镜像自带 Chrome，那边要求浏览器关必须真跑；macOS runner 缺浏览器时
 该关跳过。找不到 Chrome 又想跑，用 `DSHC_CHROME=<路径>` 指定。
+
+分支、PR、发版、修复与 review 的规矩见 [CONTRIBUTING.md](CONTRIBUTING.md)：`main` 是开发主干
+（只经 PR squash 合入），`release` 是稳定发布指针（发版时从 main 快进），版本变化记在
+[CHANGELOG.md](CHANGELOG.md)。改代码前的硬约束速查见 [AGENTS.md](AGENTS.md)。
 
 代码地图：`src/lib/`（转义/协议模板/ssh 执行器/状态机/校验器，纯函数为主）、
 `src/`（store/ports/prober/launcher/tunnel/monitor/api/server/cli/daemon）、

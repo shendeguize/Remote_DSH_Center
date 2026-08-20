@@ -36,6 +36,8 @@ function makeOriginRepo(dir) {
   execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'pipe' });
   git('add', '-A');
   git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed');
+  // 真仓库有 main 与 release 两条分支，装的默认是 release
+  git('branch', 'release');
   return dir;
 }
 
@@ -69,6 +71,18 @@ function rig(t) {
     },
   };
 }
+
+test('install.sh：不指定 DSHC_REF 时装的是 release 分支', { skip }, (t) => {
+  // 默认渠道是承重的：默认值被改成不存在的分支，所有新装当场失败，
+  // 而开发机上谁都不会注意到（大家都显式指定 ref）。
+  const r = rig(t);
+  const { DSHC_REF: _omitted, ...envWithoutRef } = r.env;
+  const res = runInstall(envWithoutRef, ['--prefix', r.prefix]);
+
+  assert.equal(res.status, 0, res.stderr);
+  const branch = execFileSync('git', ['-C', r.appDir, 'branch', '--contains', 'HEAD', '-a'], { encoding: 'utf8' });
+  assert.match(branch, /release/, `装出来的 checkout 应落在 release 上，实际分支：${branch}`);
+});
 
 test('install.sh：clone → 软链 dshc → 装出来的入口真能跑', { skip }, (t) => {
   const r = rig(t);

@@ -5,7 +5,7 @@
 复跑方式见下方命令）。
 
 - 一条命令跑全：`npm run check`（测试+覆盖率 → 真浏览器 → 打包产物 → CLI 入口）
-- 全量单测与集成：`npm test`（409 项）
+- 全量单测与集成：`npm test`
 - 覆盖率门槛核对：`npm run coverage:gate`
 - 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，10 项）
 - 真机验收：`npm run acceptance:real -- --host <ssh-host>`

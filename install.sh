@@ -6,7 +6,7 @@
 #
 # 这个脚本**只做引导**，不复制任何安装逻辑：
 #   1. 检查 git 与 node ≥ 22（缺了就说清缺哪个、去哪装，不擅自装东西）
-#   2. clone 到 ~/.dsh_center/app；已经在那儿就 git pull（所以重跑 = 升级）
+#   2. clone 到 ~/.dsh_center/app 的 release 分支；已经在那儿就更新（所以重跑 = 升级）
 #   3. 交给仓库里的 scripts/install.mjs 做真正的安装（软链 dshc 进 PATH）
 #
 # 真正的安装规则（软链而非拷贝、PATH 提示、launchd 服务化）只有一份，
@@ -21,13 +21,14 @@
 # 环境变量：
 #   DSHC_APP_DIR   代码落点（默认 ~/.dsh_center/app）
 #   DSHC_REPO_URL  clone 源（默认 GitHub；CI 的端到端测试指向本地 checkout）
-#   DSHC_REF       要检出的分支/标签（默认 main）
+#   DSHC_REF       要检出的分支/标签（默认 release = 最近一个发过版的提交；
+#                  想跟开发进度用 DSHC_REF=main，想钉死某版用 DSHC_REF=v0.1.0）
 
 set -euo pipefail
 
 REPO_URL="${DSHC_REPO_URL:-https://github.com/shendeguize/Remote_DSH_Center.git}"
 APP_DIR="${DSHC_APP_DIR:-${HOME}/.dsh_center/app}"
-REF="${DSHC_REF:-main}"
+REF="${DSHC_REF:-release}"
 MIN_NODE_MAJOR=22
 
 bold() { printf '\033[1m%s\033[0m\n' "$1"; }

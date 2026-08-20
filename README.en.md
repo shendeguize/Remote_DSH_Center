@@ -62,10 +62,18 @@ curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/
 ```
 
 The script only bootstraps: check `git` and `node ≥ 22` → clone into `~/.dsh_center/app`
-(or `git pull` if it is already there) → hand off to the repo's `scripts/install.mjs`,
-which symlinks `dshc` into `~/.local/bin`. **Re-running it is how you upgrade**; it never
+(or update it if already there) → hand off to the repo's `scripts/install.mjs`, which
+symlinks `dshc` into `~/.local/bin`. **Re-running it is how you upgrade**; it never
 installs twice. It is about a hundred lines — read [install.sh](install.sh) if you want to
 know exactly what it touches.
+
+It installs the `release` branch, which only ever holds released commits. To follow the
+development trunk instead, or to pin one version:
+
+```bash
+curl -fsSL <the URL above> | DSHC_REF=main bash      # follow the trunk
+curl -fsSL <the URL above> | DSHC_REF=v0.1.0 bash    # pin a version
+```
 
 Passing flags through a pipe needs `bash -s --`:
 
@@ -77,7 +85,7 @@ curl -fsSL <the URL above> | bash -s -- --prefix /usr/local/bin # different syml
 If you would rather no script touched your machine, this is equivalent:
 
 ```bash
-git clone https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
+git clone -b release https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
 cd ~/.dsh_center/app && npm run install:cli
 ```
 
@@ -240,7 +248,9 @@ tunnels belong to the manager, not the browser. Stop one explicitly, or stop the
 
 **How do I upgrade?** Re-run the one-click installer, or just
 `git -C ~/.dsh_center/app pull` — the install is a symlink, so updated code takes effect
-immediately.
+immediately. It tracks the `release` branch (released commits only); see
+[CHANGELOG.md](CHANGELOG.md) for what changed. To roll back,
+`git -C ~/.dsh_center/app checkout v0.1.0`.
 
 ## Full uninstall
 
@@ -308,6 +318,12 @@ CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `npm run check` o
 macOS and once on Ubuntu. The Ubuntu image ships Chrome, so the browser stage is mandatory
 there; on the macOS runner it is skipped when no browser is present. Use
 `DSHC_CHROME=<path>` to point at a specific binary.
+
+Branching, PRs, releases, fixes and review are all spelled out in
+[CONTRIBUTING.md](CONTRIBUTING.md): `main` is the development trunk (squash-merged PRs
+only), `release` is the stable pointer (fast-forwarded from main at release time), and
+every user-visible change is recorded in [CHANGELOG.md](CHANGELOG.md). The hard
+constraints to know before touching code are in [AGENTS.md](AGENTS.md).
 
 Code map: `src/lib/` (escaping, protocol templates, ssh executor, state machine, validators
 — mostly pure functions), `src/` (store/ports/prober/launcher/tunnel/monitor/api/server/

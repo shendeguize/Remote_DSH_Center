@@ -1,27 +1,12 @@
-# DevolaFlow local workspace (whitelist team-collab subdirs; everything else private)
-# Per feedback_for_v12.1.0.md — narrow whitelist replaces v9.2.3 broad ignore.
-# Team-tracked: .local/memory/specs/ (A-4) + .local/research/ (W-7/W-19 artifacts).
-.local/*
-!.local/.gitignore
-!.local/memory/
-.local/memory/*
-!.local/memory/specs/
-!.local/memory/specs/**
-!.local/research/
-!.local/research/**
-!.local/human/
-.local/human/*
-!.local/human/input/
-!.local/human/input/**
+# 本机工作区：设计语料、任务文档、验收记录、临时 DSHC_HOME 一律不入库
+.local/
 
-# DevolaFlow scaffold entries (tool-local caches; safe to keep)
+# 工具本地缓存
 .codegraph/
 
-# DSH Center：本项目零依赖，只挡住工具、站点产物与验收残留
+# DSH Center：本项目零依赖，只挡住工具与站点产物
 node_modules/
 *.tgz
 .DS_Store
 # GitHub Pages 产物由 Actions 现构建（scripts/build-site.mjs），不入库
 _site/
-# 验收截图与临时 DSHC_HOME（npm run ui:smoke 的产物，已被 .local/* 覆盖，显式写一遍备忘）
-.local/tmp/
