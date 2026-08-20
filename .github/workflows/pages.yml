@@ -45,9 +45,12 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
+      # v4 起默认把点文件排除在产物外，而 _site/.nojekyll 是构建的必产项
+      # （build-site.mjs REQUIRED_OUTPUTS）——不开这个开关就会静默漏掉它
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
+          include-hidden-files: true
 
   deploy:
     needs: build
