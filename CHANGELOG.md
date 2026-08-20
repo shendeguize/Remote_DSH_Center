@@ -33,6 +33,13 @@
   `--service` 也经启动器执行，好让 launchd plist 写上**自带**运行时的路径。
   通道判据与 `dshc update` 共用一份实现，不各写一遍。
 - 打包白名单新增 `scripts/install.mjs`（发布包里要靠它摘链与装服务）。
+- **打 tag 即出双架构产物**：发版流水线改成 build → verify → release 三段。产物必须先在
+  Apple Silicon 与 Intel 两种真机上、用包内自带的 node 跑通 `dshc version` 才配挂到
+  Release 上；verify 不过就不建 Release，不留半个发版。Release 附件是 2 个 tar.gz +
+  `SHA256SUMS`。
+- **发版 tag 支持预发布形态**（`v0.2.0-rc.1`）：守卫对 rc 只要求「出自 main」，不要求
+  打在 `release` HEAD 上——rc 不动稳定指针；Release 自动标 Pre-release，因此
+  `dshc update` 默认更新不到它，`--pre` 才看得见。正式版口径一字未改。
 
 ### 文档
 

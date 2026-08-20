@@ -55,6 +55,10 @@ CI 在 macOS 与 Ubuntu 上各跑一遍同一条命令（Ubuntu 那边浏览器�
 - **版本唯一源 = `package.json` 的 `version`**；tag 形态 `v<version>`。
 - 0.y.z 期间：**MINOR** = 新功能，或任何外部可观察契约变化；**PATCH** = 纯修复 /
   文档 / 内部重构（外部行为不变）。1.0.0 后转标准 SemVer（破坏性 → MAJOR）。
+- **预发布**：`X.Y.Z-rc.N`（如 `0.2.0-rc.1`），拿给人试的版本。语义由
+  `src/lib/semver.js` 定死，构建、更新、守卫共用这一份，不许各写一条正则：
+  预发布**小于**同核心号的正式版（`0.2.0-rc.1 < 0.2.0`），所以 `dshc update`
+  默认看不见它，`--pre` 才看得见。
 - `configVersion`（config.json 迁移用）与软件版本**独立演进**：schema 变了才升，
   升了必须带迁移路径，并在 CHANGELOG 该版本条目里显式标注。
 
@@ -71,15 +75,28 @@ git checkout release && git merge --ff-only origin/main && git push
 # 3. 在 release HEAD 打 tag
 git tag vX.Y.Z && git push origin vX.Y.Z
 
-# 4. 等 .github/workflows/release.yml：三守卫 → 复跑闸门 → 自动建 GitHub Release
+# 4. 等 .github/workflows/release.yml：
+#    build（三守卫 → 复跑闸门 → 组装双架构发布包）
+#    → verify（macos-latest / macos-15-intel 各自解包，用包内自带 node 真跑一遍）
+#    → release（挂 3 个附件建 GitHub Release）
 ```
 
 第 2 步 `--ff-only` 失败 = `release` 出现过独有提交（不该发生），先查清再动，别用
 merge 糊过去。
 
-**守卫**（release.yml，任一红则不出 Release）：tag 名必须等于 `v${package.json
-version}`；CHANGELOG 有对应小节且正文非空；tag 提交必须正是 `release` HEAD 且
-包含于 `main`。
+**发预发布（rc）时只有一处不同：跳过第 2 步**——`release` 分支不动，稳定指针继续
+指着上一个正式版，tag 直接打在 main 的合入提交上。理由是 rc 不该改变「稳定用户
+装到什么」；守卫据此对 rc 豁免「必须在 release HEAD」那一条（其余照旧）。
+Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell 里另猜一次）。
+
+**守卫**（release.yml 的 build 段，任一红则不出 Release）：tag 名必须等于
+`v${package.json version}`；CHANGELOG 有对应小节且正文非空；tag 提交必须包含于
+`main`，**正式版**还必须正是 `release` HEAD。
+
+**verify 段**（不过就不建 Release，不留半个发版）：核对 `SHA256SUMS`、断言 runner
+架构与被验产物一致（镜像哪天悄悄换架构，会变成「同一个包验两遍」看着全绿），
+再用 `env -i` 清空环境、PATH 只留 `/usr/bin:/bin` 跑 `dshc version --json`——
+系统 node 就此不可见，跑通即证明「没装 node 的机器上也能用」。
 
 ## 修复
 

@@ -259,12 +259,17 @@ test('版本号与 CHANGELOG 不许脱节：package.json 的 version 必须有�
   );
 });
 
-test('versionFromTag：认 refs/tags 前缀，形状不对给 null', () => {
+test('versionFromTag：认 refs/tags 前缀与预发布后缀，形状不对给 null', () => {
   assert.equal(versionFromTag('refs/tags/v0.1.0'), '0.1.0');
   assert.equal(versionFromTag('v1.2.30'), '1.2.30');
+  assert.equal(versionFromTag('refs/tags/v0.2.0-rc.1'), '0.2.0-rc.1', '预发布 tag 要认');
   assert.equal(versionFromTag('0.1.0'), null, '少了 v 前缀不算');
   assert.equal(versionFromTag('v0.1'), null, '必须三段');
-  assert.equal(versionFromTag('v0.1.0-rc1'), null, '预发布后缀先一律拦住');
+  assert.equal(versionFromTag('v0.1.0-'), null, '空的预发布后缀不算合法版本号');
+  assert.equal(
+    versionFromTag('v0.1.0+build.5'), null,
+    'build 元数据不参与比较，放过去只会让守卫一莫名其妙地红',
+  );
   assert.equal(versionFromTag(''), null);
 });
 
@@ -315,11 +320,46 @@ test('evaluateGuards：三关各自能红，全过则带出正文', () => {
     '守卫三：release 出现了 main 没有的提交',
   );
   assert.match(evaluateGuards({ ...base, tag: 'v0.1' }).problems.join(''), /不是 v/, 'tag 形状不对');
+  assert.equal(pass.prerelease, false, '正式版不该被当成预发布');
 
   const partial = evaluateGuards({
     tag: 'v0.1.0', pkgVersion: '0.1.0', changelog,
   });
   assert.equal(partial.ok, true, '只给前两关的信息时（本地预检）不该因缺 sha 判红');
+});
+
+test('evaluateGuards：预发布不要求打在 release HEAD 上，但仍要求出自 main', () => {
+  const changelog = '## [0.2.0-rc.1] - 2026-08-21\n\n### 新增\n- 试装\n';
+  const rc = {
+    tag: 'v0.2.0-rc.1',
+    pkgVersion: '0.2.0-rc.1',
+    changelog,
+    tagSha: 'a'.repeat(40),
+    // rc 不动稳定指针：release 分支还指着上一个正式版，这是**正常**状态
+    releaseSha: 'b'.repeat(40),
+    inMain: true,
+  };
+
+  const pass = evaluateGuards(rc);
+  assert.equal(pass.ok, true, pass.problems.join('；'));
+  assert.equal(pass.prerelease, true);
+  assert.equal(pass.version, '0.2.0-rc.1');
+  assert.match(pass.body, /试装/, 'rc 也得有 CHANGELOG 正文');
+
+  assert.match(
+    evaluateGuards({ ...rc, inMain: false }).problems.join(''),
+    /不在 main 上/,
+    'rc 也不许从野分支上凭空长出来',
+  );
+  assert.match(
+    evaluateGuards({ ...rc, pkgVersion: '0.2.0' }).problems.join(''),
+    /package\.json 的 version 是 0\.2\.0/,
+    'rc 的版本号一致性一点不放松：0.2.0 与 0.2.0-rc.1 是两个版本',
+  );
+
+  // 反面：同样的 sha 错位，正式版必须红——别把豁免误伤到正式版上
+  const asFinal = evaluateGuards({ ...rc, tag: 'v0.2.0', pkgVersion: '0.2.0', changelog: '## [0.2.0]\n\n- 正式\n' });
+  assert.match(asFinal.problems.join(''), /正式版 tag 只许打在 release HEAD 上/);
 });
 
 test('findChrome：显式指定优先，找不到给 null', () => {

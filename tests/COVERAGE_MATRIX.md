@@ -247,6 +247,15 @@
 | 已是 git clone 的目录上拒绝 standalone 覆盖（两种安装形态不混） | 同上 |
 | git 通道默认跟 `release` 而不是 `main` | 同上（origin 里 `main` 与 `release` 指不同提交，靠独有文件判定） |
 
+发版守卫的 rc 语义（补丁集 0.1.0 · PR ③）：
+
+| 约束 | 覆盖 |
+|---|---|
+| tag 形状认预发布后缀，但拒 build 元数据与空后缀 | `tests/tooling.test.js`（`versionFromTag`，形状判定借 semver 不另写正则） |
+| rc 豁免「必须打在 release HEAD」，但仍要求出自 main | 同上（`evaluateGuards` rc 用例） |
+| 豁免不许误伤正式版：同样的 sha 错位，正式版必须红 | 同上（同一组输入换成 final tag 的反面用例） |
+| rc 的版本号一致性与 CHANGELOG 要求一点不放松 | 同上（`0.2.0` vs `0.2.0-rc.1` 判红） |
+
 `scripts/build-bundle.mjs` 的纯函数（命名、shim、清单、标记）在用例里，下载与组装那段是
 IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解包后经软链执行
 `dshc version --json`，断言 `node.execPath` 落在包内 `runtime/bin/node`——这条是「自带运行时

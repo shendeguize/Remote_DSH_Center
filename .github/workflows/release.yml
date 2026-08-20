@@ -6,12 +6,24 @@ on:
 
 # 默认只读；建 Release 要写 contents，就在这一处显式给
 permissions:
-  contents: write
+  contents: read
 
+# 三段：build（守卫 + 闸门 + 组装双架构产物）→ verify（两种 mac 上真跑一遍）
+# → release（挂附件建 Release）。
+#
+# 为什么要拆：产物必须在**两种 CPU 架构的真机**上跑过才配挂到 Release 上——
+# 「x64 包在 arm 机上打完就发」这种事，装的人才是第一个发现的。verify 不过就不建
+# Release，不留半个发版。
+#
+# 为什么 build 在 ubuntu：打包只是下载官方 Node 的 darwin tarball 再重新装箱，
+# 不需要 mac；mac runner 贵且慢，留给 verify 用。
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.guard.outputs.version }}
+      prerelease: ${{ steps.guard.outputs.prerelease }}
 
     steps:
       # 守卫三要判「tag 提交是否包含于 main」，得有完整历史
@@ -35,28 +47,48 @@ jobs:
             echo "in_main=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # 三守卫：版本号一致 / CHANGELOG 小节非空 / tag 正在 release HEAD 且包含于 main
+      # 三守卫：版本号一致 / CHANGELOG 小节非空 / tag 出自 main（正式版还要求正在
+      # release HEAD）。顺带把 version 与 prerelease 吐进 step outputs，
+      # 「什么是预发布」的判定只有 semver 那一份，不在 shell 里再猜一次。
       - name: 发版守卫
+        id: guard
         run: |
           node scripts/release-guard.mjs \
             --tag "$GITHUB_REF_NAME" \
             --tag-sha "${{ steps.facts.outputs.tag_sha }}" \
             --release-sha "${{ steps.facts.outputs.release_sha }}" \
             --in-main "${{ steps.facts.outputs.in_main }}" \
-            --body-out "$RUNNER_TEMP/release-body.md"
+            --body-out "$RUNNER_TEMP/release-body.md" \
+            --vars-out "$GITHUB_OUTPUT"
 
       # tag 可能打在错的提交上，这一遍不省
       - name: 统一质量闸门
         run: npm run check -- --require-browser
 
-      - name: 建 GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: 组装双架构发布包
+        run: node scripts/build-bundle.mjs --out dist
+
+      - name: 产物清单
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file "$RUNNER_TEMP/release-body.md" \
-            --verify-tag
+          ls -lh dist/
+          cat dist/SHA256SUMS
+
+      - name: 上传产物给下游 job
+        uses: actions/upload-artifact@v7
+        with:
+          name: bundles
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      # Release 正文来自 CHANGELOG，由守卫截好；release job 不重新 checkout 也能拿到
+      - name: 上传 Release 正文
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-body.md
+          if-no-files-found: error
+          retention-days: 7
 
       - name: 失败时留下浏览器截图
         if: failure()
@@ -68,3 +100,133 @@ jobs:
             .local/tmp/site-check/
           if-no-files-found: ignore
           retention-days: 7
+
+  verify:
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-13（Intel）已于 2025-12 退役，macos-15-intel 是唯一在售的 Intel
+          # 托管镜像（供应至 2027-08）
+          - runner: macos-latest
+            arch: arm64
+            uname: arm64
+          - runner: macos-15-intel
+            arch: x64
+            uname: x86_64
+
+    steps:
+      # 只用来跑下面那段断言脚本；被验的产物一律用它自带的 node 跑
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundles
+          path: dist
+
+      # 镜像的架构要是哪天悄悄变了，下面那些断言会「在 arm 上验 arm 包」两遍，
+      # 看着全绿其实一半没验过——所以先把跑在什么机器上钉死
+      - name: 核对 runner 架构
+        run: |
+          actual="$(uname -m)"
+          if [ "$actual" != "${{ matrix.uname }}" ]; then
+            echo "::error::期望 ${{ matrix.uname }} 的 runner，实际是 $actual——镜像换架构了，矩阵得改"
+            exit 1
+          fi
+          echo "runner 架构 $actual（验 ${{ matrix.arch }} 包）"
+
+      - name: 核对校验和
+        working-directory: dist
+        run: shasum -a 256 -c SHA256SUMS
+
+      - name: 解包
+        run: |
+          tar -xzf "dist/dsh-center-v${{ needs.build.outputs.version }}-darwin-${{ matrix.arch }}.tar.gz"
+          ls -l "dsh-center-v${{ needs.build.outputs.version }}-darwin-${{ matrix.arch }}"
+
+      # 关键断言：装进 PATH 的是**软链**，且执行时用的必须是**包内**那个 node。
+      # `env -i` 把环境清空（PATH 只留 /usr/bin:/bin）——runner 上的系统 node 就此不可见，
+      # 所以这一步能跑通，等于证明了「没装 node 的机器上也能跑」。
+      - name: 经软链 + 自带运行时跑起来
+        run: |
+          bundle="$PWD/dsh-center-v${{ needs.build.outputs.version }}-darwin-${{ matrix.arch }}"
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -sf "$bundle/bin/dshc" "$RUNNER_TEMP/bin/dshc"
+
+          env -i PATH=/usr/bin:/bin HOME="$HOME" "$RUNNER_TEMP/bin/dshc" --help | head -3
+          env -i PATH=/usr/bin:/bin HOME="$HOME" \
+            DSHC_HOME="$RUNNER_TEMP/dshc-home" \
+            "$RUNNER_TEMP/bin/dshc" version --json > "$RUNNER_TEMP/version.json"
+          cat "$RUNNER_TEMP/version.json"
+
+          node -e '
+            const fs = require("node:fs");
+            const info = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const want = { version: process.argv[2], arch: process.argv[3], bundle: process.argv[4] };
+            const problems = [];
+            if (info.version !== want.version) problems.push(`版本 ${info.version} != ${want.version}`);
+            if (info.channel !== "bundle") problems.push(`通道 ${info.channel} != bundle`);
+            if (info.bundle?.arch !== want.arch) problems.push(`架构 ${info.bundle?.arch} != ${want.arch}`);
+            if (!info.node.execPath.startsWith(want.bundle)) {
+              problems.push(`用的不是包内运行时：${info.node.execPath}`);
+            }
+            if (problems.length > 0) {
+              console.error(`::error::冒烟断言未过：${problems.join("；")}`);
+              process.exit(1);
+            }
+            console.log(`✔ v${info.version} ${info.bundle.arch}，运行时 Node ${info.node.version}（包内）`);
+          ' "$RUNNER_TEMP/version.json" \
+            "${{ needs.build.outputs.version }}" "${{ matrix.arch }}" "$bundle"
+
+      # 包里那份 install.mjs 也得能在没有系统 node 的机器上跑起来——它是卸载与
+      # 服务化的唯一入口，漏进白名单的话装完才发现
+      - name: 包内安装器可用（同样不借系统 node）
+        run: |
+          bundle="$PWD/dsh-center-v${{ needs.build.outputs.version }}-darwin-${{ matrix.arch }}"
+          env -i PATH=/usr/bin:/bin HOME="$HOME" \
+            "$bundle/runtime/bin/node" "$bundle/app/scripts/install.mjs" \
+            --prefix "$RUNNER_TEMP/probe-bin"
+          test -L "$RUNNER_TEMP/probe-bin/dshc"
+          test "$(readlink "$RUNNER_TEMP/probe-bin/dshc")" = "$bundle/bin/dshc"
+
+  release:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundles
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
+
+      - name: 建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # tag 带预发布后缀时挂 --prerelease，判定来自守卫（semver 那一份口径）
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          args=(--title "$GITHUB_REF_NAME" --notes-file notes/release-body.md --verify-tag)
+          if [ "$PRERELEASE" = 'true' ]; then
+            args+=(--prerelease)
+            echo "预发布通道：Release 会标 Pre-release，不动 latest 指针"
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
+            dist/*.tar.gz dist/SHA256SUMS
+
+      - name: 附件核对
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$GITHUB_REF_NAME" --json isPrerelease,assets
