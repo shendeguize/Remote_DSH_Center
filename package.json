@@ -11,11 +11,13 @@
     "dshc": "src/cli.js"
   },
   "files": [
-    "src"
+    "src",
+    "scripts/install.mjs"
   ],
   "scripts": {
     "start": "node src/cli.js up --foreground",
     "check": "node scripts/check.mjs",
+    "build:bundle": "node scripts/build-bundle.mjs",
     "test": "node --test \"tests/**/*.test.js\"",
     "coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"tests/**/*.test.js\"",
     "coverage:gate": "node scripts/coverage-gate.mjs",

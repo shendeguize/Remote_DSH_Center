@@ -230,6 +230,28 @@
 假 Releases 服务（`tests/harness/fake-releases.js`）挂的是**真 tar.gz**（系统 tar 打的
 最小 bundle 骨架），所以下载、校验、解包、换目录四段都是真跑，只有「网那头是谁」是假的。
 
+## 8.3 发布包与双通道安装（补丁集 0.1.0 · PR ②）
+
+| 约束 | 覆盖 |
+|---|---|
+| 随包 Node 版本满足 `engines.node`，且只挑 LTS | `tests/tooling.test.js`（`NODE_RUNTIME_VERSION` 与 package.json 对照） |
+| 启动器**自己解软链**（装到 PATH 的是软链，拿 `$0` 算 dirname 会找不到 runtime/app） | 同上（`shimScript` 逐字断言），`tests/install-sh.test.js`（真软链 + 自带 node 跑 `dshc version --json`） |
+| 发布包 `app/` 的内容口径 = 打包白名单，不另立第二份 | 同上（`packFileList` 复用 `verifyPackFiles`：缺文件 / 混入 `tests/` 都拒） |
+| `BUNDLE_INFO.json` 字段齐全（通道识别与 `update` 都读它） | 同上（`makeBundleInfo`） |
+| 软链落点随通道走：git → `src/cli.js`，bundle → 包内 `bin/dshc` | 同上（`linkTarget` 双通道） |
+| `install.sh` 通道自动选择：有 node 走 git，缺 node / 版本过低在 mac 上**降级 standalone** | `tests/install-sh.test.js`（去掉 node 的 stub PATH 里真跑到底） |
+| `--git` 强制时缺 node 就报错（不静默降级），且提示怎么走另一条 | 同上 |
+| standalone 全链：取 Release → 下载 → SHA256 核对 → 解包 → 原子换目录（旧版留 `.prev`） | 同上（假 Releases 服务 + 真 tar.gz + 真 shasum） |
+| 校验和不符时拒装，且不留半个安装 | 同上 |
+| `--pre` 才看得见预发布；`--version <tag>` 钉死 | 同上 |
+| 已是 git clone 的目录上拒绝 standalone 覆盖（两种安装形态不混） | 同上 |
+| git 通道默认跟 `release` 而不是 `main` | 同上（origin 里 `main` 与 `release` 指不同提交，靠独有文件判定） |
+
+`scripts/build-bundle.mjs` 的纯函数（命名、shim、清单、标记）在用例里，下载与组装那段是
+IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解包后经软链执行
+`dshc version --json`，断言 `node.execPath` 落在包内 `runtime/bin/node`——这条是「自带运行时
+真的在用」的唯一硬证据（也是流水线 verify 段的断言，PV-3）。
+
 ## 9. 门槛核对结果（最近一次 `npm run coverage:gate`）
 
 | 档位 | 行覆盖 | 门槛 | 结果 |

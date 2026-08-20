@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 /**
- * 把 dshc 装进 PATH（软链到本仓库，不复制）。
+ * 把 dshc 装进 PATH（软链到本仓库/发布包，不复制）。
  *
- * 用软链而不是拷贝，是因为 launchd plist 里写的是仓库内 `src/cli.js` 的绝对路径
+ * 用软链而不是拷贝，是因为 launchd plist 里写的是入口的绝对路径
  * （见 src/daemon.js buildPlist）——两份代码会立刻对不上。软链意味着
  * `git pull` 即升级，不需要重装。
+ *
+ * 两种安装通道，链接指向不同：
+ *   git 仓库    → `src/cli.js`（shebang 找系统 node）
+ *   发布包      → `<包根>/bin/dshc` 启动器（exec 随包自带的 node）
+ * 发布包必须指启动器而不是 `app/src/cli.js`：装的人可能压根没装 node，
+ * 直接跑 cli.js 会找不到解释器。通道判据与 `dshc update` 共用一份
+ * （`src/updater.js` 的 resolveInstall），不在这里另写一遍。
  *
  * 用法：
  *   node scripts/install.mjs                     # 装到 ~/.local/bin（不存在会建）
@@ -20,10 +27,22 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
+import { resolveInstall } from '../src/updater.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CLI = path.join(REPO, 'src', 'cli.js');
 const DEFAULT_PREFIX = path.join(os.homedir(), '.local', 'bin');
+
+/**
+ * 该把 dshc 软链到哪个文件。
+ * @returns {{target:string, channel:string, viaShim:boolean}}
+ */
+export function linkTarget(repoRoot = REPO, deps = {}) {
+  const install = resolveInstall(repoRoot, deps);
+  if (install.channel === 'bundle') {
+    return { target: path.join(install.root, 'bin', 'dshc'), channel: 'bundle', viaShim: true };
+  }
+  return { target: path.join(repoRoot, 'src', 'cli.js'), channel: install.channel, viaShim: false };
+}
 
 /**
  * 装之前先把链接位置的现状分类，避免把别人的 dshc 覆盖掉。
@@ -74,6 +93,7 @@ async function main() {
   const prefixArg = argv.indexOf('--prefix');
   const prefix = path.resolve(prefixArg === -1 ? DEFAULT_PREFIX : argv[prefixArg + 1]);
   const linkPath = path.join(prefix, 'dshc');
+  const { target: entry, viaShim } = linkTarget();
 
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 22) {
@@ -83,7 +103,7 @@ async function main() {
   }
 
   if (flag('uninstall')) {
-    const plan = linkPlan(linkPath, CLI);
+    const plan = linkPlan(linkPath, entry);
     if (plan.action === 'create') {
       process.stdout.write(`${linkPath} 本来就不存在，无事可做。\n`);
       return;
@@ -99,15 +119,15 @@ async function main() {
     return;
   }
 
-  if (!fs.existsSync(CLI)) {
-    process.stderr.write(`找不到 CLI 入口：${CLI}\n`);
+  if (!fs.existsSync(entry)) {
+    process.stderr.write(`找不到入口：${entry}\n`);
     process.exitCode = 1;
     return;
   }
-  fs.chmodSync(CLI, 0o755);
+  fs.chmodSync(entry, 0o755);
   fs.mkdirSync(prefix, { recursive: true });
 
-  const plan = linkPlan(linkPath, CLI);
+  const plan = linkPlan(linkPath, entry);
   if (plan.action === 'conflict') {
     process.stderr.write(`${linkPath} 已存在且不是软链，请先自行处理再装。\n`);
     process.exitCode = 1;
@@ -117,7 +137,7 @@ async function main() {
     process.stdout.write(`覆盖旧链接（原指向 ${plan.current}）。\n`);
     fs.rmSync(linkPath);
   }
-  if (plan.action !== 'noop') fs.symlinkSync(CLI, linkPath);
+  if (plan.action !== 'noop') fs.symlinkSync(entry, linkPath);
 
   const probe = await run(linkPath, ['--help']);
   if (probe.code !== 0 || !probe.stdout.includes('dshc')) {
@@ -125,7 +145,8 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`dshc → ${CLI}\n已链接到 ${linkPath}\n`);
+  process.stdout.write(`dshc → ${entry}\n已链接到 ${linkPath}\n`);
+  if (viaShim) process.stdout.write('（发布包安装：启动器会用随包自带的 Node，与系统 node 无关）\n');
 
   if (!prefixInPath(prefix)) {
     process.stdout.write(`\n注意：${prefix} 不在 PATH 里，现在敲 dshc 还找不到。加一行：\n  ${pathHint(prefix)}\n`);
@@ -133,7 +154,11 @@ async function main() {
 
   if (flag('service')) {
     process.stdout.write('\n装 launchd 服务（开机自启 + 被杀拉回）…\n');
-    const res = await run(process.execPath, [CLI, 'service', 'install']);
+    // plist 里的解释器路径来自跑这条命令的进程的 process.execPath（daemon.buildPlist）。
+    // 发布包安装必须经启动器跑，否则 plist 会写上系统 node——而那台机器可能根本没有。
+    const res = viaShim
+      ? await run(linkPath, ['service', 'install'])
+      : await run(process.execPath, [entry, 'service', 'install']);
     process.stdout.write(res.stdout || res.stderr);
     if (res.code !== 0) process.exitCode = res.code;
     return;

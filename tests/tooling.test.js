@@ -14,8 +14,13 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
+import { parseVersion } from '../src/lib/semver.js';
 import { PACK_RULES, selectStages, summarize, verifyPackFiles } from '../scripts/check.mjs';
-import { linkPlan, pathHint, prefixInPath } from '../scripts/install.mjs';
+import {
+  NODE_RUNTIME_VERSION, makeBundleInfo, nodeDistUrl, nodeShasumsUrl, nodeTarballName,
+  packFileList, shimScript,
+} from '../scripts/build-bundle.mjs';
+import { linkPlan, linkTarget, pathHint, prefixInPath } from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import { findChrome } from '../scripts/ui-smoke.mjs';
 
@@ -109,6 +114,98 @@ test('pathHint 按 shell 给对 rc 文件', () => {
   assert.match(pathHint('/opt/bin', '/bin/bash'), /\.bash_profile/);
   assert.match(pathHint('/opt/bin', '/usr/bin/fish'), /shell rc/);
   assert.match(pathHint('/opt/bin', '/bin/zsh'), /\/opt\/bin/);
+});
+
+test('linkTarget：git 安装指 cli.js，发布包指启动器', (t) => {
+  const dir = tmpdir(t);
+
+  const repo = path.join(dir, 'clone');
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  assert.deepEqual(linkTarget(repo), {
+    target: path.join(repo, 'src', 'cli.js'), channel: 'git', viaShim: false,
+  });
+
+  // 发布包必须指 bin/dshc：装的人可能压根没装 node，
+  // 直接软链到 app/src/cli.js 的话 shebang 找不到解释器
+  const bundleRoot = path.join(dir, 'app');
+  const app = path.join(bundleRoot, 'app');
+  fs.mkdirSync(app, { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, 'BUNDLE_INFO.json'), '{"version":"0.9.0","arch":"arm64"}');
+  assert.deepEqual(linkTarget(app), {
+    target: path.join(bundleRoot, 'bin', 'dshc'), channel: 'bundle', viaShim: true,
+  });
+});
+
+// ── 发布包构建 ───────────────────────────────────────────────────────────
+
+test('随包 Node 版本满足 engines.node，且是个合法版本号', () => {
+  // 改这个常量等于改所有新装用户的运行时；低于 engines.node 的话装出来当场跑不动
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const min = Number(/(\d+)/.exec(pkg.engines.node)[1]);
+  const parsed = parseVersion(NODE_RUNTIME_VERSION);
+  assert.ok(parsed, `NODE_RUNTIME_VERSION 形状不对：${NODE_RUNTIME_VERSION}`);
+  assert.ok(
+    parsed.major >= min,
+    `随包 Node ${NODE_RUNTIME_VERSION} 低于 engines.node（${pkg.engines.node}）`,
+  );
+  assert.equal(parsed.major % 2, 0, '只挑 LTS：偶数大版本');
+});
+
+test('官方 Node 发行版的名字与地址（拼错了表现是 404）', () => {
+  assert.equal(nodeTarballName({ version: '22.23.2', arch: 'arm64' }), 'node-v22.23.2-darwin-arm64.tar.gz');
+  assert.equal(
+    nodeDistUrl({ version: '22.23.2', arch: 'x64' }),
+    'https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz',
+  );
+  assert.equal(nodeShasumsUrl('22.23.2'), 'https://nodejs.org/dist/v22.23.2/SHASUMS256.txt');
+});
+
+test('启动器脚本：自己解软链、只用自带 node、不碰系统 node', () => {
+  const shim = shimScript();
+  // 装到 PATH 的是软链，$0 是软链自己的路径。不解引用就会把包根算到
+  // ~/.local，然后「装好了但跑不通」——这条断言就是为了别再犯。
+  assert.match(shim, /while \[ -L "\$target" \]/, '必须循环解软链');
+  assert.match(shim, /readlink "\$target"/);
+  assert.match(shim, /exec "\$DIR\/runtime\/bin\/node" "\$DIR\/app\/src\/cli\.js" "\$@"/);
+  assert.equal(shim.includes('#!/bin/sh'), true, '用 sh 而不是 bash：别对壳做多余假设');
+  assert.equal(/exec\s+node\b/.test(shim), false, '绝不能退回系统 node');
+});
+
+test('BUNDLE_INFO.json 带齐通道识别要用的字段', () => {
+  const info = makeBundleInfo({
+    version: '0.2.0-rc.1', arch: 'x64', sourceSha: 'abc', builtAt: '2026-08-21T00:00:00Z',
+  });
+  assert.deepEqual(info, {
+    version: '0.2.0-rc.1',
+    tag: 'v0.2.0-rc.1',
+    platform: 'darwin',
+    arch: 'x64',
+    nodeVersion: NODE_RUNTIME_VERSION,
+    sourceSha: 'abc',
+    builtAt: '2026-08-21T00:00:00Z',
+  });
+});
+
+test('packFileList：app/ 的内容就是打包白名单，混进 tests/ 要报错', () => {
+  const ok = JSON.stringify([{ files: [...PACK_RULES.required, 'src/updater.js'].map((path_) => ({ path: path_ })) }]);
+  assert.deepEqual(packFileList(ok), [...PACK_RULES.required, 'src/updater.js']);
+
+  const leaky = JSON.stringify([{ files: [...PACK_RULES.required, 'tests/api.test.js'].map((p) => ({ path: p })) }]);
+  assert.throws(() => packFileList(leaky), /混入了不该发的/);
+
+  const short = JSON.stringify([{ files: PACK_RULES.required.filter((f) => f !== 'src/cli.js').map((p) => ({ path: p })) }]);
+  assert.throws(() => packFileList(short), /缺文件/);
+
+  assert.throws(() => packFileList('不是 json'), /无法解析/);
+});
+
+test('打包白名单含 scripts/install.mjs：发布包里要靠它摘链/装服务', () => {
+  assert.ok(
+    PACK_RULES.required.includes('scripts/install.mjs'),
+    '安装规则只有一份，发布包必须带上它，否则卸载与 --service 在发布包安装下无从执行',
+  );
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.ok(pkg.files.includes('scripts/install.mjs'), 'package.json 的 files 也要放它进来');
 });
 
 // ── 统一闸门 ─────────────────────────────────────────────────────────────

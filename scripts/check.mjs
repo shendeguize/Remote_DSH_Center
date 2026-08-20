@@ -28,9 +28,21 @@ import { findChrome } from './ui-smoke.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** 打包产物必须包含 / 必须排除的路径（前缀匹配）。 */
+/**
+ * 打包产物必须包含 / 必须排除的路径（前缀匹配）。
+ *
+ * 这张表同时是发布包 app/ 的内容口径（scripts/build-bundle.mjs 直接用 npm pack 的
+ * 清单并过 verifyPackFiles）——两处各写一份白名单迟早对不上，而且「发布包里多了
+ * tests/」这种事没人会注意到。
+ *
+ * `scripts/install.mjs` 必须在内：发布包里还要靠它摘链/重链/装服务（安装规则只有一份）。
+ */
 export const PACK_RULES = Object.freeze({
-  required: ['package.json', 'README.md', 'LICENSE', 'src/cli.js', 'src/server.js', 'src/web/index.html', 'src/web/style.css'],
+  required: [
+    'package.json', 'README.md', 'LICENSE',
+    'src/cli.js', 'src/server.js', 'src/web/index.html', 'src/web/style.css',
+    'scripts/install.mjs',
+  ],
   forbidden: ['tests/', '.local/', 'scripts/real-acceptance', '.github/'],
 });
 

@@ -51,15 +51,28 @@
 curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash
 ```
 
-脚本只做引导：检查 `git` 与 `node ≥ 22` → clone 到 `~/.dsh_center/app`（已存在就更新）
-→ 调用仓库里的 `scripts/install.mjs` 把 `dshc` 软链进 `~/.local/bin`。
-**重跑即升级**，不会重复安装。想看它到底干了什么，读 [install.sh](install.sh)，一百行。
+脚本只做引导，**有没有 Node 都能装**——自动挑通道：
 
-装的是 `release` 分支——只有发过版的提交才会到那儿。想跟开发进度或钉死某个版本：
+| 通道 | 什么时候走 | 装的是什么 |
+|---|---|---|
+| **git** | 本机有 `node ≥ 22`（默认情形） | clone 到 `~/.dsh_center/app` 的 `release` 分支，`dshc` 软链到 `src/cli.js` |
+| **standalone** | 没有 node，或版本过低（**仅 macOS**，自动降级） | 从 Releases 下对应架构的发布包（**自带官方 Node 运行时**），核对 SHA256 后解包；`dshc` 软链到包内启动器 |
+
+两条通道最后都交给 `scripts/install.mjs` 做真正的安装（软链而非拷贝、冲突分类、PATH 提示）。
+**重跑即升级**，不会重复安装。想看它到底干了什么，读 [install.sh](install.sh)。
+
+standalone 通道**不会碰你机器上的 node**：它自带一份官方 Node，只在包内使用。
+Linux 上没有发布包（Linux 用户请自行装 Node ≥ 22 再重跑）。
+
+选通道与选版本：
 
 ```bash
-curl -fsSL <上面那个 URL> | DSHC_REF=main bash      # 跟主干，尝鲜
-curl -fsSL <上面那个 URL> | DSHC_REF=v0.1.0 bash    # 钉死某个版本
+curl -fsSL <上面那个 URL> | bash -s -- --standalone          # 强制发布包通道
+curl -fsSL <上面那个 URL> | bash -s -- --git                 # 强制 git 通道（缺 node 就报错，不降级）
+curl -fsSL <上面那个 URL> | bash -s -- --pre                 # 允许装预发布版本
+curl -fsSL <上面那个 URL> | bash -s -- --version v0.1.0      # 钉死某个 Release（发布包通道）
+curl -fsSL <上面那个 URL> | DSHC_REF=main bash               # git 通道跟主干，尝鲜
+curl -fsSL <上面那个 URL> | DSHC_REF=v0.1.0 bash             # git 通道钉死某个版本
 ```
 
 传参给底层安装脚本（经管道时用 `bash -s --`）：
@@ -75,6 +88,8 @@ curl -fsSL <上面那个 URL> | bash -s -- --prefix /usr/local/bin # 换软链�
 git clone -b release https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
 cd ~/.dsh_center/app && npm run install:cli
 ```
+
+装完想确认装的是什么：`dshc version`（版本、通道、用的哪个 Node、装在哪）。
 
 装完三条命令开工：
 
@@ -172,6 +187,7 @@ dshc config set hosts.gpu-1.workdir '~/projects/foo'   # 空串或 null 清空�
 
 ```
 生命周期：dshc init / up / down / restart / status / logs / service install|uninstall|status
+自身管理：dshc version / update      # version --json；update --pre / --ref <分支|tag> / --restart
 主机操作：dshc ls / probe / start / stop / reconnect / log / open / config
 退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误
 ```
@@ -210,9 +226,21 @@ launchd 专属，Linux 上用不了——自己写 systemd unit 指向 `dshc up 
 **关了浏览器标签，远端进程会停吗？** 不会。远端进程与隧道由 manager 管着，跟浏览器无关。
 要停就显式 `stop`，或让 manager 停（`dshc down` 会先关掉它拉起的隧道）。
 
-**能升级吗？** 重跑一键安装脚本，或直接 `git -C ~/.dsh_center/app pull`——装的是软链，
-代码更新即生效。默认跟的是 `release` 分支（只有发过版的提交），每版的变化见
-[CHANGELOG.md](CHANGELOG.md)；想回退某个版本 `git -C ~/.dsh_center/app checkout v0.1.0` 即可。
+**能升级吗？** `dshc update`——它自己认得出你是怎么装的：
+
+```bash
+dshc update              # 按安装通道更新到最新正式版
+dshc update --pre        # 允许更到预发布版本（rc）
+dshc update --restart    # 更新完顺带重启 manager（默认只提示，不自动断你的隧道）
+```
+
+- **git 安装**：跟 `origin/release`，**只快进**。工作区脏、或目标不是当前提交的后代，
+  都会拒绝并说清原因——不会用 merge 把你的本地改动糊掉。想回退：
+  `git -C ~/.dsh_center/app checkout v0.1.0`。
+- **发布包安装**：从 Releases 取版本，**SHA256 校验通过才落盘**；换目录是「解包到
+  `.new` → 原子改名」，上一版留在 `~/.dsh_center/app.prev`，要回退就把它换回来。
+
+也可以重跑一键安装脚本（等价）。每版的变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 彻底卸载
 

@@ -17,6 +17,22 @@
   「解包到 `.new` → 原子改名」，上一版留在 `<安装目录>.prev` 可手动换回。
   `--pre` 才看得见预发布版本，`--ref <分支|tag>` 点名目标，`--restart` 顺带重启
   manager（默认只提示——重启会瞬断所有隧道页签，时机该由人挑）。
+- **双架构发布包**（`npm run build:bundle`）：mac arm64 与 x64 各一份 tar.gz，
+  **自带官方 Node 运行时**（下载时逐字节核对 nodejs.org 的 SHASUMS256.txt）。
+  包内是 `bin/dshc` 启动器 + `runtime/` + `app/` + `BUNDLE_INFO.json`；`app/` 的内容
+  就是打包白名单（`PACK_RULES`），不另立一份。
+- **`install.sh` 新增 standalone 通道**：没装 node（或版本过低）的 mac 上**自动降级**
+  到发布包安装，一条 curl 即可，全程不碰本机的 node；`--standalone` / `--git` 可强制，
+  `--pre` 允许预发布，`--version <tag>` 钉死某个 Release。下载物 SHA256 校验不过就拒装。
+  Linux 仍要求自带 Node ≥ 22（不发 Linux 包）。
+
+### 变更
+
+- `scripts/install.mjs` 认得出发布包安装：软链指向包内 `bin/dshc` 启动器而非
+  `app/src/cli.js`（装的人可能压根没装 node，直接跑 cli.js 会找不到解释器），
+  `--service` 也经启动器执行，好让 launchd plist 写上**自带**运行时的路径。
+  通道判据与 `dshc update` 共用一份实现，不各写一遍。
+- 打包白名单新增 `scripts/install.mjs`（发布包里要靠它摘链与装服务）。
 
 ### 文档
 

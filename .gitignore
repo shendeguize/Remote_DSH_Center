@@ -10,3 +10,5 @@ node_modules/
 .DS_Store
 # GitHub Pages 产物由 Actions 现构建（scripts/build-site.mjs），不入库
 _site/
+# 发布包由 tag 触发的流水线现构建（scripts/build-bundle.mjs），不入库
+dist/

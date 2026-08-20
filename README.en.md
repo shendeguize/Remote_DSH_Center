@@ -61,18 +61,30 @@ explicitly, rather than pretending to be usable.
 curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash
 ```
 
-The script only bootstraps: check `git` and `node ≥ 22` → clone into `~/.dsh_center/app`
-(or update it if already there) → hand off to the repo's `scripts/install.mjs`, which
-symlinks `dshc` into `~/.local/bin`. **Re-running it is how you upgrade**; it never
-installs twice. It is about a hundred lines — read [install.sh](install.sh) if you want to
-know exactly what it touches.
+The script only bootstraps, and **works whether or not you have Node** — it picks a channel:
 
-It installs the `release` branch, which only ever holds released commits. To follow the
-development trunk instead, or to pin one version:
+| Channel | When | What lands |
+|---|---|---|
+| **git** | You have `node ≥ 22` (the usual case) | Clone of the `release` branch into `~/.dsh_center/app`; `dshc` symlinks to `src/cli.js` |
+| **standalone** | No node, or too old (**macOS only**, automatic fallback) | The matching-architecture release bundle (**ships its own official Node runtime**), SHA256-verified before it is unpacked; `dshc` symlinks to the launcher inside the bundle |
+
+Both channels hand off to `scripts/install.mjs` for the actual install (symlink rather than
+copy, conflict classification, PATH hint). **Re-running it is how you upgrade**; it never
+installs twice. Read [install.sh](install.sh) if you want to know exactly what it touches.
+
+The standalone channel **never touches the node on your machine** — it carries its own
+copy and uses it only inside the bundle. There are no Linux bundles (on Linux, install
+Node ≥ 22 first and re-run).
+
+Choosing a channel and a version:
 
 ```bash
-curl -fsSL <the URL above> | DSHC_REF=main bash      # follow the trunk
-curl -fsSL <the URL above> | DSHC_REF=v0.1.0 bash    # pin a version
+curl -fsSL <the URL above> | bash -s -- --standalone         # force the bundle channel
+curl -fsSL <the URL above> | bash -s -- --git                # force git (errors out if node is missing)
+curl -fsSL <the URL above> | bash -s -- --pre                # allow pre-release versions
+curl -fsSL <the URL above> | bash -s -- --version v0.1.0     # pin a Release (bundle channel)
+curl -fsSL <the URL above> | DSHC_REF=main bash              # git channel, follow the trunk
+curl -fsSL <the URL above> | DSHC_REF=v0.1.0 bash            # git channel, pin a version
 ```
 
 Passing flags through a pipe needs `bash -s --`:
@@ -88,6 +100,8 @@ If you would rather no script touched your machine, this is equivalent:
 git clone -b release https://github.com/shendeguize/Remote_DSH_Center.git ~/.dsh_center/app
 cd ~/.dsh_center/app && npm run install:cli
 ```
+
+To confirm what you ended up with: `dshc version` (version, channel, which Node, where).
 
 Then three commands to get going:
 
@@ -196,6 +210,7 @@ saving never disturbs a running instance (the UI shows a "restart to apply" badg
 
 ```
 Lifecycle: dshc init / up / down / restart / status / logs / service install|uninstall|status
+Itself:    dshc version / update    # version --json; update --pre / --ref <branch|tag> / --restart
 Hosts:     dshc ls / probe / start / stop / reconnect / log / open / config
 Exit codes: 0 success | 1 operation failed | 2 timeout/communication failure | 3 usage error
 ```
@@ -246,11 +261,25 @@ the listener (the UI says so explicitly).
 tunnels belong to the manager, not the browser. Stop one explicitly, or stop the manager
 (`dshc down` closes the tunnels it opened first).
 
-**How do I upgrade?** Re-run the one-click installer, or just
-`git -C ~/.dsh_center/app pull` — the install is a symlink, so updated code takes effect
-immediately. It tracks the `release` branch (released commits only); see
-[CHANGELOG.md](CHANGELOG.md) for what changed. To roll back,
-`git -C ~/.dsh_center/app checkout v0.1.0`.
+**How do I upgrade?** `dshc update` — it recognises how you installed:
+
+```bash
+dshc update              # update to the latest stable release, on your install's channel
+dshc update --pre        # allow pre-release (rc) versions
+dshc update --restart    # also restart the manager (by default it only reminds you,
+                         # since restarting drops every tunnel for a moment)
+```
+
+- **git install**: tracks `origin/release`, **fast-forward only**. A dirty working tree, or a
+  target that is not a descendant of your current commit, is refused with the reason spelled
+  out — it will never merge over your local changes. Roll back with
+  `git -C ~/.dsh_center/app checkout v0.1.0`.
+- **bundle install**: fetches from Releases and **only writes to disk after the SHA256
+  checks out**; the swap is "unpack to `.new`, then atomic rename", and the previous version
+  stays at `~/.dsh_center/app.prev` so you can move it back.
+
+Re-running the one-click installer does the same thing. See [CHANGELOG.md](CHANGELOG.md)
+for what changed in each version.
 
 ## Full uninstall
 
