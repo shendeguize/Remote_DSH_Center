@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新推一次就掐掉旧的跑，别排队
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # 主战场是 macOS（launchd、dshc service 都是 mac 语义），但绝大部分逻辑与平台无关，
+    # 两边都跑一遍能挡住「只在我机器上成立」的假设。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # 零 npm 依赖，没有 lockfile 可缓存，也不需要 npm ci
+
+      - name: 环境自检
+        run: |
+          node --version
+          node -e "const p=require('./package.json'); if (p.dependencies || p.devDependencies) { console.error('本项目不许有 npm 依赖'); process.exit(1); }"
+
+      # Ubuntu 镜像自带 Chrome，那边就要求浏览器关必须真跑；
+      # macOS runner 不一定装浏览器，缺了就让它跳过而不是把 CI 判红。
+      - name: 统一质量闸门（测试 + 覆盖率 + 真浏览器 + 站点文档 + 打包 + CLI）
+        run: npm run check ${{ matrix.os == 'ubuntu-latest' && '-- --require-browser' || '' }}
+
+      - name: 失败时留下浏览器截图
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-shots-${{ matrix.os }}
+          path: |
+            .local/tmp/ui-smoke/
+            .local/tmp/site-check/
+          if-no-files-found: ignore
+          retention-days: 7

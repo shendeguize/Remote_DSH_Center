@@ -1,0 +1,61 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    # 只有影响站点产物的改动才重新部署（README 改字不必惊动 Pages）
+    paths:
+      - 'site/**'
+      - 'src/web/**'
+      - 'src/lib/machine.js'
+      - 'src/lib/errors.js'
+      - 'scripts/build-site.mjs'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Pages 部署的最小权限组合（官方 deploy-pages 的要求）
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只允许一个部署在跑；排队的直接让位给最新的
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 纯 Node 拷贝拼装，没有打包器也没有依赖要装
+      - name: 构建站点
+        run: npm run site:build
+
+      # 站点坏了不该等部署完才发现：这一步只跑不需要浏览器的两小关
+      - name: 站点自检（构建产物 + 双语文档链接）
+        run: node scripts/site-check.mjs --only build,docs
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
