@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { isMainEntry } from '../src/lib/entry.js';
 import { PACK_RULES, selectStages, summarize, verifyPackFiles } from '../scripts/check.mjs';
 import { linkPlan, pathHint, prefixInPath } from '../scripts/install.mjs';
+import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import { findChrome } from '../scripts/ui-smoke.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -146,6 +147,82 @@ test('summarize 三种状态各有记号', () => {
   assert.match(text, /· 乙.*没装 Chrome/);
   assert.match(text, /✘ 丙.*炸了/);
   assert.match(text, /1\.2s/);
+});
+
+// ── 版本管控 ─────────────────────────────────────────────────────────────
+
+test('版本号与 CHANGELOG 不许脱节：package.json 的 version 必须有对应小节', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const changelog = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const body = extractChangelogSection(changelog, pkg.version);
+  assert.notEqual(
+    body,
+    '',
+    `CHANGELOG.md 里没有 v${pkg.version} 的小节（或正文为空）：bump 版本号时必须同步搬运 Unreleased`,
+  );
+});
+
+test('versionFromTag：认 refs/tags 前缀，形状不对给 null', () => {
+  assert.equal(versionFromTag('refs/tags/v0.1.0'), '0.1.0');
+  assert.equal(versionFromTag('v1.2.30'), '1.2.30');
+  assert.equal(versionFromTag('0.1.0'), null, '少了 v 前缀不算');
+  assert.equal(versionFromTag('v0.1'), null, '必须三段');
+  assert.equal(versionFromTag('v0.1.0-rc1'), null, '预发布后缀先一律拦住');
+  assert.equal(versionFromTag(''), null);
+});
+
+test('extractChangelogSection：截到下一个标题或链接引用区为止', () => {
+  const text = [
+    '# 变更记录', '',
+    '## [Unreleased]', '', '- 攒着的东西', '',
+    '## [0.2.0] - 2026-09-01', '', '### 新增', '- 甲', '',
+    '## [0.1.0] - 2026-08-21', '', '### 新增', '- 乙', '',
+    '[0.1.0]: https://example.com/tag/v0.1.0', '',
+  ].join('\n');
+
+  assert.equal(extractChangelogSection(text, '0.2.0'), '### 新增\n- 甲');
+  assert.equal(extractChangelogSection(text, '0.1.0'), '### 新增\n- 乙', '链接引用区不算正文');
+  assert.equal(extractChangelogSection(text, '9.9.9'), '', '没这个版本给空串');
+  assert.equal(extractChangelogSection('## [0.3.0] - 今天\n\n', '0.3.0'), '', '只有标题没正文也算不合格');
+});
+
+test('evaluateGuards：三关各自能红，全过则带出正文', () => {
+  const changelog = '## [0.1.0] - 2026-08-21\n\n### 新增\n- 初版\n';
+  const base = {
+    tag: 'v0.1.0', pkgVersion: '0.1.0', changelog, tagSha: 'a'.repeat(40), releaseSha: 'a'.repeat(40), inMain: true,
+  };
+
+  const pass = evaluateGuards(base);
+  assert.equal(pass.ok, true, pass.problems.join('；'));
+  assert.equal(pass.version, '0.1.0');
+  assert.match(pass.body, /初版/);
+
+  assert.match(
+    evaluateGuards({ ...base, pkgVersion: '0.2.0' }).problems.join(''),
+    /package\.json 的 version 是 0\.2\.0/,
+    '守卫一：tag 与包版本对不上',
+  );
+  assert.match(
+    evaluateGuards({ ...base, changelog: '## [0.9.0]\n\n- 别的版本\n' }).problems.join(''),
+    /没有 v0\.1\.0 的小节/,
+    '守卫二：CHANGELOG 缺小节',
+  );
+  assert.match(
+    evaluateGuards({ ...base, releaseSha: 'b'.repeat(40) }).problems.join(''),
+    /release 分支 HEAD 是/,
+    '守卫三：tag 没打在 release HEAD 上',
+  );
+  assert.match(
+    evaluateGuards({ ...base, inMain: false }).problems.join(''),
+    /不在 main 上/,
+    '守卫三：release 出现了 main 没有的提交',
+  );
+  assert.match(evaluateGuards({ ...base, tag: 'v0.1' }).problems.join(''), /不是 v/, 'tag 形状不对');
+
+  const partial = evaluateGuards({
+    tag: 'v0.1.0', pkgVersion: '0.1.0', changelog,
+  });
+  assert.equal(partial.ok, true, '只给前两关的信息时（本地预检）不该因缺 sha 判红');
 });
 
 test('findChrome：显式指定优先，找不到给 null', () => {
