@@ -12,10 +12,14 @@
 - `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
   即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
 
-## [0.2.0-rc.1] - 2026-08-21
+## [0.2.0-rc.2] - 2026-08-21
 
 **预发布**，拿给人试装的版本：把「构建产物 / 一键安装 / 更新 / tag 自动构建」四件缺失
 能力补齐。稳定用户 `dshc update` 更新不到它（`--pre` 才看得见）。
+
+内容与未能出炉的 `v0.2.0-rc.1` 相同，外加一处发版流水线自身的修复：`rc.1` 的构建与
+双架构验证全绿，最后一步建 Release 时 `gh` 因所在 job 没有 `.git` 而认不出仓库，
+于是那个 tag 没有对应的 Release（仓库里能看到这个空 tag，属预期）。
 
 ### 新增
 
@@ -106,6 +110,6 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.1...HEAD
-[0.2.0-rc.1]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.1
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.2...HEAD
+[0.2.0-rc.2]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.2
 [0.1.0]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.1.0
