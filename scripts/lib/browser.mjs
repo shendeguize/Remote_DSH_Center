@@ -175,7 +175,15 @@ export async function launchChrome({ headful = false, noSandbox = null } = {}) {
     devtoolsBase: `http://${new URL(wsUrl).host}`,
     kill() {
       proc.kill('SIGKILL');
-      fs.rmSync(profile, { recursive: true, force: true });
+      // SIGKILL 是异步的：Chrome 还在往 profile 里写盘，递归删除会撞 ENOTEMPTY
+      // （macOS runner 上真的会），maxRetries 专治这个。
+      try {
+        fs.rmSync(profile, {
+          recursive: true, force: true, maxRetries: 10, retryDelay: 100,
+        });
+      } catch {
+        // 一个临时目录没删净，绝不该把通过的冒烟判红——交给系统清理
+      }
     },
   };
 }
