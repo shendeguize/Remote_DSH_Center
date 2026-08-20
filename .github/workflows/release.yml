@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# 默认只读；建 Release 要写 contents，就在这一处显式给
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # 守卫三要判「tag 提交是否包含于 main」，得有完整历史
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 采集分支事实
+        id: facts
+        run: |
+          git fetch --quiet origin main release
+          echo "tag_sha=$(git rev-parse "$GITHUB_REF")" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(git rev-parse origin/release)" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$GITHUB_REF" origin/main; then
+            echo "in_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 三守卫：版本号一致 / CHANGELOG 小节非空 / tag 正在 release HEAD 且包含于 main
+      - name: 发版守卫
+        run: |
+          node scripts/release-guard.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --tag-sha "${{ steps.facts.outputs.tag_sha }}" \
+            --release-sha "${{ steps.facts.outputs.release_sha }}" \
+            --in-main "${{ steps.facts.outputs.in_main }}" \
+            --body-out "$RUNNER_TEMP/release-body.md"
+
+      # tag 可能打在错的提交上，这一遍不省
+      - name: 统一质量闸门
+        run: npm run check -- --require-browser
+
+      - name: 建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-body.md" \
+            --verify-tag
+
+      - name: 失败时留下浏览器截图
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-browser-shots
+          path: |
+            .local/tmp/ui-smoke/
+            .local/tmp/site-check/
+          if-no-files-found: ignore
+          retention-days: 7

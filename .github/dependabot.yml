@@ -1,0 +1,13 @@
+version: 2
+
+# npm 生态没什么可看的（本项目零依赖，连 lockfile 都没有），
+# 但 CI 里的 actions/* 版本值得盯——它们跑在有写权的上下文里。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'ci'
+    labels: []
+    open-pull-requests-limit: 3
