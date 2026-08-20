@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH Center —— 把散在各台远端的 dsh web 收进一个页面</title>
+<meta name="description" content="本机一个小服务 + 一个 CLI：经 ssh -L 隧道把远端 dsh web 映射到本机，用 iframe 标签页单入口打开，拉起/关停/重连/日志都在一处。零 npm 依赖、远端零常驻。">
+<link rel="icon" href="./demo/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./landing.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="./">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span>DSH Center</span>
+  </a>
+  <nav class="topnav">
+    <a href="#how">工作原理</a>
+    <a href="#flow">操作流程</a>
+    <a href="#install">安装</a>
+    <a href="https://github.com/shendeguize/Remote_DSH_Center">GitHub</a>
+    <a href="https://github.com/shendeguize/Remote_DSH_Center/blob/main/README.en.md">English</a>
+  </nav>
+</header>
+
+<!-- ① Hero -->
+<section class="hero">
+  <div class="hero-text">
+    <h1>N 台远端各开一个 <code>dsh web</code>，<br>收进本机一个页面。</h1>
+    <p class="lede">
+      本机跑一个小服务 + 一个 CLI：经 <code>ssh -L</code> 把远端的 <code>dsh web</code>
+      映射到本机环回地址，管理台用 iframe 标签页单入口打开各主机，
+      拉起、关停、重连、看日志都在同一处。
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="./demo/">进入在线 demo</a>
+      <a class="btn" href="#install">一键安装</a>
+    </div>
+    <ul class="badges">
+      <li><a href="https://github.com/shendeguize/Remote_DSH_Center/actions/workflows/ci.yml"><img alt="CI 状态" src="https://github.com/shendeguize/Remote_DSH_Center/actions/workflows/ci.yml/badge.svg"></a></li>
+      <li><a href="https://github.com/shendeguize/Remote_DSH_Center/actions/workflows/pages.yml"><img alt="Pages 部署状态" src="https://github.com/shendeguize/Remote_DSH_Center/actions/workflows/pages.yml/badge.svg"></a></li>
+      <li><span class="chip">Node ≥ 22</span></li>
+      <li><span class="chip">零 npm 依赖</span></li>
+      <li><span class="chip">MIT</span></li>
+    </ul>
+    <p class="hero-hint">
+      demo 跑的是<strong>产品前端本体</strong>，只把后端换成了浏览器里的模拟实现——
+      按钮都真能点，还能自己注入断联与崩溃。
+    </p>
+  </div>
+  <figure class="hero-shot">
+    <a href="./demo/">
+      <img src="./assets/shots/dashboard.png" alt="DSH Center 管理台：主机表格显示四台远端主机的状态、端口映射与操作按钮" width="1440" height="900" loading="eager">
+    </a>
+    <figcaption>管理台：一行一台远端主机（截图由无头浏览器自动生成，不会过时）</figcaption>
+  </figure>
+</section>
+
+<!-- ② 30 秒了解 -->
+<section class="section" id="how">
+  <h2>30 秒了解</h2>
+  <div class="cards">
+    <article class="card">
+      <h3>远端零常驻、零安装</h3>
+      <p>
+        没有 agent、没有常驻进程。探测、拉起、关停全靠单条一次性 <code>ssh</code> 命令完成，
+        远端只留 <code>~/.dsh_center_remote/</code> 下的日志与可选 patch 文件。
+      </p>
+      <img src="./assets/shots/drawer.png" alt="主机详情抽屉：注入配置、远端日志与探测详情" loading="lazy">
+    </article>
+    <article class="card">
+      <h3>单入口标签页</h3>
+      <p>
+        每台在跑的主机自动占一个标签，内容是真实的远端 dsh web（iframe 嵌入，实测无
+        X-Frame-Options 限制）。切标签只改显隐，不重载——页面内的会话状态不丢。
+      </p>
+      <img src="./assets/shots/iframe.png" alt="标签页里嵌入的远端 dsh web 页面" loading="lazy">
+    </article>
+    <article class="card">
+      <h3>断联自愈，且不误杀</h3>
+      <p>
+        隧道断了按 1/2/4/8/16/30s 退避重连，恢复即回 running。关停远端进程前逐字比对
+        <code>ps</code> 命令行指纹，对不上就拒杀——别人手动起的实例只读不写。
+      </p>
+      <img src="./assets/shots/degraded.png" alt="隧道断开时 iframe 上覆盖的重连遮罩" loading="lazy">
+    </article>
+  </div>
+</section>
+
+<!-- ③ 操作流程样例 -->
+<section class="section alt" id="flow">
+  <h2>操作流程样例</h2>
+  <p class="section-lede">
+    下面五步就是 demo 里「自动演播」走的流程。每步都可以点进 demo 自己试。
+  </p>
+  <ol class="steps">
+    <li>
+      <h3>全量探测</h3>
+      <p>逐台确认 ssh 能否连上、dsh 装没装、web profile 配没配。结果分三类：
+        <em>可拉起</em> / <em>未安装或未配置</em> / <em>SSH 不可达</em>。</p>
+      <a class="try" href="./demo/#/">在 demo 里试试 →</a>
+    </li>
+    <li>
+      <h3>拉起远端 dsh web</h3>
+      <p>远端 <code>nohup</code> 起进程拿到 PID，本机从端口区间里分一个空闲端口，
+        <code>ssh -L</code> 建隧道。状态走 <em>启动中 → 运行中</em>，标签页随之出现。</p>
+      <a class="try" href="./demo/#/">在 demo 里试试 →</a>
+    </li>
+    <li>
+      <h3>切进标签页干活</h3>
+      <p>iframe 里就是远端 dsh web 本体：页面、插件静态资源、WebSocket、RPC 全走隧道。</p>
+      <a class="try" href="./demo/#/host/gpu-a100">打开 gpu-a100 标签 →</a>
+    </li>
+    <li>
+      <h3>隧道断了自己回来</h3>
+      <p>状态转 <em>隧道重连中</em>，iframe 盖上遮罩但内容留着；退避重连成功即恢复，
+        不重载页面（dsh web 自己的 WebSocket 会自愈）。</p>
+      <a class="try" href="./demo/#/host/gpu-a100">注入一次断联 →</a>
+    </li>
+    <li>
+      <h3>进程崩了人工重启</h3>
+      <p>记录的 PID 消失且不是我们关停的 → <em>进程异常退出</em>。重启后新进程起来，
+        iframe 重载一次（旧会话已失效）。</p>
+      <a class="try" href="./demo/#/">重启一台 →</a>
+    </li>
+  </ol>
+  <p class="section-lede">
+    还想看第一次使用的样子？<a href="./demo/?setup">走一遍四步首启引导 →</a>
+  </p>
+</section>
+
+<!-- ④ 一键安装 -->
+<section class="section" id="install">
+  <h2>一键安装</h2>
+  <div class="install-grid">
+    <div>
+      <div class="cmd">
+        <code id="installCmd">curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash</code>
+        <button class="btn btn-copy" type="button" data-copy="#installCmd">复制</button>
+      </div>
+      <p class="cmd-note">
+        脚本只做引导：检查 <code>git</code> 与 <code>node ≥ 22</code> →
+        clone 到 <code>~/.dsh_center/app</code>（已存在就 <code>git pull</code>）→
+        把 <code>dshc</code> 软链进 <code>~/.local/bin</code>。装完照它提示走：
+      </p>
+      <pre class="block"><code>dshc init      # 四步向导：本机端口、远端约定端口、纳管哪些主机
+dshc up        # 后台起 manager
+dshc open      # 浏览器打开管理台</code></pre>
+      <p class="cmd-note">
+        软链而非拷贝，所以 <code>git -C ~/.dsh_center/app pull</code> 就是升级。
+        不想让脚本碰你的机器？clone 下来跑 <code>npm run install:cli</code> 是等价的。
+      </p>
+    </div>
+    <aside class="prereq">
+      <h3>前提</h3>
+      <ul>
+        <li><strong>本机</strong>：macOS（主战场，<code>launchd</code> 自启只在 mac 上有）
+          或 Linux；Node ≥ 22。</li>
+        <li><strong>远端</strong>：已装
+          <a href="https://github.com/deepseek-ai">DeepSeek Harness</a>（<code>dsh</code>）
+          且配好 web profile；本工具 v1 只探测，不负责安装。</li>
+        <li><strong>连通性</strong>：主机来自 <code>~/.ssh/config</code>，免密可登，
+          且远端未禁用 <code>AllowTcpForwarding</code>。</li>
+        <li><strong>安全边界</strong>：manager 只绑 <code>127.0.0.1</code>、无鉴权，
+          按内网单人桌面工具设计。</li>
+      </ul>
+      <a class="btn" href="https://github.com/shendeguize/Remote_DSH_Center#readme">读完整 README</a>
+    </aside>
+  </div>
+</section>
+
+<footer class="footer">
+  <p>
+    <a href="https://github.com/shendeguize/Remote_DSH_Center">源码</a> ·
+    <a href="https://github.com/shendeguize/Remote_DSH_Center#readme">README（中文）</a> ·
+    <a href="https://github.com/shendeguize/Remote_DSH_Center/blob/main/README.en.md">README (English)</a> ·
+    <a href="https://github.com/shendeguize/Remote_DSH_Center/blob/main/LICENSE">MIT License</a> ·
+    <a href="./demo/">在线 demo</a>
+  </p>
+  <p class="fine">
+    dsh / DeepSeek Harness 是其各自所有者的作品，本项目只是它的远端管理外壳。
+  </p>
+</footer>
+
+<script type="module" src="./landing.js"></script>
+</body>
+</html>

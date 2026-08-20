@@ -1,0 +1,442 @@
+/**
+ * 在线 demo 的假 manager 契约一致性（PG-14）。
+ *
+ * demo 之所以可信，靠的不是「看起来像」，而是两条硬约束：
+ *   1. 它说的话过 13_api_schema.md 的校验器（就是集成测试用的那一份，
+ *      extra=false，多一个键都算失败）——所以 demo 不会展示产品给不出的字段；
+ *   2. 它的状态迁移由**产品真身** src/lib/machine.js 裁决——所以 demo 里演得通的
+ *      路径在真机上也走得通，非法迁移会当场抛 STATE_ILLEGAL_TRANSITION。
+ *
+ * 契约上唯一的有意偏离：`mappedUrl` 在 demo 里指向站内的 mock 页而不是
+ * `http://127.0.0.1:<port>/`——iframe 得真能加载出东西。下面为它单独立了一条用例，
+ * 其余字段一律按原契约校验（校验前把 mappedUrl 归一成真实形态）。
+ */
+
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import * as machine from '../src/lib/machine.js';
+import { PHASES } from '../src/lib/machine.js';
+import { createFakeManager, FakeApiError } from '../site/demo/demo-manager.js';
+import { DEGRADED_ROUTES, ROUTE_IDS, dispatch, matchRoute } from '../site/demo/demo-routes.js';
+import {
+  accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
+  managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
+} from './contract/schemas.js';
+
+/** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
+function grab(fn) {
+  try {
+    fn();
+  } catch (err) {
+    return err;
+  }
+  return assert.fail('本该抛错，却正常返回了');
+}
+
+/** 演示节奏压到 1ms：状态该怎么迁还怎么迁，只是不用真等 2 秒。 */
+const FAST = Object.freeze({
+  probeMs: 1,
+  probeScale: 0,
+  startingMs: 1,
+  stopMs: 1,
+  restartGapMs: 1,
+  reconnectMs: 1,
+  reconnectBackoffMs: Object.freeze([1, 1, 1]),
+  reconnectSuccessAt: 3,
+  autoStartDelayMs: 1,
+});
+
+/**
+ * 收集所有 SSE 帧的 manager。定时器用真 setTimeout（1ms），
+ * 需要等异步动作落地时 await tick()。
+ */
+function rig({ setupCompleted = true } = {}) {
+  const frames = [];
+  const manager = createFakeManager({ machine, timing: FAST, setupCompleted });
+  const unsubscribe = manager.subscribe((type, data) => frames.push({ type, data }));
+  return {
+    manager,
+    frames,
+    unsubscribe,
+    /** 让在飞的 1ms 定时器都跑完（链式动作最多三跳，多等几轮） */
+    async settle(rounds = 8) {
+      for (let i = 0; i < rounds; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 就是要一轮一轮放行定时器
+        await new Promise((r) => { setTimeout(r, 3); });
+      }
+    },
+  };
+}
+
+/** demo 的 mappedUrl 指向站内 mock 页；归一成契约形态后再过 HostView 校验。 */
+function normalize(host) {
+  if (host.mappedUrl === null) return host;
+  return { ...host, mappedUrl: `http://127.0.0.1:${host.tunnel.localPort}/` };
+}
+
+const req = (manager, method, pathname, { body, query } = {}) => dispatch(manager, {
+  method, pathname, body, query: new URLSearchParams(query ?? ''),
+});
+
+// ── 端点覆盖 ─────────────────────────────────────────────────────────────
+
+test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
+  // 14 个真实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 14, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
+
+  const cases = [
+    ['GET', '/api/manager/info', 'manager-info'],
+    ['GET', '/api/hosts', 'hosts'],
+    ['GET', '/api/config', 'config'],
+    ['PUT', '/api/config/defaults', 'defaults-put'],
+    ['POST', '/api/reload', 'reload'],
+    ['POST', '/api/setup', 'setup'],
+    ['POST', '/api/hosts/probe', 'probe-all'],
+    ['POST', '/api/hosts/gpu-a100/probe', 'probe'],
+    ['POST', '/api/hosts/gpu-a100/start', 'start'],
+    ['POST', '/api/hosts/gpu-a100/stop', 'stop'],
+    ['POST', '/api/hosts/gpu-a100/restart', 'restart'],
+    ['POST', '/api/hosts/gpu-a100/reconnect', 'reconnect'],
+    ['GET', '/api/hosts/gpu-a100/log', 'log'],
+    ['PUT', '/api/hosts/gpu-a100/config', 'host-config-put'],
+    ['POST', '/api/manager/restart', 'manager-restart'],
+    ['POST', '/api/manager/shutdown', 'manager-shutdown'],
+  ];
+  for (const [method, pathname, route] of cases) {
+    assert.equal(matchRoute(method, pathname)?.route, route, `${method} ${pathname} 没匹配到 ${route}`);
+  }
+  assert.deepEqual([...ROUTE_IDS].sort(), cases.map((c) => c[2]).sort(), '路由表与用例表不同步');
+
+  // 方法不对不该误命中（真后端也是 404/405，不是「凑合执行」）
+  assert.equal(matchRoute('GET', '/api/hosts/gpu-a100/start'), null);
+  assert.equal(matchRoute('POST', '/api/nope'), null);
+});
+
+// ── 读端点：逐个过契约 ────────────────────────────────────────────────────
+
+test('GET /api/manager/info、/api/hosts、/api/config 全过契约校验', () => {
+  const { manager } = rig();
+
+  const info = req(manager, 'GET', '/api/manager/info');
+  assert.equal(info.status, 200);
+  assertShape(managerInfo, info.json, 'GET /api/manager/info');
+
+  const hosts = req(manager, 'GET', '/api/hosts');
+  assert.equal(hosts.status, 200);
+  assertShape(hostsList, { ...hosts.json, hosts: hosts.json.hosts.map(normalize) }, 'GET /api/hosts');
+  assert.equal(hosts.json.hosts.length, 4, 'demo 应有四台假主机');
+  assert.deepEqual(
+    hosts.json.hosts.map((h) => h.name),
+    ['cpu-build', 'gpu-4090-daily', 'gpu-a100', 'legacy-box'],
+    '主机列表必须按 name 升序（13 §2.1）',
+  );
+
+  const config = req(manager, 'GET', '/api/config');
+  assert.equal(config.status, 200);
+  assertShape(configBody, config.json, 'GET /api/config');
+});
+
+test('GET /api/hosts/:name/log 回裸文本；lines 越界按 VALIDATION 拒掉', () => {
+  const { manager } = rig();
+  const log = req(manager, 'GET', '/api/hosts/gpu-a100/log', { query: 'lines=20' });
+  assert.equal(log.status, 200);
+  assert.equal(typeof log.text, 'string');
+  assert.match(log.text, /gpu-a100/);
+
+  // 没有受管实例时按协议兜底给 (no log)，而不是报错
+  assert.equal(req(manager, 'GET', '/api/hosts/legacy-box/log').text, '(no log)');
+
+  const err = grab(() => req(manager, 'GET', '/api/hosts/gpu-a100/log', { query: 'lines=0' }));
+  assert.equal(err.status, 400);
+  assert.equal(err.code, 'VALIDATION');
+});
+
+// ── 长动作：202 + 状态迁移 + operation-done ───────────────────────────────
+
+test('拉起：202 受理 → starting → running，且恰好一条 operation-done', async () => {
+  const r = rig();
+  const res = req(r.manager, 'POST', '/api/hosts/gpu-4090-daily/start');
+  assert.equal(res.status, 202);
+  assertShape(accepted, res.json, 'POST start 的 202 体');
+  assert.equal(res.json.host, 'gpu-4090-daily');
+
+  await r.settle();
+
+  const phases = r.frames
+    .filter((f) => f.type === 'host-changed' && f.data.host.name === 'gpu-4090-daily')
+    .map((f) => f.data.host.phase);
+  assert.deepEqual(phases, ['starting', 'running'], `实际迁移：${phases.join(' → ')}`);
+
+  const done = r.frames.filter((f) => f.type === 'operation-done' && f.data.operationId === res.json.operationId);
+  assert.equal(done.length, 1, '每个 202 必有且仅有一个 operation-done（13 §3.4）');
+  assert.equal(done[0].data.status, 'ok');
+  assert.equal(done[0].data.action, 'start');
+
+  const host = r.manager.getHost('gpu-4090-daily');
+  assert.equal(host.phase, 'running');
+  assert.ok(host.web.startedByUs, '本工具拉起的实例必须标 startedByUs');
+  assert.ok(host.tunnel.connected);
+  assert.equal(host.config.localPort, 17702, '端口应从区间里分配且避开已占用的 17701');
+});
+
+test('重启走 running → ready → starting → running（状态机不许 running 直接回 starting）', async () => {
+  const r = rig();
+  const res = req(r.manager, 'POST', '/api/hosts/gpu-a100/restart');
+  assert.equal(res.status, 202);
+  await r.settle();
+
+  const phases = r.frames
+    .filter((f) => f.type === 'host-changed' && f.data.host.name === 'gpu-a100')
+    .map((f) => f.data.host.phase);
+  assert.deepEqual(phases, ['ready', 'starting', 'running'], `实际迁移：${phases.join(' → ')}`);
+  assert.equal(r.manager.getHost('gpu-a100').phase, 'running');
+});
+
+test('关停：running → ready，web/tunnel/mappedUrl 一起清空', async () => {
+  const r = rig();
+  req(r.manager, 'POST', '/api/hosts/gpu-a100/stop');
+  await r.settle();
+
+  const host = r.manager.getHost('gpu-a100');
+  assert.equal(host.phase, 'ready');
+  assert.equal(host.web, null);
+  assert.equal(host.tunnel, null);
+  assert.equal(host.mappedUrl, null, 'phase 不在 running/degraded 时 mappedUrl 必须为 null（13 §5.5）');
+});
+
+test('断联注入：running → degraded → 退避重连回 running；degraded 期间仍有 mappedUrl', async () => {
+  const r = rig();
+  r.manager.injectTunnelDrop('gpu-a100');
+
+  const degraded = r.manager.getHost('gpu-a100');
+  assert.equal(degraded.phase, 'degraded');
+  assert.equal(degraded.tunnel.connected, false);
+  assert.ok(degraded.mappedUrl, 'degraded 期间隧道地址要留着——iframe 不该被清空');
+
+  await r.settle();
+  const back = r.manager.getHost('gpu-a100');
+  assert.equal(back.phase, 'running');
+  assert.equal(back.tunnel.connected, true);
+  assert.equal(back.tunnel.reconnectAttempt, 0);
+});
+
+test('崩溃注入：running → crashed，mappedUrl 清空但 web 记录留着（供「重启」与不误杀判定）', () => {
+  const r = rig();
+  r.manager.injectCrash('gpu-a100');
+  const host = r.manager.getHost('gpu-a100');
+  assert.equal(host.phase, 'crashed');
+  assert.equal(host.mappedUrl, null);
+  assert.equal(host.tunnel, null);
+  assert.ok(host.web?.startedByUs, 'crashed 后仍要知道这进程原本是我们拉起的');
+});
+
+test('全量探测：四台各自出结果，probe-all 收一条汇总 operation-done', async () => {
+  const r = rig();
+  const res = req(r.manager, 'POST', '/api/hosts/probe');
+  assert.equal(res.status, 202);
+  assertShape(accepted, res.json, 'probe-all 的 202 体');
+  assert.equal(res.json.host, null, '全量探测的 host 必须是 null（13 §1.2）');
+
+  await r.settle();
+  const done = r.frames.filter((f) => f.type === 'operation-done' && f.data.action === 'probe-all');
+  assert.equal(done.length, 1);
+  assert.equal(done[0].data.host, null);
+
+  // 探测不得改写在跑的主机（11 §2.2）
+  assert.equal(r.manager.getHost('gpu-a100').phase, 'running');
+  assert.equal(r.manager.getHost('cpu-build').phase, 'no_dsh');
+  assert.equal(r.manager.getHost('legacy-box').phase, 'unreachable');
+});
+
+// ── 写端点 ───────────────────────────────────────────────────────────────
+
+test('PUT /api/hosts/:name/config：回传 HostView，且拒收 localPort 与未知键', () => {
+  const { manager } = rig();
+  const res = req(manager, 'PUT', '/api/hosts/gpu-a100/config', { body: { autoStart: false, workdir: '~/other' } });
+  assert.equal(res.status, 200);
+  assertShape(hostConfigPutResponse, { host: normalize(res.json.host) }, 'PUT host config 响应');
+  assert.equal(res.json.host.config.autoStart, false);
+  assert.equal(res.json.host.config.workdir, '~/other');
+
+  for (const bad of [{ localPort: 17777 }, { nope: 1 }]) {
+    const err = grab(() => req(manager, 'PUT', '/api/hosts/gpu-a100/config', { body: bad }));
+    assert.equal(err.status, 400);
+    assert.equal(err.code, 'VALIDATION');
+  }
+});
+
+test('PUT /api/config/defaults 与 POST /api/reload 过契约；改默认端口会重算 effectiveRemotePort', () => {
+  const { manager } = rig();
+  const res = req(manager, 'PUT', '/api/config/defaults', { body: { remoteWebPort: 9100 } });
+  assert.equal(res.status, 200);
+  assertShape(defaultsPutResponse, res.json, 'PUT defaults 响应');
+  assert.equal(res.json.restartRequired, false, '只改远端默认端口不需要重启 manager');
+
+  // legacy-box 自带 remoteWebPort 覆写，不该被全局默认带跑
+  assert.equal(manager.getHost('cpu-build').effectiveRemotePort, 9100);
+  assert.equal(manager.getHost('legacy-box').effectiveRemotePort, 18899);
+
+  const restart = req(manager, 'PUT', '/api/config/defaults', { body: { manager: { port: 7799 } } });
+  assert.equal(restart.json.restartRequired, true, '改 manager 端口只落盘，要重启才生效');
+
+  assertShape(reloadResponse, req(manager, 'POST', '/api/reload').json, 'POST reload 响应');
+});
+
+test('manager 自身的 restart/shutdown 在 demo 里降级为 409，且说清原因', () => {
+  const { manager } = rig();
+  for (const p of ['/api/manager/restart', '/api/manager/shutdown']) {
+    const err = grab(() => req(manager, 'POST', p));
+    assert.ok(err instanceof FakeApiError);
+    assert.equal(err.status, 409);
+    assert.equal(err.code, 'NOT_ALLOWED');
+    assert.match(err.message, /demo 中不支持/);
+    assert.ok(err.detail, '降级提示必须给出可展开的解释，而不是干巴巴一句拒绝');
+    assertShape(errorBody, { error: err.message, code: err.code, detail: err.detail }, '降级错误体');
+  }
+});
+
+// ── preflight：不该做的动作要按 13 §2.10 拒掉 ─────────────────────────────
+
+test('preflight 拒绝：状态不对给 409 PHASE_CONFLICT，不存在给 404', () => {
+  const { manager } = rig();
+  const conflicts = [
+    ['POST', '/api/hosts/gpu-a100/start', 'running 的主机不能再拉起'],
+    ['POST', '/api/hosts/cpu-build/start', 'no_dsh 的主机不能拉起'],
+    ['POST', '/api/hosts/gpu-4090-daily/stop', 'ready 的主机没有进程可关'],
+    ['POST', '/api/hosts/gpu-4090-daily/reconnect', 'ready 的主机没有隧道可重连'],
+  ];
+  for (const [method, p, why] of conflicts) {
+    const err = grab(() => req(manager, method, p));
+    assert.ok(err instanceof FakeApiError, why);
+    assert.ok([403, 409].includes(err.status), `${p} 应是 403/409，实际 ${err.status}`);
+    assertShape(
+      errorBody,
+      { error: err.message, code: err.code, ...(err.detail ? { detail: err.detail } : {}) },
+      `${p} 错误体`,
+    );
+  }
+
+  const missing = grab(() => req(manager, 'POST', '/api/hosts/nope/start'));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.code, 'NOT_FOUND');
+});
+
+test('状态机是产品真身：非法迁移会被 assertTransition 挡住', () => {
+  const { manager } = rig();
+  // ready → degraded 不在 TRANSITIONS 里，注入断联必须被拒（而不是画出一个不可能的状态）
+  const err = grab(() => manager.injectTunnelDrop('gpu-4090-daily'));
+  assert.equal(err.status, 409);
+  assert.equal(machine.canTransition('ready', 'degraded'), false, '前提：这条迁移本就非法');
+});
+
+// ── SSE ─────────────────────────────────────────────────────────────────
+
+test('SSE：首帧是 snapshot，五类帧都过契约，revision 单调递增', async () => {
+  const r = rig();
+  assert.equal(r.frames[0].type, 'snapshot', '订阅即先收 snapshot（13 §3.2）');
+
+  // 把五类帧都逼出来
+  req(r.manager, 'POST', '/api/hosts/gpu-4090-daily/start');
+  req(r.manager, 'PUT', '/api/config/defaults', { body: { remoteWebPort: 8899 } });
+  r.manager.injectTunnelDrop('gpu-a100');
+  await r.settle();
+
+  const kinds = new Set(r.frames.map((f) => f.type));
+  for (const kind of ['snapshot', 'host-changed', 'operation-done', 'log-line', 'config-changed']) {
+    assert.ok(kinds.has(kind), `没产出 ${kind} 帧`);
+  }
+
+  // 校验器要求 mappedUrl 是真实形态，逐帧归一后再过
+  const normalized = r.frames.map((f) => {
+    if (f.type === 'snapshot') return { ...f, data: { ...f.data, hosts: f.data.hosts.map(normalize) } };
+    if (f.type === 'host-changed') return { ...f, data: { ...f.data, host: normalize(f.data.host) } };
+    return f;
+  });
+  assertSseStream(normalized, { label: 'demo SSE' });
+});
+
+test('snapshot 自带 manager/defaults/hosts/logs 四件套，phase 都是合法枚举', () => {
+  const r = rig();
+  const snap = r.frames[0].data;
+  assertShape(managerInfo, snap.manager, 'snapshot.manager');
+  assert.ok(Array.isArray(snap.logs) && snap.logs.length > 0, 'snapshot 该带最近日志，首屏事件面板才不是空的');
+  for (const host of snap.hosts) {
+    assert.ok(PHASES.includes(host.phase), `未知 phase：${host.phase}`);
+    assertShape(hostView, normalize(host), `snapshot 里的 ${host.name}`);
+  }
+});
+
+test('mappedUrl 的有意偏离仅此一处：非 null 时必与 localPort、phase 自洽', async () => {
+  const r = rig();
+  req(r.manager, 'POST', '/api/hosts/gpu-4090-daily/start');
+  await r.settle();
+
+  for (const host of r.manager.hosts().hosts) {
+    if (host.mappedUrl === null) {
+      assert.ok(!['running', 'degraded'].includes(host.phase), `${host.name} 在 ${host.phase} 却没有 mappedUrl`);
+      continue;
+    }
+    assert.ok(['running', 'degraded'].includes(host.phase));
+    // demo 版形态：站内 mock 页 + 主机名 + 本机端口（真机是 http://127.0.0.1:<port>/）
+    assert.match(host.mappedUrl, /^\.\.\/mock-dsh-web\/index\.html\?host=/);
+    assert.ok(
+      host.mappedUrl.endsWith(`&port=${host.tunnel.localPort}`),
+      `${host.name} 的 mappedUrl 与 tunnel.localPort 不一致：${host.mappedUrl}`,
+    );
+    assert.ok(host.mappedUrl.includes(encodeURIComponent(host.name)), 'mappedUrl 必须带上主机名，否则四个 iframe 会互相串页');
+  }
+});
+
+// ── setup 模式（首启引导） ────────────────────────────────────────────────
+
+test('setup 模式：门禁生效时只放行白名单，setup 提交后自动拉起勾了自启的主机', async () => {
+  const r = rig({ setupCompleted: false });
+
+  const info = req(r.manager, 'GET', '/api/manager/info');
+  assertShape(managerInfo, info.json, 'setup 模式的 manager info');
+  assert.equal(info.json.setupCompleted, false);
+  assert.equal(info.json.setupGateActive, true);
+
+  // 白名单外的一律 SETUP_REQUIRED
+  const blocked = grab(() => req(r.manager, 'POST', '/api/hosts/gpu-a100/start'));
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.code, 'SETUP_REQUIRED');
+
+  // 白名单内可用：主机清单 + 全量探测
+  assert.equal(req(r.manager, 'GET', '/api/hosts').status, 200);
+  for (const host of r.manager.hosts().hosts) {
+    assert.equal(host.phase, 'unknown', '引导态下主机应从「等待探测」起步');
+  }
+  req(r.manager, 'POST', '/api/hosts/probe');
+  await r.settle();
+  assert.equal(r.manager.getHost('gpu-a100').phase, 'ready');
+
+  const submitted = req(r.manager, 'GET', '/api/config').json;
+  submitted.hosts['gpu-a100'].autoStart = true;
+  const res = req(r.manager, 'POST', '/api/setup', { body: submitted });
+  assert.equal(res.status, 200);
+  assertShape(setupResponse, res.json, 'POST /api/setup 响应');
+
+  await r.settle(12);
+  assert.equal(r.manager.managerInfo().setupCompleted, true, '门禁应已撤除');
+  assert.equal(r.manager.getHost('gpu-a100').phase, 'running', '勾了开启链接的主机要被自动拉起');
+});
+
+// ── 重置 ─────────────────────────────────────────────────────────────────
+
+test('重置回到初始态：状态、端口分配与日志都复位', async () => {
+  const r = rig();
+  req(r.manager, 'POST', '/api/hosts/gpu-4090-daily/start');
+  await r.settle();
+  assert.equal(r.manager.getHost('gpu-4090-daily').phase, 'running');
+
+  r.manager.reset({ mode: 'dashboard' });
+  assert.equal(r.manager.getHost('gpu-4090-daily').phase, 'ready');
+  assert.equal(r.manager.getHost('gpu-4090-daily').config.localPort, null, '端口分配也要复位');
+  assert.equal(r.manager.getHost('gpu-a100').phase, 'running');
+
+  // 重置会重新广播 snapshot，前端据此整体替换（13 §3.1）
+  assert.equal(r.frames.at(-1).type, 'snapshot');
+});
