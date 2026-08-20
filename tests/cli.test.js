@@ -147,3 +147,7 @@ test('tailFile 只取尾部 N 行', (t) => {
   // 请求多于总行数时不报错
   assert.equal(tailFile(file, 10_000).split('\n').length, 500);
 });
+
+test('V-3 演练：故意判红，验证 required checks 能封锁合入（随后回滚）', () => {
+  assert.equal(1, 2, '这条断言是演练用的，必红');
+});
