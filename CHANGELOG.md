@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### 文档
+
+- PR 标题格式的 CI 校验（CONTRIBUTING 已定约定，尚未机制化）留作待办。
+- `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
+  即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
+
+## [0.2.0-rc.1] - 2026-08-21
+
+**预发布**，拿给人试装的版本：把「构建产物 / 一键安装 / 更新 / tag 自动构建」四件缺失
+能力补齐。稳定用户 `dshc update` 更新不到它（`--pre` 才看得见）。
+
 ### 新增
 
 - **`dshc version`**：一条命令说清「装的是哪个版本、怎么装的、用的哪个 Node」——
@@ -40,12 +51,6 @@
 - **发版 tag 支持预发布形态**（`v0.2.0-rc.1`）：守卫对 rc 只要求「出自 main」，不要求
   打在 `release` HEAD 上——rc 不动稳定指针；Release 自动标 Pre-release，因此
   `dshc update` 默认更新不到它，`--pre` 才看得见。正式版口径一字未改。
-
-### 文档
-
-- PR 标题格式的 CI 校验（CONTRIBUTING 已定约定，尚未机制化）留作待办。
-- `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
-  即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
 
 ## [0.1.0] - 2026-08-21
 
@@ -101,5 +106,6 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.1...HEAD
+[0.2.0-rc.1]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.1
 [0.1.0]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.1.0
