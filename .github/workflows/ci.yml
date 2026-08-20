@@ -46,7 +46,7 @@ jobs:
 
       - name: 失败时留下浏览器截图
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: browser-shots-${{ matrix.os }}
           path: |
