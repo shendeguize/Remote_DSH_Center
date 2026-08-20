@@ -9,6 +9,8 @@
 ### 文档
 
 - PR 标题格式的 CI 校验（CONTRIBUTING 已定约定，尚未机制化）留作待办。
+- `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
+  即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
 
 ## [0.1.0] - 2026-08-21
 
@@ -40,6 +42,14 @@
   `--service` 顺带装 launchd 自启，`--prefix` 换软链落点。
 - **项目主页与在线 demo**：GitHub Pages 站点，demo 跑的是产品前端本体，
   后端换成浏览器内的假 manager（状态迁移复用 `src/lib/machine.js`）。
+
+### 变更
+
+- 退出码 `2` 现在名副实：除了「连不上 manager」，远端 ssh 超时与不可达
+  （`SSH_TIMEOUT` / `SSH_UNREACHABLE`）也归 `2`（此前落到 `1`）。动作被受理后
+  失败（校验不过、相位冲突、拒杀、端口用尽、拉起失败）仍是 `1`。
+- 一键安装默认装 `release` 分支（只有发过版的提交）。跟主干用 `DSHC_REF=main`，
+  钉死版本用 `DSHC_REF=v0.1.0`。
 
 ### 安全
 

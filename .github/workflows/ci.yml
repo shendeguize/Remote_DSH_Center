@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 跑测试不需要写任何东西（失败截图用 upload-artifact，也只要读权限）
+permissions:
+  contents: read
+
 # 同一分支上新推一次就掐掉旧的跑，别排队
 concurrency:
   group: ci-${{ github.ref }}

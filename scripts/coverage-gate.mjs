@@ -122,10 +122,17 @@ async function runTestsWithCoverage(lcovPath) {
 }
 
 async function main() {
-  const lcovPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-cov-')), 'lcov.info');
-  const testExit = await runTestsWithCoverage(lcovPath);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-cov-'));
+  const lcovPath = path.join(tmp, 'lcov.info');
+  let testExit;
+  let files;
+  try {
+    testExit = await runTestsWithCoverage(lcovPath);
+    files = parseLcov(fs.readFileSync(lcovPath, 'utf8'));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 
-  const files = parseLcov(fs.readFileSync(lcovPath, 'utf8'));
   const tiers = evaluateTiers(files);
   process.stdout.write(`\n覆盖率门槛（14 §6）：\n${formatReport(tiers)}\n`);
 
@@ -133,6 +140,13 @@ async function main() {
   if (testExit !== 0) {
     process.stdout.write('\n测试未全绿，覆盖率门槛不作为结论。\n');
     process.exitCode = testExit;
+    return;
+  }
+  // 空档按 100% 算（档内没文件时不该判红），但整份 lcov 都是空的只有一种可能：
+  // 覆盖率根本没采到。此时「三档达标」是假绿，闸门必须自己先红。
+  if (files.length === 0) {
+    process.stdout.write('\nlcov 里一条记录都没有：覆盖率没采到，门槛结论不成立。\n');
+    process.exitCode = 1;
     return;
   }
   if (failed.length > 0) {

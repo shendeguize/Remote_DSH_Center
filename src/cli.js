@@ -352,6 +352,18 @@ export function formatTable(headers, rows) {
   return [line(headers), ...rows.map(line)].join('\n');
 }
 
+/**
+ * 「没能跟对方说上话」的错误码——退出码 2 的判据。
+ * 其余（校验不过、相位冲突、拒杀、端口用尽、拉起失败）都是动作被受理后失败，算 1。
+ */
+const COMM_CODES = new Set(['SSH_TIMEOUT', 'SSH_UNREACHABLE']);
+
+/** @returns {0|1|2|3} */
+export function exitCodeFor({ status, code }) {
+  if (status === 0) return EXIT.comm; // 连 manager 都没连上
+  return COMM_CODES.has(code) ? EXIT.comm : EXIT.failed;
+}
+
 function reportApiError(err, flags) {
   if (err instanceof ApiError) {
     errOut(`错误：${err.message}${err.code ? `（${err.code}）` : ''}`);
@@ -359,7 +371,7 @@ function reportApiError(err, flags) {
       if (flags?.verbose) errOut(err.detail);
       else errOut('加 --verbose 查看完整 detail。');
     }
-    return err.status === 0 ? EXIT.comm : EXIT.failed;
+    return exitCodeFor(err);
   }
   errOut(`错误：${err.message}`);
   return EXIT.failed;

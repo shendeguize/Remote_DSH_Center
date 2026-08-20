@@ -65,7 +65,9 @@ info "node ${NODE_VERSION} · git $(git --version | awk '{print $3}')"
 if [ -e "${APP_DIR}/.git" ]; then
   info "已存在：${APP_DIR}，改为更新"
   git -C "${APP_DIR}" remote set-url origin "${REPO_URL}"
-  git -C "${APP_DIR}" fetch --quiet origin "${REF}"
+  if ! FETCH_ERR="$(git -C "${APP_DIR}" fetch --quiet origin "${REF}" 2>&1)"; then
+    die "取不到 ${REF}（${REPO_URL}）：${FETCH_ERR}"
+  fi
   # 本地有改动就别硬来，交回给人处理
   if ! git -C "${APP_DIR}" diff --quiet HEAD 2>/dev/null; then
     die "${APP_DIR} 有未提交的本地改动，先自行处理后重跑（或换个 DSHC_APP_DIR）。"
@@ -77,10 +79,11 @@ elif [ -d "${APP_DIR}" ] && [ -n "$(ls -A "${APP_DIR}" 2>/dev/null)" ]; then
 else
   info "clone 到 ${APP_DIR}"
   mkdir -p "$(dirname "${APP_DIR}")"
-  # clone 失败不留半个目录，免得下次重跑撞上「已存在且不是 clone」
-  if ! git clone --quiet --depth 1 --branch "${REF}" "${REPO_URL}" "${APP_DIR}" 2>/dev/null; then
+  # clone 失败不留半个目录，免得下次重跑撞上「已存在且不是 clone」。
+  # git 的原话要留着：「分支不存在」与「连不上」得让人一眼分得清。
+  if ! CLONE_ERR="$(git clone --quiet --depth 1 --branch "${REF}" "${REPO_URL}" "${APP_DIR}" 2>&1)"; then
     rm -rf "${APP_DIR}"
-    die "clone 失败：${REPO_URL}（分支 ${REF}）。检查网络与仓库地址后重试。"
+    die "clone 失败：${REPO_URL}（ref ${REF}）：${CLONE_ERR}"
   fi
   info "已取到 $(git -C "${APP_DIR}" rev-parse --short HEAD)"
 fi

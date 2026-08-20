@@ -7,8 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, coerceConfigValue, createSseParser, formatTable,
-  parseArgv, parseSseFrame, resolveHostArg, tailFile, usageText,
+  COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, coerceConfigValue, createSseParser,
+  exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile, usageText,
 } from '../src/cli.js';
 
 test('parseArgv 支持 --key value / --key=value / 短旗标', () => {
@@ -32,6 +32,18 @@ test('parseArgv 对坏用法抛 UsageError（→ 退出码 3）', () => {
   assert.throws(() => parseArgv(['--port', '--json']), UsageError, '值位上是另一个旗标');
   assert.throws(() => parseArgv(['--foreground=maybe']), UsageError, '布尔旗标不接受任意值');
   assert.equal(EXIT.usage, 3);
+});
+
+test('exitCodeFor：说不上话算 2，被受理后失败算 1', () => {
+  // README 与 cli.js 文件头都写着「2 = 超时/通信失败」，那超时就必须真的给 2——
+  // 脚本按退出码分流「重试」与「别重试」，混成 1 会让调用方无从判断。
+  assert.equal(exitCodeFor({ status: 0, code: 'INTERNAL' }), EXIT.comm, '连 manager 都没连上');
+  assert.equal(exitCodeFor({ status: 504, code: 'SSH_TIMEOUT' }), EXIT.comm);
+  assert.equal(exitCodeFor({ status: 502, code: 'SSH_UNREACHABLE' }), EXIT.comm);
+  assert.equal(exitCodeFor({ status: 409, code: 'KILL_REFUSED' }), EXIT.failed, '拒杀是动作失败，不是通信失败');
+  assert.equal(exitCodeFor({ status: 400, code: 'VALIDATION' }), EXIT.failed);
+  assert.equal(exitCodeFor({ status: 409, code: 'PORT_EXHAUSTED' }), EXIT.failed);
+  assert.equal(exitCodeFor({ status: 500, code: 'LAUNCH_FAILED' }), EXIT.failed);
 });
 
 test('resolveHostArg：精确优先、唯一前缀通过、歧义列候选', () => {
