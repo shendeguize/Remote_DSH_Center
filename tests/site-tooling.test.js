@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -72,7 +73,9 @@ test('REQUIRED_OUTPUTS 覆盖三类关键产物，缺一个就说明拷漏了', 
 });
 
 test('resolveStatic：目录补 index.html，越界路径一律拒掉', (t) => {
-  const dir = fs.mkdtempSync(path.join(ROOT, '.local', 'tmp', 'site-static-'));
+  // 用系统临时目录（与其余测试一致）：写进仓库里的 .local/tmp 要求那个目录先存在，
+  // 于是只在跑过 ui-smoke 的开发机上过，全新 checkout 上必炸。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-site-static-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.mkdirSync(path.join(dir, 'demo'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'index.html'), 'root');
