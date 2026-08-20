@@ -1,0 +1,37 @@
+{
+  "name": "dsh-center",
+  "version": "0.1.0",
+  "description": "Local manager for remote dsh web instances: ssh tunnels, single-entry iframe shell, CLI lifecycle control",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "dshc": "src/cli.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "start": "node src/cli.js up --foreground",
+    "check": "node scripts/check.mjs",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"tests/**/*.test.js\"",
+    "coverage:gate": "node scripts/coverage-gate.mjs",
+    "ui:smoke": "node scripts/ui-smoke.mjs",
+    "acceptance:real": "node scripts/real-acceptance.mjs",
+    "install:cli": "node scripts/install.mjs",
+    "uninstall:cli": "node scripts/install.mjs --uninstall",
+    "site:build": "node scripts/build-site.mjs",
+    "site:dev": "node scripts/build-site.mjs --serve --port 4321",
+    "site:shots": "node scripts/site-shots.mjs",
+    "site:check": "node scripts/site-check.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "ssh-tunnel",
+    "manager"
+  ],
+  "license": "MIT"
+}
