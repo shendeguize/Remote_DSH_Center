@@ -4,8 +4,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 
-import { bootServer, waitPhase } from './helpers.js';
+import { bootServer, server, waitPhase } from './helpers.js';
 import { assertShape, hostChanged, snapshot as snapshotSchema } from '../contract/schemas.js';
 
 test('首帧 snapshot：manager + defaults + 全量主机 + 最近日志', async (t) => {
@@ -75,4 +76,49 @@ test('log-line：msg 单行摘要、长文本只在 detail', async (t) => {
   for (const f of events.of('log-line')) {
     assert.ok(!f.data.msg.includes('\n'), `msg 必须单行：${JSON.stringify(f.data.msg)}`);
   }
+});
+
+/** 裸连一条 SSE：拿到 req/res 好在用例里粗暴掐断。 */
+function openRawSse(base) {
+  const url = new URL('/api/events', base);
+  return new Promise((resolve) => {
+    const req = http.request({
+      host: url.hostname, port: url.port, path: url.pathname, method: 'GET',
+    }, (res) => {
+      res.on('data', () => {});
+      resolve({ req, res });
+    });
+    req.end();
+  });
+}
+
+async function waitUntil(pred, why, { timeoutMs = 5_000 } = {}) {
+  const end = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error(why);
+    // eslint-disable-next-line no-await-in-loop -- 轮询
+    await new Promise((r) => { setTimeout(r, 50); });
+  }
+}
+
+test('客户端硬断（进程被杀 / 网线被拔）也从广播名单里除名', async (t) => {
+  const ctx = await bootServer(t);
+  const hub = () => server.runtime.handler.sseHub;
+  assert.equal(hub().size, 0, '前提：开工前没人在线');
+
+  // req.destroy 与 res.destroy 分别对应「客户端进程消失」与「连接被中途掐断」，
+  // 两条都要能除名：漏一条就是每次浏览器崩溃都往名单里留一具尸体，
+  // 之后每条日志都要往死连接上写。
+  const conns = [];
+  for (let i = 0; i < 8; i += 1) {
+    // eslint-disable-next-line no-await-in-loop -- 逐条建连
+    conns.push(await openRawSse(ctx.base));
+  }
+  assert.equal(hub().size, 8, `8 条都该在线，实得 ${hub().size}`);
+
+  for (const [i, c] of conns.entries()) {
+    if (i % 2 === 0) c.req.destroy();
+    else c.res.destroy();
+  }
+  await waitUntil(() => hub().size === 0, `名单没清空（还剩 ${hub().size}）`);
 });
