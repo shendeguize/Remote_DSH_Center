@@ -6,18 +6,22 @@
 
 ## [Unreleased]
 
+### 文档
+
+- PR 标题格式的 CI 校验（CONTRIBUTING 已定约定，尚未机制化）留作待办。
+- `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
+  即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
+
+## [0.2.0-rc.3] - 2026-08-21
+
+**预发布**。内容同 `v0.2.0-rc.2`，外加一处真机验收挖出来的修复。
+
 ### 修复
 
 - 探测远端时不再把**探测自己**记成手动实例。远端 `ps` 里执行探测脚本的那层 `sh -c`，
   命令行中同时含有 `dsh` 与 `web` 字样，会被脚本自己的 `grep` 命中，于是每探一次就凭空
   多出一条「手动实例」（页面主机表恒显「另有 1 个手动实例」，连没装 dsh 的主机也显示）。
   真实的手动实例检测不变，关停判据从未受影响（它只认自管 pid + 逐字指纹）。
-
-### 文档
-
-- PR 标题格式的 CI 校验（CONTRIBUTING 已定约定，尚未机制化）留作待办。
-- `operation-done` 事件帧尚未携带错误码，因此经 SSE 结算的动作失败一律是退出码 1，
-  即使根因是远端超时。补了 `code` 之后 CLI 才能把这类失败映射成 2。
 
 ## [0.2.0-rc.2] - 2026-08-21
 
@@ -117,6 +121,7 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.2...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.3...HEAD
+[0.2.0-rc.3]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.2
 [0.1.0]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.1.0
