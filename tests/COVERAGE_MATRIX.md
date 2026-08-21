@@ -84,6 +84,8 @@
 | 巡检：ssh 仍在 accept 但远端已死 → crashed | `tests/integration/resilience.test.js`、IT-07 |
 | localPort 一次分配后固定、区间耗尽 → PORT_EXHAUSTED | `tests/ports.test.js`、`tests/integration/loop.test.js` |
 | manager 重启：running 不重拉、只重建隧道；已运行则跳过 autoStart | `tests/integration/resilience.test.js`、IT-08 |
+| 关停撞上重连的一拍：复核回来后不再重建隧道，本进程名下无孤儿子进程 | `tests/integration/resilience.test.js`「关停正撞上重连的一拍」 |
+| 关停收走在飞的一次性 ssh（TERM→KILL），且落闩不再起新的 | `tests/lib/ssh.test.js`（`shutdownSsh` 两条） |
 
 ## 4. 故障注入场景库（`tests/harness/scenarios.js` 15 个）
 

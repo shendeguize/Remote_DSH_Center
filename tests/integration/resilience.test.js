@@ -5,11 +5,23 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 
 import {
-  bootServer, fetchText, monitor, tunnel, waitPhase,
+  bootServer, fetchText, monitor, server, tunnel, waitPhase,
 } from './helpers.js';
-import { SCENARIOS } from '../harness/scenarios.js';
+import { liveChildCount } from '../../src/lib/ssh.js';
+import { SCENARIOS, setFaults } from '../harness/scenarios.js';
+
+/** 本进程名下还挂着几条隧道 ssh（假 ssh 垫片）。关停后必须归零，否则就是孤儿。 */
+function tunnelChildren() {
+  try {
+    const out = execFileSync('pgrep', ['-P', String(process.pid), '-f', 'fake-ssh.js'], { encoding: 'utf8' });
+    return out.split('\n').filter(Boolean);
+  } catch {
+    return []; // pgrep 无匹配时退出码 1
+  }
+}
 
 const byName = (res, name) => res.json.hosts.find((h) => h.name === name);
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
@@ -157,6 +169,29 @@ test('巡检：远端死了但隧道子进程照活（accept 后立刻断）→ 
   const crashed = await waitPhase(ctx, 'gpu-1', 'crashed', { timeoutMs: 5_000 });
   assert.equal(crashed.tunnel, null);
   assert.equal(crashed.mappedUrl, null);
+});
+
+test('关停正撞上重连的一拍：不许再冒新的隧道子进程（issue #74）', async (t) => {
+  const ctx = await bootServer(t, { hosts: { 'gpu-1': SCENARIOS.healthy() } });
+  await ctx.api('POST', '/api/hosts/gpu-1/start');
+  await waitPhase(ctx, 'gpu-1', 'running');
+
+  // 让重连前复核挂住，好把关停准确插进「复核已发出、隧道还没重建」这条缝里
+  setFaults('gpu-1', { connTimeoutMs: 30_000 });
+  dropTunnel('gpu-1');
+  const deadline = Date.now() + 10_000;
+  while (liveChildCount() === 0) {
+    if (Date.now() > deadline) assert.fail('等不到重连前复核发出');
+    // eslint-disable-next-line no-await-in-loop -- 就是在等那一拍进到复核里
+    await sleep(50);
+  }
+
+  await server._shutdownForTest();
+  // 这一等必须是 ref 住的：关停之后就没别的东西吊着事件循环，unref 的定时器会被直接跳过
+  await new Promise((r) => { setTimeout(r, 500); }); // 留出「被强杀的复核返回 → 那一拍继续往下走」的时间
+
+  assert.equal(liveChildCount(), 0, '在飞的一次性 ssh 该被收走');
+  assert.deepEqual(tunnelChildren(), [], '关停之后不许再有隧道子进程：那是没人管的孤儿');
 });
 
 test('manager 重启：running 主机不重拉、只重建隧道；autoStart 已运行则跳过', async (t) => {
