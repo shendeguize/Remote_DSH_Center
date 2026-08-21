@@ -298,3 +298,18 @@ test('dshc logs 读 manager.log 尾部', async (t) => {
   assert.equal(res.code, 0, `stderr=${res.stderr}`);
   assert.ok(res.stdout.length > 0, 'manager 启动应至少写一行日志');
 });
+
+test('目录写不进时 dshc up 给人话不给栈（issue #87）', async (t) => {
+  const { harness } = await isolate(t);
+  // 磁盘满 / 卷转只读 / 目录被 sudo 跑过后属主变 root，都落到这同一条路上
+  fs.chmodSync(harness.homeDir, 0o500);
+  const res = await dshc(harness.env, ['up']);
+  // 早点还回来：isolate 的收尾先于本用例注册的 after 跑，锁着目录会让它删不掉
+  fs.chmodSync(harness.homeDir, 0o700);
+  const all = `${res.stdout}${res.stderr}`;
+
+  assert.notEqual(res.code, 0, '起不来就不能报成功');
+  assert.doesNotMatch(all, /at Module\.|at Object\.|node:fs:\d+/, '别把 Node 的栈摔在用户脸上');
+  assert.match(all, /写不进|不可写|没法启动/, `要说清是写不进去：${all}`);
+  assert.match(all, /磁盘满|只读|属主/, '要给出常见成因，否则用户无从下手');
+});

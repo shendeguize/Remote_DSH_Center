@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { LAUNCHD_LABEL, resolvePaths } from './defaults.js';
+import { DshError } from './lib/errors.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER_ENTRY = path.join(HERE, 'server.js');
@@ -44,10 +45,20 @@ export function readPidfile() {
 
 export function writePidfile(info) {
   const p = paths();
-  fs.mkdirSync(p.dir, { recursive: true });
-  const tmp = `${p.pidfile}.tmp.${process.pid}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(tmp, p.pidfile);
+  try {
+    fs.mkdirSync(p.dir, { recursive: true });
+    const tmp = `${p.pidfile}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(tmp, p.pidfile);
+  } catch (err) {
+    // 没有 pidfile 就没人能找到这个 manager（stop/restart/CLI 全靠它），故必须硬失败；
+    // 但要给人话，别把 Node 的栈直接摔在用户脸上（issue #87）
+    throw new DshError('PIDFILE_WRITE_FAILED', 'manager 的运行记录写不进去，没法启动', {
+      detail: `文件：${p.pidfile}\n${err.code ?? ''} ${err.message}\n`.trim()
+        + '\n常见原因：磁盘满、所在卷变成只读、目录属主不是当前用户（比如被 sudo 跑过一次）。',
+      cause: err,
+    });
+  }
   return info;
 }
 
@@ -133,8 +144,18 @@ export async function launchDetached({
   entry = process.env.DSHC_SERVER_ENTRY || SERVER_ENTRY,
 } = {}) {
   const p = paths();
-  fs.mkdirSync(p.dir, { recursive: true });
-  const fd = fs.openSync(p.log, 'a');
+  let fd;
+  try {
+    fs.mkdirSync(p.dir, { recursive: true });
+    // 后台 manager 的 stdout/stderr 就指这个 fd；开不出来它就是个没有现场的黑箱，不如不起
+    fd = fs.openSync(p.log, 'a');
+  } catch (err) {
+    throw new DshError('LOGFILE_OPEN_FAILED', 'manager 的日志文件打不开，没法启动', {
+      detail: `文件：${p.log}\n${err.code ?? ''} ${err.message}`.trim()
+        + '\n常见原因：磁盘满、所在卷变成只读、目录属主不是当前用户（比如被 sudo 跑过一次）。',
+      cause: err,
+    });
+  }
 
   const args = [entry];
   if (port !== null) args.push('--port', String(port));

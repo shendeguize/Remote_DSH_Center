@@ -467,7 +467,9 @@ function reportApiError(err, flags) {
     }
     return exitCodeFor(err);
   }
+  // 本机侧抛的 DshError：detail 装的是文件路径与常见成因，正是此刻要给的那几句
   errOut(`错误：${err.message}`);
+  if (err.detail) errOut(err.detail);
   return EXIT.failed;
 }
 

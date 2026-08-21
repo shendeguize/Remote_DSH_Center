@@ -258,6 +258,63 @@ test('state 写入 100ms debounce 合并，flushStateSync 立即落盘', async (
   assert.equal(JSON.parse(fs.readFileSync(paths.state, 'utf8')).hosts['gpu-1'].web.pid, 3);
 });
 
+test('state 落盘失败不许掀掉进程：记一条人话、继续跑、恢复后自己写回去（issue #87）', async (t) => {
+  const { paths, dir } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  const logs = [];
+  const on = (e) => logs.push(e);
+  bus.on('log-line', on);
+  t.after(() => bus.off('log-line', on));
+
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // 磁盘满 / 卷转只读 / 目录被 root 接管，都落到这同一条路上
+  fs.chmodSync(dir, 0o500);
+  store.mutateHostState('gpu-1', (e) => { e.web = { pid: 1 }; });
+  assert.doesNotThrow(() => t.mock.timers.tick(100), 'debounce 定时器里抛出去 = 未捕获异常 = manager 当场死');
+
+  const failed = logs.filter((l) => l.level === 'warn' || l.level === 'error');
+  assert.equal(failed.length, 1, `写不进该报且只报一条，实得 ${failed.length} 条`);
+  assert.doesNotMatch(failed[0].msg, /EACCES|ENOSPC/, 'msg 是给人看的，原始 fs 错误留给 detail');
+  assert.match(failed[0].msg, /状态|内存|重启/, `要说清后果：${failed[0].msg}`);
+
+  // 还在写不进的时候反复改：不许每次都刷一条同样的日志
+  logs.length = 0;
+  for (let i = 2; i <= 5; i += 1) {
+    store.mutateHostState('gpu-1', (e) => { e.web = { pid: i }; });
+    t.mock.timers.tick(100);
+  }
+  assert.equal(
+    logs.filter((l) => l.level === 'warn' || l.level === 'error').length,
+    0,
+    '同一个毛病反复报就是刷屏，日志会被这条淹掉',
+  );
+
+  // 内存照旧可用：manager 得继续管隧道，不能因为写不了状态就装死
+  assert.equal(store.getHostView('gpu-1').web.pid, 5);
+
+  fs.chmodSync(dir, 0o700);
+  store.mutateHostState('gpu-1', (e) => { e.web = { pid: 6 }; });
+  t.mock.timers.tick(100);
+  assert.equal(JSON.parse(fs.readFileSync(paths.state, 'utf8')).hosts['gpu-1'].web.pid, 6, '恢复可写后要自己写回去');
+  assert.ok(
+    logs.some((l) => /恢复|又能写/.test(l.msg)),
+    '恢复了也该说一声，否则用户不知道那条 WARN 什么时候过期',
+  );
+});
+
+test('退出路径的 flush 写不进：只记不抛，别把后面的隧道回收跳过去（issue #87）', async (t) => {
+  const { paths, dir } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  store.mutateHostState('gpu-1', (e) => { e.web = { pid: 7 }; });
+  fs.chmodSync(dir, 0o500);
+  assert.doesNotThrow(() => store.flushStateSync(), 'teardown 里抛出来，后面的清理就全跳过了');
+  fs.chmodSync(dir, 0o700);
+  assert.equal(fs.existsSync(paths.state), false, '写不进就是写不进，不许留半个文件');
+});
+
 test('setPhase 守卫非法迁移：抛错且状态零改动', async (t) => {
   const { paths } = fixture(t, { config: fullConfig() });
   await store.init({ pathsOverride: paths });

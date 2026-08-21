@@ -66,17 +66,50 @@ function serializeState() {
   return `${JSON.stringify(state, null, 2)}\n`;
 }
 
+/**
+ * state 落盘写不进时的记账（issue #87）。
+ *
+ * 这条路不许抛：debounce 的落盘在定时器回调里，抛出去就是未捕获异常，manager 当场死、
+ * 所有隧道陪葬，launchd 还会把它拉起来接着死。写不进的正确姿态是继续用内存里的状态跑，
+ * 下次状态一变再试——代价只是「manager 重启会回到上次成功落盘的那份」。
+ * 同一个毛病只报一次：写不进往往每拍都写不进，逐次报会把日志刷没。
+ * @type {string|null} 上次失败的 code，null = 上次是成功的
+ */
+let stateSaveFailure = null;
+
+/** @returns {boolean} 写进去了没有 */
+function trySaveState() {
+  try {
+    atomicWrite(paths.state, serializeState());
+  } catch (err) {
+    const code = err.code ?? 'UNKNOWN';
+    if (stateSaveFailure !== code) {
+      stateSaveFailure = code;
+      logEvent(null, 'warn', '运行状态写不进磁盘，manager 照常运行，但重启后会回到上次写成功的那份', 
+        `文件：${paths.state}\n${code} ${err.message}\n`
+        + '常见原因：磁盘满、所在卷变成只读、目录属主不是当前用户（比如被 sudo 跑过一次）。');
+    }
+    return false;
+  }
+  if (stateSaveFailure !== null) {
+    stateSaveFailure = null;
+    logEvent(null, 'info', '运行状态又能写进磁盘了，已把最新的一份落下去');
+  }
+  return true;
+}
+
 function scheduleStateSave() {
   stateDirty = true;
   stateTimer ??= setTimeout(() => {
     stateTimer = null;
     if (!stateDirty) return;
     stateDirty = false;
-    atomicWrite(paths.state, serializeState());
+    // 没写成就把脏标记还回去：下次状态一变会再排一次，恢复可写时自己就补上了
+    if (!trySaveState()) stateDirty = true;
   }, STATE_DEBOUNCE_MS);
 }
 
-/** 退出路径：取消 debounce，同步原子写。 */
+/** 退出路径：取消 debounce，同步原子写。同样不许抛——抛了后面的隧道回收就跳过去了。 */
 export function flushStateSync() {
   if (stateTimer) {
     clearTimeout(stateTimer);
@@ -84,7 +117,7 @@ export function flushStateSync() {
   }
   if (!stateDirty) return;
   stateDirty = false;
-  atomicWrite(paths.state, serializeState());
+  if (!trySaveState()) stateDirty = true;
 }
 
 /**

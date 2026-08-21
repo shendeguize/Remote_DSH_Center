@@ -333,3 +333,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀 | `tests/harness/harness.test.js` |
 | 装置状态原子落盘：写者狂写时锁外读到的永远是完整状态（残缺会被 `catch` 吞成空状态，伪造出 VERIFY 的「进程已消失」）| `tests/harness/harness.test.js` |
 | 扇出闸：同时在飞不超上限、上限≥任务数/为 0/为负都退化成全并发、结果按入参序、单个抛错不牵连其余且空出的格子接着排、同步抛出也算 rejected；24 台共用跳板机（额度 10）时全量探测不许把好主机探成不可达 | `tests/lib/pool.test.js`、`tests/integration/scale.test.js` |
+| 磁盘写不进：state 落盘失败不抛（定时器里抛 = 进程死）、报一条人话且同因只报一次、内存照旧可用、恢复可写后自己补上并报一声；退出路径 flush 失败也只记不抛且不留半个文件；`dshc up` 遇 pidfile/manager.log 打不开时给人话与常见成因、不吐 Node 栈 | `tests/store.test.js`、`tests/integration/daemon.test.js` |

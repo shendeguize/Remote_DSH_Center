@@ -26,6 +26,10 @@ export const ERROR_HTTP_STATUS = Object.freeze({
   CONFIG_WRITE_FAILED: 500,
   // config.json 被外部手改，内存那份已过期：拒写而不是拿旧值盖掉（冲突，非故障）
   CONFIG_STALE: 409,
+  // pidfile 写不进（同上三种成因）：没有它谁也找不到这个 manager，只能硬失败
+  PIDFILE_WRITE_FAILED: 500,
+  // manager.log 开不出来：后台进程的 stdout/stderr 就指它，没有它等于没有现场
+  LOGFILE_OPEN_FAILED: 500,
   INTERNAL: 500,
 });
 
