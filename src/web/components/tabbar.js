@@ -192,8 +192,12 @@ export function createTabbar({ store, actions, panes }) {
     probeAllBtn.disabled = store.isPending('probe-all') || !store.canWrite();
     probeAllBtn.classList.toggle('is-busy', store.isPending('probe-all'));
 
-    // 当前停留的主机标签消失（例如被关停）→ 回管理台，避免停在空白页
-    if (route.kind === 'host' && !tabs.some((h) => h.name === route.host) && !store.getHost(route.host)) {
+    // 当前停留的主机标签消失（例如被摘出配置）→ 回管理台，避免停在空白页。
+    // hostsLoaded 是必要门禁：首屏就带 host 路由（书签 / 刷新 / dshc open <host>）时
+    // 主机集合还没到，那时的「查不到」是尚未同步，不是消失——改写地址会让深链永远
+    // 落在管理台（issue #15）。等它到过一次再判，「不存在」的兜底文案由 app.js 给。
+    if (route.kind === 'host' && store.state.hostsLoaded
+      && !tabs.some((h) => h.name === route.host) && !store.getHost(route.host)) {
       actions.navigate('#/');
     }
     if (!menu.hidden && !tabs.some((h) => h.name === menuHost)) closeMenu();

@@ -348,6 +348,40 @@ async function main() {
       return `${host.mappedUrl} 200`;
     });
 
+    // S7 走的是「页内改 hash」——真机 v0.2.0-rc.3 上出问题的偏偏是另一条：
+    // 首屏就带着 host 路由（书签 / 刷新 / dshc open <host>）。那时主机集合还没到，
+    // 曾被当成「标签已消失」直接改写回 #/，深链于是永远落在管理台（issue #15）。
+    await check('S10', '深链冷启动：直接开 #/host/… 能落在主机页', async () => {
+      const host = await waitHost(rig, 'gpu-1', ['running']);
+      assert(host.mappedUrl, '前置条件：gpu-1 应仍在 running');
+
+      // 全新导航（不是改 hash），逼出「首屏即 host 路由」的时序
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/host/gpu-1` });
+      await cdp.waitFor("document.querySelector('.iframe-pane[data-host=\\\"gpu-1\\\"] iframe')", '深链把 iframe 建出来');
+      const landed = await cdp.eval(`
+        return {
+          hash: location.hash,
+          dashboardHidden: document.querySelector('.view-dashboard')?.hidden ?? null,
+          src: document.querySelector('.iframe-pane[data-host="gpu-1"] iframe')?.src ?? null,
+        };
+      `);
+      assert(landed.hash === '#/host/gpu-1', `地址被改写成 ${landed.hash}`);
+      assert(landed.dashboardHidden === true, '落在了管理台');
+      assert(landed.src === host.mappedUrl, `iframe src=${landed.src} 应等于 ${host.mappedUrl}`);
+
+      // 再按一次刷新：同一条时序，用户最容易碰到的就是这个动作
+      await cdp.send('Page.reload', {});
+      await cdp.waitFor("document.querySelector('.iframe-pane[data-host=\\\"gpu-1\\\"] iframe')", '刷新后仍在主机页');
+      const afterReload = await cdp.eval('return location.hash;');
+      assert(afterReload === '#/host/gpu-1', `刷新后地址变成 ${afterReload}`);
+      await screenshot(cdp, 'deeplink-cold-boot');
+      return '冷启动与刷新都落在主机页';
+    });
+
+    // 回管理台，别把后面的场景留在 iframe 页上
+    await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
+    await cdp.waitFor("document.querySelector('.host-table tbody tr')", '回到管理台');
+
     await check('S8', '减少动效：动画真的关掉', async () => {
       const probe = `
         const s = document.createElement('span');

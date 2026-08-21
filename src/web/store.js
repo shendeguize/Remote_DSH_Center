@@ -30,6 +30,9 @@ function initialState() {
     manager: { info: null, setupCompleted: null },
     defaults: null,
     hosts: new Map(),
+    // 「主机集合已经从后端到过一次」——用来区分「这台不存在」与「还没同步」。
+    // 空 Map 本身区分不了这两者，而它们该有的反应完全相反（见 tabbar 的回管理台判据）。
+    hostsLoaded: false,
     revision: -1,
     events: [],
     connection: { sse: 'idle', everOpened: false, openedAt: null, lastEventAt: null, resyncing: false },
@@ -84,6 +87,7 @@ export function createStore(preset = {}) {
       state.hosts.set(host.name, stamp(host));
     }
     if (Number.isInteger(revision) && revision > state.revision) state.revision = revision;
+    state.hostsLoaded = true;
     emit('hosts:reset', [...state.hosts.keys()]);
   };
 
@@ -98,6 +102,7 @@ export function createStore(preset = {}) {
       emit('events:changed', state.events);
     }
     state.connection.resyncing = false;
+    state.hostsLoaded = true;
     emit('hosts:reset', [...state.hosts.keys()]);
     emit('connection:changed', state.connection);
   };

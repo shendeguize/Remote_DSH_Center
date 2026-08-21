@@ -134,6 +134,57 @@ test('路由到 running 主机：创建 iframe，回管理台只改显隐（keep
   assert.equal(dom.app.querySelector('.view-dashboard').hidden, false);
 });
 
+/**
+ * 回归（真机 v0.2.0-rc.3 暴露，issue #15）：首屏就带 host 路由时——书签、刷新、
+ * `dshc open <host>` 都走这条——主机数据还没到，tabbar 把「尚未同步」当成
+ * 「标签已消失」，直接把地址改回 `#/`，于是深链永远落在管理台。
+ *
+ * 关键在于让 `/api/hosts` **迟到**：既有用例的 fetch 是立即 resolve 的，
+ * 首屏那一瞬间 store 已经有主机，缺口正好被跳过。
+ */
+test('深链首屏：主机数据迟到也不许把地址改回管理台', async (t) => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+
+  const { dom } = await mount(t, {
+    hash: '#/host/gpu-1',
+    hosts: [running('gpu-1')],
+    responder: ({ path }) => (path === '/api/hosts'
+      ? gate.then(() => reply({ revision: 1, hosts: [running('gpu-1')] }))
+      : null),
+  });
+
+  await flush();
+  assert.equal(dom.window.location.hash, '#/host/gpu-1', '主机还没同步就被踢回管理台');
+
+  release();
+  await flush();
+  await flush();
+  assert.equal(dom.window.location.hash, '#/host/gpu-1');
+  const frame = dom.app.querySelector('.iframe-pane iframe');
+  assert.ok(frame, '数据到齐后该把 iframe 建出来');
+  assert.equal(frame.getAttribute('src'), 'http://127.0.0.1:17701/');
+});
+
+test('主机真的从状态里消失（不是尚未同步）→ 仍回管理台', async (t) => {
+  const { dom, es } = await mount(t, { hosts: [running('gpu-1')] });
+  es().open();
+  es().send('snapshot', {
+    revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [running('gpu-1')], logs: [],
+  });
+
+  dom.window.location.hash = '#/host/gpu-1';
+  assert.ok(dom.app.querySelector('.iframe-pane iframe'), '先确认开着');
+
+  // 配置里被摘掉的主机：snapshot 整体替换后它不再存在
+  es().send('snapshot', {
+    revision: 2, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [], logs: [],
+  });
+  await flush();
+  assert.equal(dom.window.location.hash, '#/', '标签真消失了才该回管理台');
+});
+
 test('深链到不可打开的主机：不造 iframe，给可返回的提示', async (t) => {
   const { dom, es } = await mount(t);
   es().open();
