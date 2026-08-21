@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
@@ -20,7 +21,9 @@ import {
   NODE_RUNTIME_VERSION, makeBundleInfo, nodeDistUrl, nodeShasumsUrl, nodeTarballName,
   packFileList, resolveBuildVersion, shimScript,
 } from '../scripts/build-bundle.mjs';
-import { linkPlan, linkTarget, pathHint, prefixInPath } from '../scripts/install.mjs';
+import {
+  isBrokenPipe, linkPlan, linkTarget, pathHint, prefixInPath, silenceBrokenPipe,
+} from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import { findChrome } from '../scripts/ui-smoke.mjs';
 
@@ -391,6 +394,25 @@ test('resolveBuildVersion：版本只有一个源，点名不同的版本要拦�
  * 判据用文本切 job 而不是解析 YAML（零依赖，没有 yaml parser）：按两空格缩进的
  * job 名切段，段内出现 `gh ` 命令的，必须要么自带 checkout，要么显式给 GH_REPO。
  */
+test('管道断裂的码表：只吞这三个，真写失败照抛', () => {
+  for (const code of ['EPIPE', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END']) {
+    assert.equal(isBrokenPipe({ code }), true, code);
+  }
+  for (const err of [{ code: 'ENOSPC' }, { code: 'EACCES' }, new Error('无码'), null, undefined]) {
+    assert.equal(isBrokenPipe(err), false, `不该吞：${err?.code ?? err}`);
+  }
+});
+
+test('silenceBrokenPipe：EPIPE 不炸，其余仍然抛出去', () => {
+  const stream = new EventEmitter();
+  silenceBrokenPipe([stream]);
+  stream.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+  assert.throws(
+    () => stream.emit('error', Object.assign(new Error('磁盘满了'), { code: 'ENOSPC' })),
+    /磁盘满了/,
+  );
+});
+
 /**
  * required check 必须真能在 PR 上产生，否则合入会永久卡在「等一个永不到来的检查」。
  *

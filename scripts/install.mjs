@@ -18,6 +18,7 @@
  *   node scripts/install.mjs --prefix /usr/local/bin
  *   node scripts/install.mjs --service           # 顺带 dshc service install（launchd 自启）
  *   node scripts/install.mjs --uninstall         # 只摘链接，不动 ~/.dsh_center 的配置
+ *   node scripts/install.mjs --no-next-steps     # 收尾提示交给上游（install.sh 用）
  */
 
 import fs from 'node:fs';
@@ -73,6 +74,26 @@ export function pathHint(prefix, shell = process.env.SHELL ?? '') {
   return `echo 'export PATH="${prefix}:$PATH"' >> ${rc} && exec $SHELL -l`;
 }
 
+/**
+ * 下游不看了（`| head` 之类）属于哪种错。
+ *
+ * 管道被提前关掉时 Node 默认把 EPIPE 抛成未捕获异常，刷一屏栈——但那不是安装失败，
+ * 而且软链早在报错前就建好了，看到栈的人会误以为装坏了（issue #16）。
+ * 流被销毁后的后续写入报的是另外两个码，同源同因，一起吞。
+ */
+export function isBrokenPipe(err) {
+  return ['EPIPE', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END'].includes(err?.code);
+}
+
+/** 吞掉管道断裂，其余照抛（真正的写失败不该被藏起来）。 */
+export function silenceBrokenPipe(streams = [process.stdout, process.stderr]) {
+  for (const s of streams) {
+    s.on('error', (err) => {
+      if (!isBrokenPipe(err)) throw err;
+    });
+  }
+}
+
 function run(cmd, args) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -88,6 +109,7 @@ function run(cmd, args) {
 }
 
 async function main() {
+  silenceBrokenPipe();
   const argv = process.argv.slice(2);
   const flag = (name) => argv.includes(`--${name}`);
   const prefixArg = argv.indexOf('--prefix');
@@ -164,6 +186,8 @@ async function main() {
     return;
   }
 
+  // install.sh 调用时它自己会印一份更详细的收尾，这里就别再来一遍（issue #17）
+  if (flag('no-next-steps')) return;
   process.stdout.write('\n下一步：dshc init（首次配置）→ dshc up → dshc open\n');
   process.stdout.write('想开机自启：dshc service install（或重跑本脚本加 --service）\n');
 }

@@ -250,6 +250,8 @@
 | `--pre` 才看得见预发布；`--version <tag>` 钉死 | 同上 |
 | 已是 git clone 的目录上拒绝 standalone 覆盖（两种安装形态不混） | 同上 |
 | git 通道默认跟 `release` 而不是 `main` | 同上（origin 里 `main` 与 `release` 指不同提交，靠独有文件判定） |
+| 收尾「下一步」只印一遍（`install.sh` 那份为准，`install.mjs` 由 `--no-next-steps` 让位） | 同上（数「下一步」出现次数） |
+| stdout 被下游提前关掉（`\| head`）不抛 EPIPE 栈，且该建的软链照建 | 同上（用 `\| true` 让读端立刻关闭，触发不依赖时序）、`tests/tooling.test.js`（`isBrokenPipe` 码表） |
 
 发版守卫的 rc 语义（补丁集 0.1.0 · PR ③）：
 

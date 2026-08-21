@@ -145,6 +145,32 @@ test('install.sh：clone → 软链 dshc → 装出来的入口真能跑', { ski
   assert.match(res.stdout, /dshc init/);
   assert.match(res.stdout, /dshc up/);
   assert.match(res.stdout, /dshc open/);
+
+  // 但只许说一遍：install.mjs 与 install.sh 各印一份收尾，叠起来啰嗦且说法不一（issue #17）
+  const nextSteps = res.stdout.match(/下一步/g) ?? [];
+  assert.equal(nextSteps.length, 1, `「下一步」出现了 ${nextSteps.length} 次：\n${res.stdout}`);
+});
+
+/**
+ * 回归（issue #16）：下游提前关掉管道时，install.mjs 曾把 EPIPE 抛成未捕获异常，
+ * 刷一屏 Node 栈——而软链早在报错前就建好了，看到栈的人只会以为装坏了。
+ *
+ * `| true` 让读端立刻关闭，写第一行就必然撞上 EPIPE，不依赖时序。
+ */
+test('install.mjs：stdout 被提前关掉不抛栈，且该建的软链照建', { skip }, (t) => {
+  const r = rig(t);
+  assert.equal(runInstall(r.env, ['--prefix', r.prefix]).status, 0, '前置：先正常装一遍');
+
+  const installer = path.join(r.appDir, 'scripts', 'install.mjs');
+  const res = spawnSync('sh', ['-c', `"${process.execPath}" "${installer}" --prefix "${r.prefix}" | true`], {
+    encoding: 'utf8',
+    env: { ...process.env, ...r.env },
+  });
+
+  assert.doesNotMatch(res.stderr, /EPIPE/, `管道断裂被抛成异常了：\n${res.stderr}`);
+  assert.doesNotMatch(res.stderr, /Unhandled 'error' event/, res.stderr);
+  assert.equal(res.status, 0, `退出码 ${res.status}：\n${res.stderr}`);
+  assert.ok(fs.existsSync(path.join(r.prefix, 'dshc')), '断了管道也得把活干完');
 });
 
 test('install.sh：重跑幂等 —— 第二次走更新路径，软链照旧可用', { skip }, (t) => {
