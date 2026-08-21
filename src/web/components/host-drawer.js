@@ -81,6 +81,20 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const logPre = el('pre.remote-log-body', { text: '（未加载）' });
   const logBtn = button('拉取最近 200 行', { compact: false, onClick: () => loadLog() });
 
+  // 有校验器的字段（键名对齐 buildHostPatch 的 errors）
+  const validated = {
+    remoteWebPort: remotePort, workdir, env, patches,
+  };
+
+  // 离开字段就把它自己的校验结果说出来，不必等到点保存（issue #30）。
+  // blur 不冒泡，所以只能挂在字段本身——挂到 form 上收不到。
+  for (const [key, f] of Object.entries(validated)) {
+    f.input.addEventListener('blur', () => {
+      touched.add(key);
+      revalidate();
+    });
+  }
+
   const form = el('form.drawer-form', {
     on: {
       submit: (e) => {
@@ -89,6 +103,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       },
       input: () => syncDirty(),
       change: () => syncDirty(),
+      // 离开字段就把它自己的校验结果说出来，不必等到点保存（issue #30）。
+      // focusout 会冒泡，blur 不会——但垫片直接往 input 上派发 blur，两个都收。
     },
   }, [
     el('section.config-section', {}, [
@@ -141,6 +157,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   let current = null; // { name, draft, config }
   let restoreFocus = null;
   let closing = false;
+  const touched = new Set(); // 碰过的字段才实时报错，见 revalidate
 
   // ── 草稿 ─────────────────────────────────────────────────────────────
 
@@ -165,11 +182,33 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     extraArgs.input.value = draft.extraArgs;
     patches.input.value = draft.patches;
     for (const f of fields) f.setError(null);
+    touched.clear();
+  }
+
+  /**
+   * 校验结果的展示纪律（issue #30）。
+   *
+   * 一个字段「被碰过」（离开过它，或点过保存）之后，它的错误提示就一直跟着值走：
+   * 改对了立刻灭，改坏了立刻换成当前那条。没碰过的字段一声不吭——边打字边报太吵，
+   * 刚敲下 `4` 就红一次没有意义。
+   *
+   * 原来的毛病是错误只在点保存时算一次、之后再没人碰：改回合法值，红字和
+   * `aria-invalid` 还挂在那儿，读屏用户听到的仍是「无效」。
+   */
+  function revalidate() {
+    if (!current) return;
+    const built = buildHostPatch(current.draft);
+    for (const [key, f] of Object.entries(validated)) {
+      if (touched.has(key)) f.setError(built.errors?.[key] ?? null);
+    }
+    extraArgs.setError(null);
+    return built;
   }
 
   function syncDirty() {
     if (!current) return;
     current.draft = readForm();
+    revalidate();
     const dirty = isDirty(current.draft, current.config);
     store.setDrawer({ dirty });
     saveBtn.disabled = !dirty || !store.canWrite() || store.isPending('config:save', current.name);
@@ -287,12 +326,9 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   async function submit() {
     if (!current) return;
-    const built = buildHostPatch(current.draft);
-    remotePort.setError(built.errors?.remoteWebPort ?? null);
-    workdir.setError(built.errors?.workdir ?? null);
-    env.setError(built.errors?.env ?? null);
-    extraArgs.setError(null);
-    patches.setError(built.errors?.patches ?? null);
+    // 保存是最终权威：该说的全说，之后这些字段也就都算碰过了
+    for (const key of Object.keys(validated)) touched.add(key);
+    const built = revalidate();
     if (!built.ok) return;
 
     // 只提交真正改动的键：避免把没碰过的字段“全量替换”回当前显示值

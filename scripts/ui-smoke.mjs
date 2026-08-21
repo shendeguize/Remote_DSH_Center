@@ -46,8 +46,40 @@ const OUT_DIR = path.resolve(opt('out', path.join(REPO, '.local', 'tmp', 'ui-smo
 
 const results = [];
 
+/**
+ * 每个场景开跑前统一清场。
+ *
+ * 场景之间共用一个页面，任何一条判据中途失败都可能把弹窗、脏草稿、inert 的后景
+ * 留在原地，后面的场景于是一片红——追起来像连环 bug，其实只有第一条是真的。
+ * 这里只收拾「模态类残留」，不动路由与主机状态：后面的场景确实依赖前面拉起的主机。
+ */
+let activeCdp = null; // 供 cleanSlate 用；场景函数自己闭包里也有同一个 cdp
+
+async function cleanSlate() {
+  const cdp = activeCdp;
+  if (!cdp) return;
+  try {
+    await cdp.eval(`
+      const d = document.querySelector('.host-drawer');
+      if (d && !d.hidden) {
+        const cancel = [...d.querySelectorAll('.btn')].find((b) => /放弃修改/.test(b.textContent));
+        if (cancel && !cancel.disabled) cancel.click();   // 先把草稿还原，否则关闭会弹确认
+        d.querySelector('.drawer-close')?.click();
+      }
+      const dlg = document.querySelector('.confirm-dialog');
+      if (dlg?.open) [...dlg.querySelectorAll('button')].find((b) => /放弃|取消/.test(b.textContent))?.click();
+      const menu = document.querySelector('.context-menu');
+      if (menu && !menu.hidden) menu.hidden = true;
+      return true;
+    `);
+  } catch {
+    // 清场本身失败不该顶替真正的失败原因——让场景自己去红
+  }
+}
+
 async function check(id, title, fn) {
   const started = Date.now();
+  await cleanSlate();
   try {
     const note = await fn();
     results.push({ id, title, ok: true, note: note ?? '' });
@@ -199,6 +231,7 @@ async function main() {
   console.log('启动 Chrome…');
   const chrome = await launchChrome();
   const cdp = await pageSession(chrome);
+  activeCdp = cdp;
 
   const consoleErrors = [];
   cdp.on('Runtime.exceptionThrown', (p) => {
@@ -338,6 +371,55 @@ async function main() {
       return 'Tab 逸出 0 次，Esc 在外也灵';
       } finally {
         await cdp.eval("document.querySelector('.host-drawer .drawer-close')?.click(); return true;");
+        await sleep(150);
+      }
+    });
+
+    // 就地校验的时机只有真浏览器能证：blur 不冒泡（第一版把处理器挂在 form 上，
+    // 真机里根本收不到），而「碰过之后跟着值走」正是 issue #30 的修复点。
+    await check('S4c', '就地校验：打字不吵、离开就报、改对即灭', async () => {
+      try {
+        await cdp.eval("document.querySelector('.host-table tbody tr').click(); return true;");
+        await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
+        const errs = async () => cdp.eval(`
+          const d = document.querySelector('.host-drawer');
+          return [...d.querySelectorAll('.field-error')].map((n) => n.textContent.trim()).filter(Boolean);
+        `);
+        const setPort = async (v) => cdp.eval(`
+          const n = document.querySelector('.host-drawer input[type="number"]');
+          n.focus(); n.value = ${JSON.stringify(v)};
+          n.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
+        `);
+
+        // 打 8080 的路上会先经过 0，这时候报错纯属噪声
+        await setPort('0');
+        await sleep(120);
+        assert((await errs()).length === 0, `还在打字就报错：${(await errs()).join(' / ')}`);
+
+        // 焦点挪走 → 该字段自己报（blur，不冒泡）
+        await cdp.eval("document.querySelector('.host-drawer input[type=\"text\"]').focus(); return true;");
+        await sleep(180);
+        const lit = await errs();
+        assert(lit.some((m) => /65535/.test(m)), `离开字段了还不报：${lit.join(' / ') || '（一条都没有）'}`);
+        assert(await cdp.eval(`return document.querySelector('.host-drawer input[type="number"]').getAttribute('aria-invalid') === 'true';`),
+          'aria-invalid 没置位，读屏用户不知道这里错了');
+
+        // 碰过之后跟着值走：改成合法值立刻灭，不必再离开一次
+        await setPort('45999');
+        await sleep(150);
+        const after = await errs();
+        assert(after.length === 0, `改成合法值后红字还挂着：${after.join(' / ')}`);
+        assert(await cdp.eval(`return document.querySelector('.host-drawer input[type="number"]').getAttribute('aria-invalid') === 'false';`),
+          'aria-invalid 没跟着清');
+        return '不吵 / 就报 / 即灭 三步齐';
+      } finally {
+        await cdp.eval(`
+          const n = document.querySelector('.host-drawer input[type="number"]');
+          if (n) { n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); }
+          document.querySelector('.host-drawer .drawer-close')?.click();
+          return true;
+        `);
         await sleep(150);
       }
     });

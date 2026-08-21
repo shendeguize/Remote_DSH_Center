@@ -283,6 +283,78 @@ test('抽屉里的启动目录：改值只提交 workdir，非法值就地报错
   assert.deepEqual(put.body, { workdir: '~/proj' }, '只提交改动的键');
 });
 
+/**
+ * 回归（issue #30）：错误提示原来只在点保存时算一次，之后再没人碰——
+ * 真 Chrome 里改回合法值 45999，红字和 aria-invalid 还挂在那儿。
+ */
+test('错误提示跟着输入更新：改对了立刻灭，改坏了立刻换成新错', async (t) => {
+  const { dom, calls } = await mount(t);
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const port = drawer.querySelector('input[type="number"]');
+  const save = drawer.querySelectorAll('.btn').find((b) => b.textContent === '保存');
+  const errText = () => drawer.querySelectorAll('.field-error').map((e) => e.textContent).filter(Boolean).join(' / ');
+
+  port.value = '70000';
+  form.dispatchEvent({ type: 'input' });
+  save.click();
+  await flush();
+  assert.equal(calls.some((c) => c.method === 'PUT'), false, '非法值不该发请求');
+  assert.match(errText(), /65535/, '点保存时该报出来');
+  assert.equal(port.getAttribute('aria-invalid'), 'true');
+
+  port.value = '45999';
+  form.dispatchEvent({ type: 'input' });
+  await flush();
+  assert.equal(errText(), '', '值已合法，红字还挂着（读屏用户听到的是「无效」）');
+  assert.equal(port.getAttribute('aria-invalid'), 'false');
+
+  // 再改坏：既然提示已经亮过，就该跟着换成当前这条错，而不是留着旧的
+  port.value = '0';
+  form.dispatchEvent({ type: 'input' });
+  await flush();
+  assert.match(errText(), /65535/, '改回非法值应立刻重新提示');
+});
+
+/**
+ * 回归（issue #30）：没点过保存之前，填 abc / 0 / 70000 一律没有任何提示。
+ * 边打字边报太吵（刚敲下 4 就红一次没意义），所以按离开字段（blur）报。
+ */
+test('离开字段即校验：不必等到点保存才第一次知道填错了', async (t) => {
+  const { dom } = await mount(t);
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const port = drawer.querySelector('input[type="number"]');
+  const errText = () => drawer.querySelectorAll('.field-error').map((e) => e.textContent).filter(Boolean).join(' / ');
+
+  // 打 8080 的过程中会先经过 '0'（非法），这时候报错就是纯噪声
+  port.value = '0';
+  form.dispatchEvent({ type: 'input' });
+  await flush();
+  assert.equal(errText(), '', '还在打字就报错太吵');
+
+  port.dispatchEvent({ type: 'blur' });
+  await flush();
+  assert.match(errText(), /65535/, '离开字段了还不说，就得等到点保存才知道');
+
+  // 碰过之后就一直跟着值走：这里不再需要第二次 blur
+  port.value = '8080';
+  form.dispatchEvent({ type: 'input' });
+  await flush();
+  assert.equal(errText(), '', '改成合法值后红字该立刻灭');
+
+  port.value = '';
+  form.dispatchEvent({ type: 'input' });
+  await flush();
+  assert.equal(errText(), '', '清空＝回落全局默认，是合法的');
+});
+
 test('抽屉里的「重启后生效」徽标：仅当运行实例与已存配置不一致时出现', async (t) => {
   const host = running('gpu-1');
   host.config = { ...host.config, workdir: '/root/b' };
