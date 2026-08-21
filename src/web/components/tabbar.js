@@ -53,9 +53,15 @@ export function createTabbar({ store, actions, panes }) {
 
   // ── 菜单 ─────────────────────────────────────────────────────────────
 
-  function closeMenu() {
+  /**
+   * 收菜单。`restoreFocus` 时把焦点还给它是从哪个标签开出来的——菜单里的按钮
+   * 一旦随菜单隐藏，焦点就掉回 body，选完一项的人于是被丢到文档顶端。
+   */
+  function closeMenu({ restoreFocus = false } = {}) {
+    const from = menuHost;
     menu.hidden = true;
     menuHost = null;
+    if (restoreFocus && from) root.querySelector(`[data-host="${CSS.escape(from)}"]`)?.focus();
   }
 
   function openMenu(name, x, y) {
@@ -72,7 +78,7 @@ export function createTabbar({ store, actions, panes }) {
           disabled: !item.enabled || (item.action !== 'copy-address' && !store.canWrite()),
           on: {
             click: async () => {
-              closeMenu();
+              closeMenu({ restoreFocus: true });
               if (item.action === 'copy-address') {
                 const url = store.getHost(name)?.mappedUrl;
                 if (!url) return;
@@ -106,7 +112,10 @@ export function createTabbar({ store, actions, panes }) {
   menu.addEventListener('keydown', (e) => {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const items = menu.querySelectorAll('button:not(:disabled)');
+    // 必须摊成数组：真 DOM 给的是 NodeList，没有 indexOf——照着 NodeList 用
+    // 会当场抛 TypeError，整个方向键在真浏览器里一个都不动（垫片给的是数组，
+    // 所以单测一路绿；冒烟那条判据又因为开菜单时焦点已在首项而判不出来）。
+    const items = [...menu.querySelectorAll('button:not(:disabled)')];
     if (items.length === 0) return;
     const at = items.indexOf(document.activeElement);
     const next = {
@@ -118,11 +127,7 @@ export function createTabbar({ store, actions, panes }) {
     items[next].focus();
   });
   const onKeyDown = (e) => {
-    if (e.key === 'Escape' && !menu.hidden) {
-      const from = menuHost; // closeMenu 会清掉它，先留一份用于还焦
-      closeMenu();
-      if (from) root.querySelector(`[data-host="${CSS.escape(from)}"]`)?.focus();
-    }
+    if (e.key === 'Escape' && !menu.hidden) closeMenu({ restoreFocus: true });
   };
   document.addEventListener('pointerdown', onDocPointerDown);
   document.addEventListener('keydown', onKeyDown);

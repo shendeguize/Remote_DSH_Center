@@ -150,6 +150,30 @@ test('前端不留第二份出厂默认表：源码里搜不到运行期端口�
   }
 });
 
+test('前端不把 querySelectorAll 的结果当数组使（NodeList 没有那些方法）', () => {
+  // 这条只能静态查：`tests/web/dom-shim.js` 的 querySelectorAll 返回真数组，
+  // 于是 `items.indexOf(...)` 在单测里一路绿、在真浏览器里当场 TypeError。
+  // 真出过一次——右键菜单的方向键因此整套失效（issue #41）。
+  const ARRAY_ONLY = ['indexOf', 'map', 'filter', 'find', 'findIndex', 'some', 'every', 'slice', 'reduce', 'includes', 'at', 'sort', 'reverse', 'join'];
+  const bad = [];
+  for (const file of walk(path.join(SRC, 'web'))) {
+    const text = fs.readFileSync(file, 'utf8');
+    // 直接串在调用后面的：qsa(...).map(...)
+    for (const m of text.matchAll(/querySelectorAll\([^;]*?\)\s*\.\s*([A-Za-z]+)/g)) {
+      if (ARRAY_ONLY.includes(m[1])) bad.push(`${rel(file)}: querySelectorAll(...).${m[1]}`);
+    }
+    // 先存进变量再当数组使：const items = x.querySelectorAll(...)  →  items.map(...)
+    for (const m of text.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\n]*?querySelectorAll\(/g)) {
+      const name = m[1];
+      const spread = new RegExp(`=\\s*\\[\\s*\\.\\.\\.[^;\\n]*querySelectorAll`).test(m[0]);
+      if (spread) continue;
+      const used = new RegExp(`\\b${name}\\s*\\.\\s*(${ARRAY_ONLY.join('|')})\\b`).exec(text);
+      if (used) bad.push(`${rel(file)}: ${name} = querySelectorAll(...) 之后 ${name}.${used[1]}`);
+    }
+  }
+  assert.deepEqual(bad, [], `NodeList 当数组用了，先 [...] 摊开：\n${bad.join('\n')}`);
+});
+
 test('setup-schema 是双侧共用的纯模块：零 import', () => {
   const file = path.join(SRC, 'web', 'setup-schema.js');
   assert.deepEqual(importsOf(file), [], 'CLI 与页面都要能直接吃它，不能带任何依赖');

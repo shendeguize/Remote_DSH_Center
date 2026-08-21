@@ -514,7 +514,7 @@ async function main() {
       return `${new Set(seen).size} 个可聚焦落点`;
     });
 
-    await check('S6', '标签页菜单：Shift+F10 开、方向键移动、Esc 收回', async () => {
+    await check('S6', '标签页菜单：Shift+F10 开、方向键移动、Esc 收回、选完还焦', async () => {
       const host = await waitHost(rig, 'gpu-1', ['ready']);
       assert(host, 'gpu-1 应已就绪');
       await rig.api('POST', '/api/hosts/gpu-1/start');
@@ -524,14 +524,40 @@ async function main() {
       await cdp.eval("document.querySelector('.host-tabs .tab').focus(); return true;");
       await cdp.key('F10', { code: 'F10', keyCode: 121, modifiers: 8 }); // 8 = Shift
       await cdp.waitFor("document.querySelector('.context-menu') && !document.querySelector('.context-menu').hidden", 'Shift+F10 开菜单');
+      // 判「焦点确实换了一项」，不能只判「落在某个菜单项上」——开菜单时焦点本就在首项，
+      // 那种判据在方向键整套失效时照样绿（issue #41 就是这么漏过去的）。
+      const itemNow = () => cdp.eval(`
+        const a = document.activeElement;
+        return a?.getAttribute('role') === 'menuitem' ? a.textContent.trim() : null;
+      `);
+      const first = await itemNow();
+      assert(first, '开菜单后焦点应落在第一个可用项上');
       await cdp.key('ArrowDown', { keyCode: 40 });
-      const onItem = await cdp.eval("return document.activeElement?.getAttribute('role') === 'menuitem';");
-      assert(onItem, '方向键应把焦点落到菜单项上');
+      const second = await itemNow();
+      assert(second && second !== first, `ArrowDown 没换项（还停在「${first}」）`);
+      await cdp.key('End', { keyCode: 35 });
+      const last = await itemNow();
+      assert(last && last !== second, `End 没跳到末项（停在「${second}」）`);
+      await cdp.key('Home', { keyCode: 36 });
+      assert(await itemNow() === first, 'Home 该回到首项');
       await cdp.key('Escape', { keyCode: 27 });
       await cdp.waitFor("!document.querySelector('.context-menu') || document.querySelector('.context-menu').hidden", 'Esc 收回菜单');
       const backOnTab = await cdp.eval("return document.activeElement?.classList.contains('tab') === true;");
       assert(backOnTab, 'Esc 后焦点应回到标签');
-      return '开/移/收 三步齐';
+
+      // 选中一项之后也要还焦：菜单一藏，那个按钮就带着焦点消失，人被丢到文档顶端
+      await cdp.key('F10', { code: 'F10', keyCode: 121, modifiers: 8 });
+      await cdp.waitFor("!document.querySelector('.context-menu').hidden", '再开一次菜单');
+      await cdp.eval(`
+        [...document.querySelectorAll('.context-menu [role=menuitem]')]
+          .find((b) => /复制/.test(b.textContent)).focus();
+        return true;
+      `);
+      await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+      await sleep(300);
+      const afterPick = await cdp.eval("return document.activeElement?.classList.contains('tab') === true;");
+      assert(afterPick, '选完一项后焦点该回到标签，而不是掉回 body');
+      return '开/移/收/还焦 四步齐';
     });
 
     await check('S7', '真 iframe：跨 origin 加载远端 dsh web 成功', async () => {

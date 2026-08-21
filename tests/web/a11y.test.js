@@ -207,6 +207,24 @@ test('标签页菜单可纯键盘打开、上下移动、Esc 收回', async (t) 
   assert.equal(dom.document.activeElement, tab, '焦点回到标签');
 });
 
+test('菜单里选完一项，焦点回到开它的那个标签', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const tab = dom.app.querySelector('.tabbar .host-tabs .tab');
+  const menu = dom.app.querySelector('.context-menu');
+
+  tab.focus();
+  key(tab, 'F10', { shiftKey: true });
+  const copy = menu.querySelectorAll('button').find((b) => /复制/.test(b.textContent));
+  assert.ok(copy, '前提：运行中的主机有「复制地址」');
+  copy.focus();
+  copy.click();
+  await flush();
+
+  assert.equal(menu.hidden, true, '选完就该收');
+  // 菜单一藏，那个按钮带着焦点消失，不接管就掉回 body
+  assert.equal(dom.document.activeElement, tab);
+});
+
 test('ArrowDown 也能开菜单（与常见工具栏习惯一致）', async (t) => {
   const { dom } = await mount(t, { hosts: [running('gpu-1')] });
   const tab = dom.app.querySelector('.tabbar .host-tabs .tab');
