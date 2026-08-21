@@ -69,10 +69,25 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   // ── 标签栏 / iframe / 抽屉 ───────────────────────────────────────────
   const panes = createIframePanes({ store, actions });
   const tabbar = createTabbar({ store, actions, panes });
-  const drawer = createHostDrawer({ store, actions, confirm: dialog.confirm });
+  // 抽屉是「有遮罩即模态」（issue #28）：它开着时后景整片 inert，键盘就不会 Tab 到
+  // 被遮罩压住的按钮上——那是鼠标碰不到、键盘却能碰到的两套规矩。层次归属放在
+  // app 这层：只有它知道页面由哪几片组成，抽屉组件不该反过来伸手改兄弟节点。
+  const backgroundLayers = [];
+  const drawer = createHostDrawer({
+    store,
+    actions,
+    confirm: dialog.confirm,
+    setBackgroundInert: (on) => {
+      for (const node of backgroundLayers) node.inert = on;
+    },
+  });
 
   // ── 首启向导 ─────────────────────────────────────────────────────────
   const wizard = createSetupWizard({ store, actions, confirm: dialog.confirm });
+
+  // 抽屉开着时要 inert 的就是这一串（遮罩、抽屉本体、确认框、toast 不在其中——
+  // 确认框正是抽屉自己弹的「放弃未保存的修改？」，inert 了就点不动）
+  backgroundLayers.push(header, tabbar.root, banner, skeleton, dashboard, panes.root, wizard.root, fallback);
 
   clear(root).append(
     header,

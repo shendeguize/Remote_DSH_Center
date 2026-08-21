@@ -296,6 +296,52 @@ async function main() {
       return `落点 ${row.host}`;
     });
 
+    // 抽屉的模态性只有真浏览器能证：inert 是浏览器原生语义，垫片里它只是个属性。
+    // 真机上曾经 25 次 Tab 有 17 次落到遮罩后面，且焦点一出抽屉 Esc 就失灵（issue #28）。
+    await check('S4b', '抽屉即模态：Tab 出不去，任何焦点位置 Esc 都能关', async () => {
+      await cdp.eval("document.querySelector('.host-table tbody tr').focus(); return true;");
+      await cdp.key('Enter', { keyCode: 13 });
+      await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
+
+      // 这条判据中途失败会把抽屉留在开着的状态，后景 inert 着，后面的场景全跟着崩。
+      // 所以自己收尾：无论成败都把抽屉关掉、把 inert 放开。
+      try {
+      const scrimBlocks = await cdp.eval("return getComputedStyle(document.querySelector('.drawer-scrim')).pointerEvents !== 'none';");
+      assert(scrimBlocks, '遮罩不挡鼠标的话，这条判据的前提就不成立');
+
+      // body 是浏览器把焦点绕出文档再绕回来的折返点，不算「落到遮罩后面」；
+      // 真要抓的是后景里那些**可操作控件**。
+      const escapees = [];
+      for (let i = 0; i < 25; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 逐次 Tab
+        await cdp.key('Tab', { keyCode: 9 });
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const at = await cdp.eval(`
+          const a = document.activeElement;
+          if (!a || a === document.body || a === document.documentElement) return null;
+          if (document.querySelector('.host-drawer').contains(a)) return null;
+          return a.tagName.toLowerCase() + '.' + String(a.className || '').split(' ')[0];
+        `);
+        if (at) escapees.push(at);
+      }
+      assert(escapees.length === 0,
+        `25 次 Tab 有 ${escapees.length} 次落到遮罩后面的控件上：${[...new Set(escapees)].join(', ')}`);
+      assert(await cdp.eval("return document.querySelector('.host-drawer').getAttribute('aria-modal') === 'true';"),
+        '有遮罩就该 aria-modal=true');
+
+      // 焦点挪到抽屉外（inert 之后 Tab 到不了，直接 focus body 模拟）再按 Esc
+      await cdp.eval('document.body.focus(); return true;');
+      await cdp.key('Escape', { keyCode: 27 });
+      await cdp.waitFor("document.querySelector('.host-drawer').hidden", '焦点在外也能 Esc 关掉');
+      const restored = await cdp.eval("return document.querySelector('.app-header').inert === false;");
+      assert(restored, '关了之后后景没放开 inert，页面从此点不动');
+      return 'Tab 逸出 0 次，Esc 在外也灵';
+      } finally {
+        await cdp.eval("document.querySelector('.host-drawer .drawer-close')?.click(); return true;");
+        await sleep(150);
+      }
+    });
+
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {
       await cdp.eval("document.activeElement?.blur(); return true;");
       const seen = [];

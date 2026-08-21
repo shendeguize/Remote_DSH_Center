@@ -54,7 +54,7 @@ export function reconcile(draft, prevConfig, nextConfig) {
   return isDirty(draft, prevConfig) ? 'conflict' : 'follow';
 }
 
-export function createHostDrawer({ store, actions, confirm }) {
+export function createHostDrawer({ store, actions, confirm, setBackgroundInert = () => {} }) {
   const title = el('h2', { id: 'drawer-title' });
   const badge = el('div.drawer-badge');
   const conflict = el('p.card-notice', { hidden: true });
@@ -114,7 +114,8 @@ export function createHostDrawer({ store, actions, confirm }) {
     'aria-labelledby': 'drawer-title',
     hidden: true,
     role: 'dialog',
-    'aria-modal': 'false',
+    // 遮罩吞掉鼠标事件，那就是模态——说 false 会让读屏用户拿到相反的信息（issue #28）
+    'aria-modal': 'true',
     on: {
       keydown: (e) => {
         if (e.key === 'Escape') {
@@ -139,6 +140,7 @@ export function createHostDrawer({ store, actions, confirm }) {
 
   let current = null; // { name, draft, config }
   let restoreFocus = null;
+  let closing = false;
 
   // ── 草稿 ─────────────────────────────────────────────────────────────
 
@@ -198,12 +200,24 @@ export function createHostDrawer({ store, actions, confirm }) {
     renderReadonly(host);
     root.hidden = false;
     scrim.hidden = false;
+    setBackgroundInert(true);
     syncDirty();
     closeBtn.focus();
     loadLog();
   }
 
   async function requestClose() {
+    // 连按两下 Esc 不该弹出两个「放弃未保存的修改？」
+    if (closing) return;
+    closing = true;
+    try {
+      await confirmThenClose();
+    } finally {
+      closing = false;
+    }
+  }
+
+  async function confirmThenClose() {
     if (current && isDirty(current.draft, current.config)) {
       const ok = await confirm({
         title: '放弃未保存的修改？',
@@ -218,6 +232,7 @@ export function createHostDrawer({ store, actions, confirm }) {
   function close() {
     root.hidden = true;
     scrim.hidden = true;
+    setBackgroundInert(false);
     current = null;
     store.setDrawer({ open: false, host: null, dirty: false });
     restoreFocus?.focus?.();
@@ -327,6 +342,14 @@ export function createHostDrawer({ store, actions, confirm }) {
     store.on('connection:changed', syncDirty),
   ];
 
+  // Esc 得在任何焦点位置都管用。抽屉元素上那个处理器 stopPropagation，
+  // 所以焦点在抽屉里时这条不会重复触发。
+  const onDocKeyDown = (e) => {
+    if (e.key !== 'Escape' || root.hidden) return;
+    requestClose();
+  };
+  document.addEventListener('keydown', onDocKeyDown);
+
   return {
     root,
     scrim,
@@ -338,6 +361,7 @@ export function createHostDrawer({ store, actions, confirm }) {
     },
     destroy() {
       for (const off of offs) off();
+      document.removeEventListener('keydown', onDocKeyDown);
     },
   };
 }

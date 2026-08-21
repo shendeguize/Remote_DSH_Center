@@ -164,6 +164,7 @@
 | 主机真从状态里消失（≠ 尚未同步）→ 仍回管理台 | `tests/web/mount.test.js`（snapshot 整体替换掉该主机） |
 | 切主机时激活标签滚进可视区；同一路由重渲染不再滚（否则用户自己拖的位置会被拽回去） | `tests/web/mount.test.js`（垫片记 `scrollIntoView` 的账）、`scripts/ui-smoke.mjs` S11（真滚了多少像素） |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
+| 抽屉的 Esc 挂在 document 上（焦点在外也能关）、开着时后景 `inert`、关掉即放开 | `tests/web/a11y.test.js` |
 
 `tests/web/*` 喂的是手写 fixture，抓不到「后端改了字段名 / 少一层对象」这类漂移。
 `tests/integration/ui-live.test.js` 把 DOM 垫片接到真 manager（真 HTTP + 真 SSE 分帧，
@@ -186,6 +187,7 @@
 | 徽章「颜色 + 文字 + 形状」三重标识 | S2 |
 | 1024 / 1440 宽不横向溢出（附截图） | S3 |
 | Tab → 主机行 → Enter 开抽屉 → Esc 关且焦点归位 | S4（暴露过「抽屉一开即脏草稿」，回归见 `tests/web/drawer.test.js`） |
+| 抽屉即模态：25 次 Tab 一次都不落到遮罩后面的控件上，焦点在抽屉外按 Esc 照样能关（`inert` 是浏览器原生语义，垫片证不了；判据自带收尾，失败也不会把后面的场景带崩） | S4b |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

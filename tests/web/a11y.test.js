@@ -50,6 +50,53 @@ test('键盘链路：表格行回车进主机 → Esc 关抽屉 → 焦点回到
   assert.equal(dom.document.activeElement, row, '焦点回到触发它的行');
 });
 
+/**
+ * 回归（issue #28）：抽屉的 Esc 原来只绑在抽屉元素上，焦点一 Tab 出去就收不到——
+ * 真 Chrome 里 25 次 Tab 有 17 次落在抽屉外，于是纯键盘用户关不掉它。
+ */
+test('焦点在抽屉外时 Esc 也能关抽屉', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const row = dom.app.querySelector('.host-table tbody tr');
+  row.focus();
+  key(row, 'Enter');
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(drawer.hidden, false);
+
+  dom.document.body.focus();
+  key(dom.document, 'Escape');
+  await flush();
+  assert.equal(drawer.hidden, true, '焦点在抽屉外按 Esc 关不掉');
+});
+
+/**
+ * 回归（issue #28）：遮罩吞鼠标事件，键盘却能一路 Tab 到被它压住的按钮上，
+ * 焦点环画在灰蒙蒙的遮罩底下。有遮罩就按模态办：后景 inert，aria-modal 说真话。
+ */
+test('抽屉开着时后景 inert，关掉后恢复可交互', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(drawer.getAttribute('aria-modal'), 'true', '有遮罩就是模态，别说反话');
+
+  const background = ['.app-header', '.tabbar', '.view-dashboard'].map((s) => {
+    const node = dom.app.querySelector(s);
+    assert.ok(node, `找不到 ${s}，判据在空转`);
+    return node;
+  });
+  assert.deepEqual(background.map((n) => Boolean(n.inert)), [false, false, false]);
+
+  const row = dom.app.querySelector('.host-table tbody tr');
+  row.focus();
+  key(row, 'Enter');
+  await flush();
+  assert.deepEqual(background.map((n) => Boolean(n.inert)), [true, true, true], '后景该 inert');
+
+  key(dom.document, 'Escape');
+  await flush();
+  assert.deepEqual(background.map((n) => Boolean(n.inert)), [false, false, false], '关了就得放开');
+});
+
 test('标签页菜单可纯键盘打开、上下移动、Esc 收回', async (t) => {
   const { dom } = await mount(t, { hosts: [running('gpu-1')] });
   const tab = dom.app.querySelector('.tabbar .host-tabs .tab');
