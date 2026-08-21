@@ -71,6 +71,36 @@ test('焦点在抽屉外时 Esc 也能关抽屉', async (t) => {
 });
 
 /**
+ * 回归（issue #71）：有改动时 Esc 要弹「放弃未保存的修改？」，而那个框是原生
+ * `<dialog>`——`showModal()` 就在这一记 Esc 的处理器里调，浏览器随后处理同一记
+ * Esc 的默认动作（CloseWatcher），一眼看到刚开的模态框就把它关了。真机上的体感是
+ * 「按 Esc 毫无反应」，只能改用鼠标。所以要开框的那一记必须把默认动作摘掉；反过来，
+ * 框已经开着时这里一律不插手，否则等于把 Esc 焊死、框再也收不回。
+ */
+test('有改动时的 Esc：摘掉原生默认动作，框开着时不再插手', async (t) => {
+  const { dom } = await mount(t);
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  drawer.querySelectorAll('textarea')[0].value = 'A=1';
+  drawer.querySelector('.drawer-form').dispatchEvent({ type: 'input' });
+  await flush();
+
+  let prevented = 0;
+  key(dom.document, 'Escape', { preventDefault: () => { prevented += 1; } });
+  await flush();
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '有改动该先弹确认框');
+  assert.equal(drawer.hidden, false, '还没确认就关抽屉等于悄悄丢草稿');
+  assert.equal(prevented, 1, '这一记 Esc 的原生默认动作会把刚开的框顺手关掉，必须摘掉');
+
+  // 框开着时再按 Esc：交给框自己的原生 cancel，这边不许再 preventDefault
+  key(dom.document, 'Escape', { preventDefault: () => { prevented += 1; } });
+  await flush();
+  assert.equal(prevented, 1, '框已经开着还 preventDefault，等于把 Esc 焊死');
+});
+
+/**
  * 回归（issue #28）：遮罩吞鼠标事件，键盘却能一路 Tab 到被它压住的按钮上，
  * 焦点环画在灰蒙蒙的遮罩底下。有遮罩就按模态办：后景 inert，aria-modal 说真话。
  */

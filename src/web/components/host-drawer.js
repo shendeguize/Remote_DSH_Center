@@ -32,6 +32,7 @@ export function isDirty(draft, config) {
   return !deepEqual(draft, draftOf(config));
 }
 
+
 const LIVE_PHASES = ['running', 'degraded'];
 
 /**
@@ -134,10 +135,9 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     'aria-modal': 'true',
     on: {
       keydown: (e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          requestClose();
-        }
+        if (e.key !== 'Escape') return;
+        e.stopPropagation();
+        onEsc(e);
       },
     },
   }, [
@@ -243,6 +243,23 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     syncDirty();
     closeBtn.focus();
     loadLog();
+  }
+
+  /**
+   * Esc 的唯一入口。
+   *
+   * 「放弃未保存的修改？」是原生 `<dialog>`，`showModal()` 就在这一记 Esc 的处理器里调；
+   * 浏览器随后处理同一记 Esc 的默认动作（CloseWatcher），一眼看到刚开的模态框就把它
+   * 关掉——用户按 Esc 的体感是「毫无反应」，只能改用鼠标（issue #71）。所以要开框的
+   * 那一记必须把默认动作摘掉。
+   *
+   * 反过来，确认框已经开着时这里一律不插手：那记 Esc 就该由框自己的原生 cancel 收场，
+   * 再 preventDefault 就等于把 Esc 彻底焊死。
+   */
+  function onEsc(e) {
+    if (closing) return;
+    e.preventDefault?.();
+    requestClose();
   }
 
   async function requestClose() {
@@ -382,7 +399,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   // 所以焦点在抽屉里时这条不会重复触发。
   const onDocKeyDown = (e) => {
     if (e.key !== 'Escape' || root.hidden) return;
-    requestClose();
+    onEsc(e);
   };
   document.addEventListener('keydown', onDocKeyDown);
 

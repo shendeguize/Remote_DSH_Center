@@ -322,5 +322,6 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 配置文件分类：不存在/截断/空文件/顶层非对象/权限不可读各自成一类；`dshc up` 遇损坏或不可读拒绝启动且不进向导、文案指明文件与出路；`init --force` 覆盖前备份 | `tests/cli.test.js`、`tests/integration/cli.test.js` |
 | XSS 面：前端静态禁用 innerHTML 一类注入口；日志里的 HTML 原样当文本显示、不解析成节点 | `tests/architecture.test.js`、`tests/web/mount.test.js` |
 | 右键菜单落点：够得下照原点摆、右/下不够朝反方向翻、视口比菜单还小则贴边不出负坐标；层序上菜单高于 toast 且低于对话框、toast 容器不吃指针事件；真浏览器里三个方位开菜单都整块在视口内且每一项都点得到（带着一条 toast） | `tests/web/tabbar.test.js`、`scripts/ui-smoke.mjs`（S6b） |
+| 有改动时的 Esc：这一记摘掉原生默认动作（否则 CloseWatcher 把刚开的确认框顺手关掉，体感「按了没反应」），框开着时不再插手（否则 Esc 被焊死）；真键盘按下去要「弹框 → 再 Esc 收框 → 草稿还在」 | `tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S4g，判据必须带 `keyCode: 27`，否则只惊动 JS、判不出浏览器那半边） |
 | 安装器参数：不认识的旗标在 `install.sh` 与 `install.mjs` 两侧都退 3 并点名，且不留下半个安装 | `tests/install-sh.test.js` |
 | 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀 | `tests/harness/harness.test.js` |
