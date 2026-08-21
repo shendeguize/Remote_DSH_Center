@@ -251,6 +251,29 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
 });
 
+test('日志里的 HTML 原样当文本显示（远端 stderr 是攻击者能左右的）', async (t) => {
+  const { dom, es } = await mount(t);
+  const panel = dom.app.querySelector('.event-panel');
+
+  es().open();
+  es().send('snapshot', {
+    revision: 1,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('gpu-1')],
+    logs: [{
+      ts: new Date().toISOString(),
+      level: 'error',
+      host: 'gpu-1',
+      msg: '远端说：<img src=x onerror="pwned()">',
+    }],
+  });
+
+  const item = panel.querySelector('.event-list .event-item');
+  assert.match(item.textContent, /<img src=x onerror="pwned\(\)">/, '该原样显示');
+  assert.equal(item.querySelectorAll('img').length, 0, '不许解析成节点');
+});
+
 test('事件面板：按主机筛选、折叠、清空，以及新出现的主机要进下拉', async (t) => {
   const { dom, es } = await mount(t);
   const panel = dom.app.querySelector('.event-panel');

@@ -316,3 +316,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 配置落盘失败：内存不动、磁盘不动、不发 config-changed、错误是 `CONFIG_WRITE_FAILED` 人话（原始 EACCES 只进 detail）、权限恢复后照常能写 | `tests/store.test.js` |
 | 日志行上限：巨行 msg/detail 各自按字数截断且注明原文多长、正常长度一字不动、20 条 8MB 不再顶内存 | `tests/lib/bus.test.js` |
 | 配置文件分类：不存在/截断/空文件/顶层非对象/权限不可读各自成一类；`dshc up` 遇损坏或不可读拒绝启动且不进向导、文案指明文件与出路；`init --force` 覆盖前备份 | `tests/cli.test.js`、`tests/integration/cli.test.js` |
+| XSS 面：前端静态禁用 innerHTML 一类注入口；日志里的 HTML 原样当文本显示、不解析成节点 | `tests/architecture.test.js`、`tests/web/mount.test.js` |

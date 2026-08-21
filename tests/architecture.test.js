@@ -224,3 +224,20 @@ test('三档门槛各判各的，components 只报告不设卡', () => {
 test('门槛表覆盖 14 §6 的三档', () => {
   assert.deepEqual(TIERS.filter((t) => t.min !== null).map((t) => t.min).sort((a, b) => a - b), [75, 80, 90]);
 });
+
+test('前端不碰 innerHTML 一类的 HTML 注入口', () => {
+  // `el()` 里有运行期闸（传 html 就抛），但直接 `node.innerHTML = x` 绕得过去。
+  // 远端 stderr 会原样进日志、日志会进页面——这条路上一旦当 HTML 解析就是 XSS。
+  const SINKS = ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write'];
+  const bad = [];
+  for (const file of walk(path.join(SRC, 'web'))) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const [i, line] of text.split('\n').entries()) {
+      if (/禁止 innerHTML/.test(line)) continue; // utils.js 里那道闸自己要提这个词
+      for (const sink of SINKS) {
+        if (line.includes(sink)) bad.push(`${rel(file)}:${i + 1} ${sink}`);
+      }
+    }
+  }
+  assert.deepEqual(bad, [], `动态文本一律走 textContent：\n${bad.join('\n')}`);
+});
