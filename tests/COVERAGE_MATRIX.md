@@ -317,6 +317,7 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | SSE 背压：不读的客户端持续积压后被断开（宽限期内排空的不算）、读得动的客户端不被误踢、连接断开与 hub dispose 都撤掉复查定时器 | `tests/integration/sse.test.js` |
 | 配置落盘失败：内存不动、磁盘不动、不发 config-changed、错误是 `CONFIG_WRITE_FAILED` 人话（原始 EACCES 只进 detail）、权限恢复后照常能写 | `tests/store.test.js` |
 | 日志行上限：巨行 msg/detail 各自按字数截断且注明原文多长、正常长度一字不动、20 条 8MB 不再顶内存 | `tests/lib/bus.test.js` |
+| 配置被外部改过：落盘前核对指纹，对不上报 `CONFIG_STALE` 整份拒写（磁盘手改一字不动、内存不动、不发 config-changed）；自己连写多次不误判；CLI 侧退 1 且「`dshc restart`」这条出路不藏在 `--verbose` 后面 | `tests/store.test.js`、`tests/integration/cli.test.js` |
 | 配置文件分类：不存在/截断/空文件/顶层非对象/权限不可读各自成一类；`dshc up` 遇损坏或不可读拒绝启动且不进向导、文案指明文件与出路；`init --force` 覆盖前备份 | `tests/cli.test.js`、`tests/integration/cli.test.js` |
 | XSS 面：前端静态禁用 innerHTML 一类注入口；日志里的 HTML 原样当文本显示、不解析成节点 | `tests/architecture.test.js`、`tests/web/mount.test.js` |
 | 安装器参数：不认识的旗标在 `install.sh` 与 `install.mjs` 两侧都退 3 并点名，且不留下半个安装 | `tests/install-sh.test.js` |

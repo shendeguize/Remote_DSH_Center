@@ -88,12 +88,47 @@ export function flushStateSync() {
 }
 
 /**
+ * 上一次由我们读入或写出的 config 文本。落盘前拿它跟磁盘上那份比：不一致就是有人
+ * 在 manager 跑着的时候手改了文件，这时整份落盘会把他的编辑无声抹掉（issue #65）。
+ * @type {string|null} null = 还没读到过（首次落盘，无从比对）
+ */
+let configOnDiskText = null;
+
+/**
+ * 磁盘上那份还是我们上次见到的样子吗。
+ * @returns {boolean} true = 没被外部动过（或本来就没有这个文件）
+ */
+function diskMatchesLastSeen() {
+  if (configOnDiskText === null) return true;
+  let current;
+  try {
+    current = fs.readFileSync(paths.config, 'utf8');
+  } catch (err) {
+    // 文件被删了：让写去重建，不当成外部改动拦下来
+    if (err.code === 'ENOENT') return true;
+    throw new DshError('CONFIG_WRITE_FAILED', '配置没能写入磁盘，本次修改已放弃', {
+      detail: `${err.code ?? ''} ${err.message}`.trim(),
+      cause: err,
+    });
+  }
+  return current === configOnDiskText;
+}
+
+/**
  * 把一份配置落盘。失败一律翻译成 DshError——fs 的原始错误（`EACCES: permission denied,
  * open '/Users/.../config.json.tmp.123'`）当 message 端给用户既看不懂，又把内部路径抖出去。
  */
 function writeConfig(next) {
+  if (!diskMatchesLastSeen()) {
+    throw new DshError('CONFIG_STALE', '配置文件被外部改过，这次没写——免得拿旧值盖掉你的改动', {
+      detail: `文件：${paths.config}\n`
+        + '要让 manager 用上磁盘里的版本：dshc restart（会瞬断隧道，页签会自愈重连）。',
+    });
+  }
+  const text = `${JSON.stringify(next, null, 2)}\n`;
   try {
-    atomicWrite(paths.config, `${JSON.stringify(next, null, 2)}\n`);
+    atomicWrite(paths.config, text);
+    configOnDiskText = text;
   } catch (err) {
     throw new DshError('CONFIG_WRITE_FAILED', '配置没能写入磁盘，本次修改已放弃', {
       detail: `${err.code ?? ''} ${err.message}`.trim(),
@@ -157,9 +192,13 @@ function loadConfigFile() {
   try {
     text = fs.readFileSync(paths.config, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return { config: newFactoryConfig(), fresh: true };
+    if (err.code === 'ENOENT') {
+      configOnDiskText = null;
+      return { config: newFactoryConfig(), fresh: true };
+    }
     throw new DshError('INTERNAL', `无法读取 ${paths.config}：${err.message}`, { cause: err });
   }
+  configOnDiskText = text;
 
   let raw;
   try {
@@ -237,6 +276,7 @@ export function _reset() {
   stateTimer = null;
   stateDirty = false;
   config = null;
+  configOnDiskText = null;
   state = { hosts: {} };
   sshInfoByName = new Map();
   orphaned = new Set();

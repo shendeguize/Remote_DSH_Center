@@ -231,6 +231,29 @@ test('dshc config set hosts.<主机>.workdir：落盘、清空与非法值三分
   assert.equal(unknownHost.code, 3);
 });
 
+/**
+ * 回归（issue #65）：manager 跑着的时候有人拿编辑器改了 config.json。manager 内存里
+ * 那份还是旧的，下一次任何写配置的动作都会把整份旧值刷回去——手改的那几行无声消失。
+ */
+test('manager 跑着时手改 config.json：下一次 config set 拒写并指路，手改不丢', async (t) => {
+  const ctx = await bootServer(t);
+  const configFile = path.join(ctx.harness.homeDir, 'config.json');
+
+  const edited = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  edited.hosts['gpu-1'].workdir = '/手改/痕迹';
+  fs.writeFileSync(configFile, `${JSON.stringify(edited, null, 2)}\n`);
+
+  const res = await dshc(ctx, ['config', 'set', 'defaults.remoteWebPort', '9100']);
+  assert.equal(res.code, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stderr, /外部改过/, `要说清是文件被外部改过：${res.stderr}`);
+  assert.match(res.stderr, /dshc restart/, '出路要直接印出来，不许藏在 --verbose 后面');
+  assert.doesNotMatch(res.stderr, /加 --verbose/, 'detail 已经印了，就别再叫人加 --verbose');
+
+  const onDisk = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(onDisk.hosts['gpu-1'].workdir, '/手改/痕迹', '手改的那行必须还在');
+  assert.equal(onDisk.defaults.remoteWebPort, 8899, '被拒的这次写不许留下半份');
+});
+
 test('manager 不在时：需要服务的命令报错退出码 2', async (t) => {
   const ctx = await bootServer(t);
   // 直接打一个没人监听的端口，等价于 manager 未启动

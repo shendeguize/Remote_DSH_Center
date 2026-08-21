@@ -173,6 +173,50 @@ test('updateConfig 写盘失败 → 内存也不许动，且给人话（校验�
   assert.equal(JSON.parse(fs.readFileSync(paths.config, 'utf8')).defaults.remoteWebPort, 9002);
 });
 
+test('磁盘上那份被人手改过 → 拒绝写，不拿旧内存盖掉别人的改动', async (t) => {
+  const { paths } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  // 手改：manager 内存里还是旧的。整份落盘会把这处编辑无声抹掉（issue #65）
+  const edited = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
+  edited.hosts['gpu-1'].workdir = '/手改痕迹';
+  fs.writeFileSync(paths.config, `${JSON.stringify(edited, null, 2)}\n`);
+
+  const seen = [];
+  const on = (e) => seen.push(e);
+  bus.on('config-changed', on);
+  t.after(() => bus.off('config-changed', on));
+
+  assert.throws(
+    () => store.updateConfig((d) => { d.defaults.remoteWebPort = 9001; }),
+    (e) => {
+      assert.equal(e.code, 'CONFIG_STALE', `code 该是 CONFIG_STALE，实得 ${e.code}`);
+      assert.match(e.message, /外部|手改|改过/, `message 要说清是文件被外部改过：${e.message}`);
+      assert.match(e.message + (e.detail ?? ''), /restart/, '要给出路：重启 manager 读磁盘上的版本');
+      return true;
+    },
+  );
+
+  const onDisk = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
+  assert.equal(onDisk.hosts['gpu-1'].workdir, '/手改痕迹', '别人的改动必须一字不动地留在盘上');
+  assert.equal(onDisk.defaults.remoteWebPort, 8899, '这次写要整份放弃，不许半写');
+  assert.equal(store.getConfig().defaults.remoteWebPort, 8899, '没写成，内存也不许动');
+  assert.deepEqual(seen, [], '没生效的东西不许通知出去');
+});
+
+test('自己写的连续两次不许误判成外部改动', async (t) => {
+  const { paths } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  store.updateConfig((d) => { d.defaults.remoteWebPort = 9001; });
+  store.updateConfig((d) => { d.defaults.remoteWebPort = 9002; });
+  store.updateConfig((d) => { d.hosts['gpu-1'].autoStart = true; });
+
+  const onDisk = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
+  assert.equal(onDisk.defaults.remoteWebPort, 9002);
+  assert.equal(onDisk.hosts['gpu-1'].autoStart, true);
+});
+
 test('写盘失败不发事件（没生效的东西不许通知出去）', async (t) => {
   const { paths, dir } = fixture(t, { config: fullConfig() });
   await store.init({ pathsOverride: paths });

@@ -444,6 +444,12 @@ export function exitCodeFor({ status, code }) {
   return COMM_CODES.has(code) ? EXIT.comm : EXIT.failed;
 }
 
+/**
+ * 这些错的 detail 装的是「接下来怎么办」，不是长堆栈——藏在 --verbose 后面等于没说
+ * （issue #65）。
+ */
+const DETAIL_ALWAYS_CODES = new Set(['CONFIG_STALE']);
+
 function reportApiError(err, flags) {
   if (err instanceof ApiError) {
     // manager 没起：那句话本身就是完整交代，别再套「错误：…（MANAGER_DOWN）」
@@ -454,7 +460,7 @@ function reportApiError(err, flags) {
     }
     errOut(`错误：${err.message}${err.code ? `（${err.code}）` : ''}`);
     if (err.detail) {
-      if (flags?.verbose) errOut(err.detail);
+      if (flags?.verbose || DETAIL_ALWAYS_CODES.has(err.code)) errOut(err.detail);
       else errOut('加 --verbose 查看完整 detail。');
     }
     return exitCodeFor(err);

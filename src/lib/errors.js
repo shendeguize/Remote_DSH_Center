@@ -24,6 +24,8 @@ export const ERROR_HTTP_STATUS = Object.freeze({
   STATE_ILLEGAL_TRANSITION: 500,
   // 配置落盘失败（目录只读 / 磁盘满 / 卷被卸载）：改动整份放弃，内存不动
   CONFIG_WRITE_FAILED: 500,
+  // config.json 被外部手改，内存那份已过期：拒写而不是拿旧值盖掉（冲突，非故障）
+  CONFIG_STALE: 409,
   INTERNAL: 500,
 });
 
