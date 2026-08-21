@@ -3,7 +3,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { menuItems, visibleTabs } from '../../src/web/components/tabbar.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { clampMenuPosition, menuItems, visibleTabs } from '../../src/web/components/tabbar.js';
 
 const host = (name, phase, patch = {}) => ({
   name, phase, mappedUrl: null, web: { pid: 1, startedByUs: true }, ...patch,
@@ -56,4 +60,49 @@ test('菜单项：crashed 可重启但不能关停', () => {
   const by = Object.fromEntries(menuItems(host('a', 'crashed')).map((i) => [i.action, i.enabled]));
   assert.equal(by.restart, true);
   assert.equal(by.stop, false);
+});
+
+/**
+ * 菜单是 position:fixed——越出视口那一截没有滚动可言，鼠标压根落不上去（issue #67）。
+ * 尺寸取真机实测：菜单 180×128，视口 1440×900。
+ */
+test('菜单位置：够得下就照原点摆', () => {
+  const at = clampMenuPosition({ x: 300, y: 60, menuW: 180, menuH: 128, viewW: 1440, viewH: 900 });
+  assert.deepEqual(at, { left: 300, top: 60 });
+});
+
+test('菜单位置：右边/下边不够就朝反方向翻，不许越界', () => {
+  const view = { menuW: 180, menuH: 128, viewW: 1440, viewH: 900 };
+  const right = clampMenuPosition({ x: 1437, y: 60, ...view });
+  assert.equal(right.left, 1437 - 180, '右边不够该朝左翻，让菜单右缘对齐光标');
+  assert.ok(right.left + 180 <= 1440, `翻完还越界：right=${right.left + 180}`);
+
+  const corner = clampMenuPosition({ x: 1437, y: 894, ...view });
+  assert.ok(corner.left + 180 <= 1440 && corner.top + 128 <= 900, `右下角越界：${JSON.stringify(corner)}`);
+});
+
+test('菜单位置：视口比菜单还小就贴边，不许出现负坐标', () => {
+  const at = clampMenuPosition({ x: 5, y: 5, menuW: 180, menuH: 128, viewW: 100, viewH: 80 });
+  assert.ok(at.left >= 0 && at.top >= 0, `贴边不该贴到视口外：${JSON.stringify(at)}`);
+});
+
+/**
+ * 亲手右键唤出的菜单，不许被一条自己会消失的通知压住（issue #68）。这条判在 CSS
+ * 变量的序上——真浏览器里那半边由 `scripts/ui-smoke.mjs` 的 S6b 兜。
+ */
+test('层序：菜单在 toast 之上、对话框之下', () => {
+  const css = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web', 'style.css'),
+    'utf8',
+  );
+  const z = (name) => {
+    const m = css.match(new RegExp(`--z-${name}:\\s*(\\d+)`));
+    assert.ok(m, `style.css 里找不到 --z-${name}`);
+    return Number(m[1]);
+  };
+  assert.ok(z('menu') > z('toast'), `--z-menu(${z('menu')}) 要高于 --z-toast(${z('toast')})`);
+  assert.ok(z('dialog') > z('menu'), `--z-dialog(${z('dialog')}) 要高于 --z-menu(${z('menu')})`);
+  assert.ok(z('toast') > z('scrim'), `--z-toast(${z('toast')}) 要高于 --z-scrim(${z('scrim')})`);
+  assert.match(css, /\.toast-region\s*\{[^}]*pointer-events:\s*none/, 'toast 容器不该吃指针事件（间隙也会吞点击）');
+  assert.match(css, /\.toast\s*\{[^}]*pointer-events:\s*auto/, 'toast 本体要照常可点（有关闭键）');
 });

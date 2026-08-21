@@ -24,6 +24,29 @@ export function visibleTabs(hosts, { opened = new Set(), currentHost = null } = 
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** 贴边时留的这点余量，纯为让人看出「菜单到边了」而不是被裁掉半截。 */
+const MENU_EDGE_GAP = 4;
+
+/**
+ * 把菜单坐标夹进视口（issue #67）。菜单是 `position: fixed`，越出去的那一截没有
+ * 滚动可言——鼠标压根落不上去。所以右边不够就朝左翻、下边不够就朝上翻；翻过去还是
+ * 装不下（视口比菜单还小）就贴边。
+ *
+ * 纯函数：真实尺寸由调用方量好传进来，单测直接覆盖各个方位。
+ * @param {{x:number, y:number, menuW:number, menuH:number, viewW:number, viewH:number}} at
+ * @returns {{left:number, top:number}}
+ */
+export function clampMenuPosition({ x, y, menuW, menuH, viewW, viewH }) {
+  const fit = (pos, size, view) => {
+    if (pos + size <= view) return Math.max(MENU_EDGE_GAP, pos);
+    // 朝反方向翻：菜单的那一边贴着光标，这是各家原生菜单的做法
+    const flipped = pos - size;
+    if (flipped >= 0) return flipped;
+    return Math.max(MENU_EDGE_GAP, view - size - MENU_EDGE_GAP); // 视口比菜单还小 → 贴边
+  };
+  return { left: fit(x, menuW, viewW), top: fit(y, menuH, viewH) };
+}
+
 /** 菜单项按 phase / 归属裁剪（无效项禁用而非隐藏，位置稳定）。 */
 export function menuItems(host) {
   const managed = isManaged(host);
@@ -92,10 +115,26 @@ export function createTabbar({ store, actions, panes }) {
         }),
       ]));
     }
+    // 先摆到目标点再量：菜单宽高取决于这次的项数与文案，隐藏状态下量不出来。
+    // 两次赋值在同一帧内，看不出跳动。
     menu.hidden = false;
     menu.style.left = `${x}px`;
     menu.style.top = `${y}px`;
+    const at = clampToViewport(x, y);
+    menu.style.left = `${at.left}px`;
+    menu.style.top = `${at.top}px`;
     menu.querySelector('button:not(:disabled)')?.focus();
+  }
+
+  /** 量出菜单实际尺寸后夹进视口；垫片环境没有布局（尺寸全 0），原样返回。 */
+  function clampToViewport(x, y) {
+    const rect = menu.getBoundingClientRect?.();
+    const viewW = window.innerWidth ?? 0;
+    const viewH = window.innerHeight ?? 0;
+    if (!rect?.width || !viewW || !viewH) return { left: x, top: y };
+    return clampMenuPosition({
+      x, y, menuW: rect.width, menuH: rect.height, viewW, viewH,
+    });
   }
 
   /** 键盘开菜单时把它挂在标签下沿；垫片环境没有布局，退回原点即可。 */

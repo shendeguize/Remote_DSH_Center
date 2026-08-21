@@ -25,9 +25,10 @@
   --z-tabbar: 20;
   --z-banner: 30;
   --z-drawer: 40;
-  --z-menu: 50;
-  --z-scrim: 60;
-  --z-toast: 70;
+  --z-scrim: 50;
+  --z-toast: 60;
+  /* 菜单在 toast 之上：亲手唤出来的东西不许被一条自己会消失的通知压住（issue #68） */
+  --z-menu: 70;
   --z-dialog: 80;
 }
 
@@ -241,9 +242,12 @@ body {
 .toast-region {
   position: fixed; right: 16px; bottom: 16px; z-index: var(--z-toast);
   display: flex; flex-direction: column; gap: 8px; max-width: 380px;
+  /* 容器不吃指针事件，否则多条 toast 之间那 8px 间隙也会白白吞掉一次点击 */
+  pointer-events: none;
 }
 .toast {
   position: relative;
+  pointer-events: auto;
   padding: 10px 30px 10px 12px;
   border-radius: var(--radius);
   border: 1px solid var(--border);

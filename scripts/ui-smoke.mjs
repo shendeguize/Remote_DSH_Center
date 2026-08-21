@@ -616,6 +616,63 @@ async function main() {
       return '开/移/收/还焦 四步齐';
     });
 
+    // 两条一起验：菜单是 position:fixed，越出视口那一截没有滚动可言（issue #67）；
+    // 右下角那条还会撞上 toast——被动通知压住亲手唤出的菜单（issue #68）。
+    // 所以这里特意先弄出一条 toast 再开菜单，且要求**每一项**都点得到。
+    await check('S6b', '右键菜单靠边打开：整块在视口内，且不被 toast 压住', async () => {
+      await cdp.waitFor("document.querySelector('.host-tabs .tab')", '标签栏有 running 主机');
+      await cdp.eval(`
+        const t = document.querySelector('.host-tabs .tab');
+        t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 300, clientY: 60 }));
+        return true;
+      `);
+      await cdp.waitFor("document.querySelector('.context-menu') && !document.querySelector('.context-menu').hidden", '先开一次菜单取「复制」');
+      await cdp.eval(`
+        [...document.querySelectorAll('.context-menu button')].find((b) => /复制/.test(b.textContent)).click();
+        return true;
+      `);
+      await cdp.waitFor("document.querySelector('.toast-region').children.length > 0", 'toast 出现（右下角占位）');
+      const metrics = await cdp.eval('return { w: innerWidth, h: innerHeight };');
+      const corners = [
+        ['右边缘', metrics.w - 3, 60],
+        ['右下角', metrics.w - 3, metrics.h - 6],
+        ['左上角', 2, 2],
+      ];
+      for (const [where, x, y] of corners) {
+        // eslint-disable-next-line no-await-in-loop -- 逐个方位
+        await cdp.eval(`
+          const t = document.querySelector('.host-tabs .tab');
+          t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: ${x}, clientY: ${y} }));
+          return true;
+        `);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await cdp.waitFor("document.querySelector('.context-menu') && !document.querySelector('.context-menu').hidden", `${where} 开出菜单`);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const box = await cdp.eval(`
+          const m = document.querySelector('.context-menu');
+          const r = m.getBoundingClientRect();
+          const blocked = [...m.querySelectorAll('button')].filter((b) => {
+            const lr = b.getBoundingClientRect();
+            const cx = lr.left + lr.width / 2;
+            const cy = lr.top + lr.height / 2;
+            if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) return true;
+            const top = document.elementFromPoint(cx, cy);
+            return !(top && b.contains(top));
+          }).map((b) => b.textContent.trim());
+          return {
+            over: [Math.round(-r.left), Math.round(r.right - innerWidth), Math.round(-r.top), Math.round(r.bottom - innerHeight)],
+            blocked,
+          };
+        `);
+        const worst = Math.max(...box.over);
+        assert(worst <= 1, `${where} 开的菜单越出视口 ${worst}px（左/右/上/下 = ${box.over.join('/')}）`);
+        assert(box.blocked.length === 0, `${where} 开的菜单有点不到的项：${box.blocked.join('、')}`);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await cdp.key('Escape', { keyCode: 27 });
+      }
+      return `${corners.length} 个方位都在视口内`;
+    });
+
     await check('S7', '真 iframe：跨 origin 加载远端 dsh web 成功', async () => {
       const host = await waitHost(rig, 'gpu-1', ['running']);
       assert(host.mappedUrl, 'running 主机应有 mappedUrl');
