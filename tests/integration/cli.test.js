@@ -223,9 +223,12 @@ test('dshc config set hosts.<主机>.workdir：落盘、清空与非法值三分
   assert.equal(cleared.code, 0, `stderr=${cleared.stderr}`);
   assert.equal((await ctx.get('/api/config')).json.hosts['gpu-1'].workdir, null);
 
+  // 命令行上给了个非法值就是用法错误（与 `up --port` 越界同一口径），
+  // 且「哪里不对」要当场说清，不许藏在 --verbose 后面（issue #63）
   const bad = await dshc(ctx, ['config', 'set', 'hosts.gpu-1.workdir', 'relative/dir']);
-  assert.equal(bad.code, 1, `stdout=${bad.stdout}`);
-  assert.match(bad.stderr, /VALIDATION/);
+  assert.equal(bad.code, 3, `stdout=${bad.stdout}`);
+  assert.match(bad.stderr, /workdir/, `没说清是哪个字段：\n${bad.stderr}`);
+  assert.doesNotMatch(bad.stderr, /--verbose/, '值写错这种事不该还要人再敲一遍命令才看得到原因');
 
   const unknownHost = await dshc(ctx, ['config', 'set', 'hosts.zzz.workdir', '/tmp']);
   assert.equal(unknownHost.code, 3);
@@ -252,6 +255,29 @@ test('manager 跑着时手改 config.json：下一次 config set 拒写并指路
   const onDisk = JSON.parse(fs.readFileSync(configFile, 'utf8'));
   assert.equal(onDisk.hosts['gpu-1'].workdir, '/手改/痕迹', '手改的那行必须还在');
   assert.equal(onDisk.defaults.remoteWebPort, 8899, '被拒的这次写不许留下半份');
+});
+
+/**
+ * 回归（issue #63）：`withApi` 把命令体整个包住，`UsageError` 先被它接住走了
+ * reportApiError（→ 1），到不了 main 里那段「用法错误 + usage + 3」。于是
+ * `dshc start` 印的明明是用法行，退出码却和「操作失败」撞在一起——脚本里
+ * 按退出码分流的人会把参数写错当成值得重试的失败。
+ */
+test('参数写错就是用法错误：退 3、带前缀、把 usage 一并打出来', async (t) => {
+  const ctx = await bootServer(t);
+
+  for (const [args, usage] of [
+    [['start'], /dshc start <host>/],
+    [['stop'], /dshc stop <host>/],
+    [['restart'], /dshc restart <host>/],
+    [['log'], /dshc log <host>/],
+  ]) {
+    // eslint-disable-next-line no-await-in-loop -- 逐条命令看口径
+    const res = await dshc(ctx, args);
+    assert.equal(res.code, 3, `${args.join(' ')} 该按用法错误退 3：\n${res.stderr}`);
+    assert.match(res.stderr, /用法错误/, `${args.join(' ')} 少了「用法错误」前缀`);
+    assert.match(res.stderr, usage, `${args.join(' ')} 没把完整 usage 打出来`);
+  }
 });
 
 test('manager 不在时：需要服务的命令报错退出码 2', async (t) => {

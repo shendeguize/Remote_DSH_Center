@@ -279,6 +279,7 @@ CLI 在「manager 没起」与「参数写错」这两类误用上的口径：
 | 引导模式下 `open` 仍放行（页面就是向导），其他主机命令照旧拦住 | 同上 + `tests/cli.test.js`（`allowSetupMode` 只有 open 有） |
 | `open <host>` 拉起的是那台主机的深链 | 同上（账本里就是 `#/host/<name>`） |
 | `up --port` 越界当场退 3，不 spawn | 同上；判据单一源 `src/lib/validate.js` 的 `isBindablePort` |
+| 漏参数的主机命令（`start`/`stop`/`restart`/`log`）按用法错误退 3、带「用法错误」前缀并打完整 usage（`withApi` 不许吞 `UsageError`）；命令行给了非法值同样退 3，且 `VALIDATION` 的 detail 不用 `--verbose` 就能看到 | `tests/integration/cli.test.js`、`tests/cli.test.js`（`exitCodeFor` 映射） |
 
 发版守卫的 rc 语义（补丁集 0.1.0 · PR ③）：
 

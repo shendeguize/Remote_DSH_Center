@@ -57,7 +57,8 @@ test('exitCodeFor：说不上话算 2，被受理后失败算 1', () => {
   assert.equal(exitCodeFor({ status: 504, code: 'SSH_TIMEOUT' }), EXIT.comm);
   assert.equal(exitCodeFor({ status: 502, code: 'SSH_UNREACHABLE' }), EXIT.comm);
   assert.equal(exitCodeFor({ status: 409, code: 'KILL_REFUSED' }), EXIT.failed, '拒杀是动作失败，不是通信失败');
-  assert.equal(exitCodeFor({ status: 400, code: 'VALIDATION' }), EXIT.failed);
+  // 值不合法是「你敲错了」，不是「操作没成」——重试一万次也还是这个结果（issue #63）
+  assert.equal(exitCodeFor({ status: 400, code: 'VALIDATION' }), EXIT.usage);
   assert.equal(exitCodeFor({ status: 409, code: 'PORT_EXHAUSTED' }), EXIT.failed);
   assert.equal(exitCodeFor({ status: 500, code: 'LAUNCH_FAILED' }), EXIT.failed);
 });

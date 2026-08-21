@@ -441,14 +441,16 @@ const COMM_CODES = new Set(['SSH_TIMEOUT', 'SSH_UNREACHABLE']);
 /** @returns {0|1|2|3} */
 export function exitCodeFor({ status, code }) {
   if (status === 0) return EXIT.comm; // 连 manager 都没连上
-  return COMM_CODES.has(code) ? EXIT.comm : EXIT.failed;
+  if (COMM_CODES.has(code)) return EXIT.comm;
+  // 值不合法就是用法错误：命令行上敲错的东西，和 `up --port` 越界同一口径（issue #63）
+  return code === 'VALIDATION' ? EXIT.usage : EXIT.failed;
 }
 
 /**
- * 这些错的 detail 装的是「接下来怎么办」，不是长堆栈——藏在 --verbose 后面等于没说
- * （issue #65）。
+ * 这些错的 detail 装的正是用户此刻要的那一句——CONFIG_STALE 是「接下来怎么办」，
+ * VALIDATION 是「哪个字段、要什么」。藏在 --verbose 后面等于没说（issue #65、#63）。
  */
-const DETAIL_ALWAYS_CODES = new Set(['CONFIG_STALE']);
+const DETAIL_ALWAYS_CODES = new Set(['CONFIG_STALE', 'VALIDATION']);
 
 function reportApiError(err, flags) {
   if (err instanceof ApiError) {
@@ -801,6 +803,9 @@ async function withApi(parsed, fn) {
   try {
     return await fn(port);
   } catch (err) {
+    // 参数写错不是「操作失败」：原样抛给 main 那段统一处理（用法错误 + usage + 3）。
+    // 接住它就等于把 `dshc start`（漏主机名）报成退出码 1，脚本会拿去重试（issue #63）
+    if (err instanceof UsageError) throw err;
     return reportApiError(err, parsed.flags);
   }
 }
