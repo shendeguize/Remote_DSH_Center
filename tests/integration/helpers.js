@@ -128,8 +128,8 @@ export async function bootServer(t, opts = {}) {
     setupGate: false,
     hostNames: Object.keys(cfgHosts),
     remotePortOf: (name) => cfgHosts[name].remoteWebPort,
-    api: (method, p, body) => request(ctx.base, method, p, body),
-    get: (p) => request(ctx.base, 'GET', p),
+    api: (method, p, body, headers) => request(ctx.base, method, p, body, headers),
+    get: (p, headers) => request(ctx.base, 'GET', p, undefined, headers),
     async sse() {
       const c = await openSse(ctx.base);
       sseClients.push(c);
@@ -186,7 +186,7 @@ function reset() {
 // ── HTTP 客户端 ──────────────────────────────────────────────────────────
 
 /** @returns {Promise<{status:number, headers:object, text:string, json:any}>} */
-export function request(base, method, p, body) {
+export function request(base, method, p, body, extraHeaders = {}) {
   const url = new URL(p, base);
   const payload = body === undefined ? null : JSON.stringify(body);
   return new Promise((resolve, reject) => {
@@ -195,7 +195,10 @@ export function request(base, method, p, body) {
       port: url.port,
       path: url.pathname + url.search,
       method,
-      headers: payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {},
+      headers: {
+        ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}),
+        ...extraHeaders,
+      },
     }, (res) => {
       let text = '';
       res.setEncoding('utf8');

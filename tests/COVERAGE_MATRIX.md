@@ -197,6 +197,7 @@
 | 向导换步带住焦点：前进/后退都落在新步骤标题，同一步内输入时不被标题夺走，收尾后落在管理台标题（真机四跳全部复验过） | `tests/web/setup-mount.test.js` |
 | 菜单方向键真的换项（首项 → ArrowDown → End → Home），选完一项还焦到标签；外加静态闸门禁止前端把 `querySelectorAll` 结果当数组使——这类差异被垫片永久掩盖，单测判不出来 | S6、`tests/web/a11y.test.js`、`tests/architecture.test.js` |
 | 重连的快照结算在飞写操作：已 running 的快照解锁按钮，`starting` 的快照不解锁；恢复本身（横幅消失、写操作解禁、快照回灌）另有真浏览器场景 | `tests/web/store.test.js`、S9b |
+| 跨站防线：环回名判定、同源放行（含不带 Origin 的 CLI）、跨站各形态（换协议/换端口/`null`/非 URL/子域名障眼法）、Host 先判、不回显攻击者域名；集成侧验「跨站 start 被拒且主机确实没被拉起」与「非环回 Host 连 `/`、`/app.js` 一起拒」 | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

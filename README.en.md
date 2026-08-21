@@ -227,6 +227,11 @@ under that assumption:
 - The manager binds `127.0.0.1` only and has **no authentication**. Anything that can run
   code on your machine can drive it, and therefore reach your remotes through the tunnels.
   Do not expose it on `0.0.0.0` and do not forward its port to the internet.
+- Binding to loopback does not stop a *browser* from making requests on someone else's behalf,
+  so there are two cross-site gates: a request carrying an `Origin` must carry the manager's
+  own origin, and `Host` must be a loopback name (the latter is what stops "attacker domain
+  resolves to 127.0.0.1", which would otherwise put the page inside their origin). The CLI
+  sends no `Origin` and is unaffected.
 - The tunnel is plain `ssh -L`: encryption and authentication are entirely your ssh config
   and keys. This tool never handles credentials and stores no passwords.
 - On the remote it only writes `~/.dsh_center_remote/` (logs and patch files). It touches

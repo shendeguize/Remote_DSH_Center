@@ -12,9 +12,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { FACTORY_DEFAULTS } from './defaults.js';
-import { asDshError } from './lib/errors.js';
+import { DshError, asDshError } from './lib/errors.js';
 import { isMainEntry } from './lib/entry.js';
 import { logEvent } from './lib/bus.js';
+import { checkRequestOrigin } from './lib/origin-guard.js';
 import * as daemon from './daemon.js';
 import * as launcher from './launcher.js';
 import * as monitor from './monitor.js';
@@ -211,6 +212,20 @@ export async function main({ portOverride = null, skipBoot = false } = {}) {
   runtime.handler = handler;
 
   const httpServer = http.createServer((req, res) => {
+    // 跨站防线放在最前面，静态页也要挡：DNS rebinding 是先让攻击者的域名把这个页面
+    // 装进他自己的 origin，再从那儿读写 API。
+    const verdict = checkRequestOrigin({ headers: req.headers, port: runtime.port });
+    if (!verdict.ok) {
+      // 错误体沿用全端点统一契约（13 §1.1），连静态页这条路也照办
+      const body = JSON.stringify(new DshError(verdict.code, verdict.message).toBody());
+      res.writeHead(verdict.status, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+      });
+      res.end(body);
+      return;
+    }
     const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
     if (pathname.startsWith('/api/')) {
       handler(req, res);
