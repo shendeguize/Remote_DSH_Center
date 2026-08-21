@@ -5,9 +5,14 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 import { createHarness, FAKE_SSH } from './index.js';
+import { newHostState, readState, writeState } from './state.js';
 import { unshq } from './shell-word.js';
 import { buildProbeScript, kvOne, parseProtoOutput } from '../../src/lib/proto.js';
 import { sshExec } from '../../src/lib/ssh.js';
@@ -494,6 +499,60 @@ test('孤儿看护不误杀：拥有者还活着，假 dsh web 照常服务', as
   assert.ok(alive(Number(pid)), '拥有者健在期间不许自杀');
   const got = await fetch(`http://127.0.0.1:${r.actualPort}/api/health`);
   assert.equal(got.status, 200);
+});
+
+test('state.json 落盘是原子的：写者狂写时，无锁读也只看到完整状态（issue #83）', async (t) => {
+  // fake-ssh 的 POLL/VERIFY 都在锁外 readState；读到写了一半的 JSON 会被 catch 吞成
+  // 空状态，进而伪造出「拉起后进程已消失」。40 台并发下每 3～6 轮必中一次。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-state-'));
+
+  const seed = { hosts: {} };
+  for (let i = 0; i < 40; i += 1) {
+    seed.hosts[`gpu-${i}`] = newHostState({
+      processes: Object.fromEntries([1000, 1001, 1002].map((pid) => [String(pid), {
+        args: 'dsh web --no-open --host 127.0.0.1 --port 40000',
+        logName: 'dsh-web.log',
+        env: {},
+        patches: [],
+        extraArgs: [],
+        workdir: null,
+      }])),
+    });
+  }
+  writeState(seed, dir);
+
+  const writer = path.join(dir, 'writer.mjs');
+  fs.writeFileSync(writer, [
+    `import { mutate } from ${JSON.stringify(path.join(import.meta.dirname, 'state.js'))};`,
+    'const [dir] = process.argv.slice(2);',
+    'for (let i = 0; i < 2000; i += 1) mutate((s) => { s.hosts["gpu-1"].launchCount = i; }, dir);',
+  ].join('\n'));
+
+  const kids = [1, 2, 3, 4, 5, 6].map(() => spawn(process.execPath, [writer, dir], { stdio: 'ignore' }));
+  // 收尾要等写者真的走掉：它们还在造 .state.*.tmp 的话，rm 会撞 ENOTEMPTY
+  const stopWriters = async () => {
+    for (const k of kids) k.kill('SIGKILL');
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && kids.some((k) => alive(k.pid))) {
+      // eslint-disable-next-line no-await-in-loop -- 轮询等写者退出
+      await new Promise((r) => { setTimeout(r, 20); });
+    }
+  };
+  t.after(stopWriters);
+
+  let reads = 0;
+  let torn = 0;
+  const until = Date.now() + 1_500;
+  while (Date.now() < until) {
+    reads += 1;
+    const got = readState(dir);
+    if (Object.keys(got.hosts ?? {}).length !== 40) torn += 1;
+  }
+  await stopWriters();
+  fs.rmSync(dir, { recursive: true, force: true });
+
+  assert.ok(reads > 1_000, `样本太少（${reads} 次读），这条用例失去意义`);
+  assert.equal(torn, 0, `${reads} 次无锁读里有 ${torn} 次读到残缺状态`);
 });
 
 function alive(pid) {

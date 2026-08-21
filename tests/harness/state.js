@@ -68,9 +68,19 @@ export function readState(dir = harnessDir()) {
   }
 }
 
+/**
+ * 原子落盘：同目录 tmp + rename。
+ *
+ * fake-ssh 的 POLL/VERIFY 在锁外读状态（垫片进程短命，读一眼不值当加锁），
+ * 直接 writeFileSync 会让它们读到写了一半的 JSON——解析失败被吞成空状态，
+ * 于是 VERIFY 报 ALIVE=no，伪造出「拉起后进程已消失」（issue #83）。
+ * rename 之后读者只会看到某一个完整版本。
+ */
 export function writeState(state, dir = harnessDir()) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(stateFile(dir), `${JSON.stringify(state, null, 2)}\n`);
+  const tmp = path.join(dir, `.state.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+  fs.renameSync(tmp, stateFile(dir));
 }
 
 /** 加锁读改写。mutator 返回值作为 mutate 的返回值。 */

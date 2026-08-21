@@ -331,3 +331,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 有改动时的 Esc：这一记摘掉原生默认动作（否则 CloseWatcher 把刚开的确认框顺手关掉，体感「按了没反应」），框开着时不再插手（否则 Esc 被焊死）；真键盘按下去要「弹框 → 再 Esc 收框 → 草稿还在」 | `tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S4g，判据必须带 `keyCode: 27`，否则只惊动 JS、判不出浏览器那半边） |
 | 安装器参数：不认识的旗标在 `install.sh` 与 `install.mjs` 两侧都退 3 并点名，且不留下半个安装 | `tests/install-sh.test.js` |
 | 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀 | `tests/harness/harness.test.js` |
+| 装置状态原子落盘：写者狂写时锁外读到的永远是完整状态（残缺会被 `catch` 吞成空状态，伪造出 VERIFY 的「进程已消失」）| `tests/harness/harness.test.js` |
