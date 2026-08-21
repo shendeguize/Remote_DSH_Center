@@ -163,6 +163,9 @@ export function createSetupWizard({
     frozen: null, // 提交快照：确认后迟到的探测结果不得改它
   };
 
+  // 焦点已经安放在第几步（初值等于起始步，免得首屏就把焦点从别处抢过来）
+  let focusedStep = ui.step;
+
   const stepper = el('ol.stepper', { 'aria-label': '初始化步骤' });
   const panel = el('form.step-panel', { novalidate: 'novalidate' });
   const foot = el('footer.wizard-foot');
@@ -445,13 +448,33 @@ export function createSetupWizard({
       return;
     }
     renderStepper();
+    const had = panel.contains(document.activeElement) ? document.activeElement : null;
+    const hadLabel = had?.getAttribute?.('aria-label') ?? null;
     clear(panel);
     const step = SETUP_STEPS[ui.step];
-    panel.append(el('h2.step-title', { text: `${ui.step + 1}. ${step.title}` }));
+    const title = el('h2.step-title', { text: `${ui.step + 1}. ${step.title}`, tabindex: '-1' });
+    panel.append(title);
     if (step.fields) renderFields(step);
     else if (step.kind === 'host-select') renderHostStep();
     else renderPreview();
     syncFoot();
+
+    // 换步要把焦点带过去。整块面板是重建的，按下「下一步」的那个按钮随即被移除，
+    // 焦点于是落回 body——键盘用户每一步都得从文档顶部重新 Tab 起。焦点给标题
+    // （而不是第一个输入框）：读屏先念出「第几步·做什么」，再 Tab 就是第一个字段。
+    // 只在真的换步时动，别在字段校验、主机探测这些重渲染里抢焦点。
+    if (focusedStep !== ui.step) {
+      focusedStep = ui.step;
+      title.focus();
+    } else if (had && document.activeElement !== had) {
+      // 同一步里的重渲染也会吃掉焦点：进第 3 步后候选异步到达要再渲一次，
+      // 每台主机探测完也各渲一次。能认出原来那个控件（勾选框都有 aria-label）
+      // 就还给它，认不出就退回标题——总之别让焦点掉回文档顶端。
+      const same = hadLabel
+        ? [...panel.querySelectorAll('[aria-label]')].find((n) => n.getAttribute('aria-label') === hadLabel)
+        : null;
+      (same && !same.disabled ? same : title).focus();
+    }
   }
 
   function goNext() {

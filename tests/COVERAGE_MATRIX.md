@@ -194,6 +194,7 @@
 | 焦点扛住整表重建：驱动侧连续采样 14 次，全程守在原来那一行（页面里的 `setInterval` 会被后台节流打到 1s 一次，采不到忙碌窗口；摘掉守卫则 14/14 掉 `body`） | S4d |
 | 行内控件的按键归控件自己：真机上 Enter/Space 都发出探测请求且抽屉不开（原生激活只有真浏览器验得到——垫片不会因为 Enter 就替按钮生成 click；单测那半边在 `mount.test.js` 里守「按了不开抽屉」） | S4e |
 | 事件面板：按主机筛选、折叠（`hidden` + `aria-expanded`）、清空、以及单条 `host-changed` 带来的新主机要进筛选下拉（此前只订 `hosts:reset`，缺这台） | `tests/web/mount.test.js` |
+| 向导换步带住焦点：前进/后退都落在新步骤标题，同一步内输入时不被标题夺走，收尾后落在管理台标题（真机四跳全部复验过） | `tests/web/setup-mount.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

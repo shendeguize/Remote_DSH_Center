@@ -109,6 +109,35 @@ test('一路下一步走到确认页：JSON 预览带上勾选结果', async (t)
   assert.equal(preview.hosts['gpu-1'].autoStart, true);
 });
 
+test('换步把焦点带到新步骤的标题上（前进、后退都算）', async (t) => {
+  const { dom, wizard: w } = await mountSetup(t, { hosts: [hostView('gpu-1')] });
+  const wizard = w();
+  const title = () => wizard.querySelector('.step-title');
+
+  // 前提：焦点先落在「下一步」上——它随重建被移除，若不接管就掉回 body
+  next(wizard).focus();
+  assert.equal(dom.document.activeElement, next(wizard));
+
+  next(wizard).click();
+  await flush();
+  assert.equal(dom.document.activeElement, title(), '前进一步后焦点该落在新标题上');
+  assert.match(title().textContent, /2\. 远端约定/);
+  assert.equal(title().getAttribute('tabindex'), '-1', '标题平时不该占 Tab 顺序');
+
+  back(wizard).focus();
+  back(wizard).click();
+  await flush();
+  assert.equal(dom.document.activeElement, title(), '后退也一样');
+  assert.match(title().textContent, /1\. 本机服务/);
+
+  // 同一步内的重渲染（改字段触发校验）不许抢焦点
+  const [port] = fields(wizard);
+  port.focus();
+  typeInto(port, '70000');
+  await flush();
+  assert.equal(dom.document.activeElement, port, '还在填这个字段，焦点不许被标题夺走');
+});
+
 test('提交：POST /api/setup 用预览内容，端口未变则回管理台', async (t) => {
   let saved = false;
   const { calls, dom, wizard: w } = await mountSetup(t, {
@@ -138,6 +167,12 @@ test('提交：POST /api/setup 用预览内容，端口未变则回管理台', a
   assert.ok(submitted, '必须发出 POST /api/setup');
   assert.equal(submitted.body.hosts['gpu-1'].enabled, true);
   assert.equal(dom.window.location.hash, '#/', '端口没变直接进管理台');
+
+  // 向导整块被藏起来，焦点会跟着一起消失。刚用键盘走完四步的人不该被丢在文档顶端。
+  const landed = dom.document.activeElement;
+  assert.notEqual(landed, dom.document.body, '收尾后焦点掉回 body');
+  assert.equal(landed, dom.app.querySelector('.view-dashboard').querySelector('h2'),
+    '该落在管理台的标题上');
 });
 
 test('手改 JSON：非法不许提交也不许返回；合法则原样提交', async (t) => {

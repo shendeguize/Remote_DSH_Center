@@ -124,6 +124,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
 
   // ── 路由 ─────────────────────────────────────────────────────────────
   let currentRoute = { kind: 'dashboard', host: null, raw: '#/' };
+  let wizardWasOpen = false; // 用来认出「刚从向导出来」这一跳
 
   function renderRoute() {
     const guarded = applyGuard(currentRoute, { setupCompleted: store.state.manager.setupCompleted });
@@ -145,6 +146,8 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     panes.show(openable ? route.host : null);
 
     const showWizard = !guarded.blocked && route.kind === 'setup';
+    const leavingWizard = wizardWasOpen && !showWizard;
+    wizardWasOpen = showWizard;
     if (showWizard) wizard.open();
     else wizard.close();
     // 向导期间不显示管理台专属的写操作入口，避免误触未生效的配置
@@ -160,6 +163,16 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
         el('p.empty-hint', { text: msg }),
         el('a.link', { href: '#/', text: '返回管理台' }),
       );
+    }
+
+    // 向导收尾：整块向导被藏起来，焦点跟着它一起没了（掉回 body），键盘用户刚走完
+    // 四步、落到一个陌生页面还得从文档顶端重新 Tab。把焦点交给管理台的标题。
+    if (leavingWizard && !dashboard.hidden) {
+      const heading = dashboard.querySelector('h2'); // 管理台第一块就是主机表的「主机」
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus();
+      }
     }
   }
 
