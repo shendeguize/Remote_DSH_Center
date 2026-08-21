@@ -55,6 +55,9 @@ export function createHarness(opts = {}) {
     DSHC_HOME: homeDir,
     DSHC_HARNESS_DIR: harnessDir,
     DSHC_SSH_CONFIG: sshConfigPath,
+    // 假 dsh web 是 detached 起的（要活过 ssh 命令），运行被打断时没人收它。
+    // 下发「拥有者」pid，垫片据此自查：造它的那次运行没了就自己退。
+    DSHC_HARNESS_OWNER_PID: String(process.pid),
     DSHC_SSH_BIN: `${process.execPath} ${FAKE_SSH}`,
     DSHC_SCP_BIN: `${process.execPath} ${FAKE_SCP}`,
     // 拦住浏览器：跑用例不该弹窗，而「有没有去开」本身是 dshc open 的核心行为

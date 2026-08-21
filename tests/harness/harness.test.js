@@ -471,6 +471,53 @@ test('本机端口被占：隧道垫片报 cannot listen to port 并退出 255',
   assert.match(stderr, /cannot listen to port: 27912/);
 });
 
+test('孤儿看护：装置拥有者进程没了，假 dsh web 自己退（打断的运行不留残骸）', async (t) => {
+  const h = harnessFixture(t);
+  const dead = await deadPid();
+  // 模拟「起垫片的那次运行已经不在了」：把拥有者指向一个确定已死的 pid
+  process.env.DSHC_HARNESS_OWNER_PID = String(dead);
+
+  await runLaunchSequence('gpu-1', { port: 0 });
+  const [pid] = Object.keys(h.hostState('gpu-1').processes);
+
+  const gone = await waitGone(Number(pid), 6_000);
+  assert.ok(gone, `拥有者 ${dead} 已死，垫片 ${pid} 应自行退出`);
+});
+
+test('孤儿看护不误杀：拥有者还活着，假 dsh web 照常服务', async (t) => {
+  const h = harnessFixture(t);
+
+  const r = await runLaunchSequence('gpu-1', { port: 0 });
+  const [pid] = Object.keys(h.hostState('gpu-1').processes);
+
+  await new Promise((res) => { setTimeout(res, 1_500); });
+  assert.ok(alive(Number(pid)), '拥有者健在期间不许自杀');
+  const got = await fetch(`http://127.0.0.1:${r.actualPort}/api/health`);
+  assert.equal(got.status, 200);
+});
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** 造一个「确定已经死掉」的 pid：起个立刻自退的子进程，等它 close 后回收其 pid。 */
+async function deadPid() {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+  await new Promise((r) => child.on('close', r));
+  return child.pid;
+}
+
+async function waitGone(pid, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (!alive(pid)) return true;
+    // eslint-disable-next-line no-await-in-loop -- 轮询等进程消失
+    await new Promise((r) => { setTimeout(r, 100); });
+  }
+  return false;
+}
+
 function waitConnect(port, timeoutMs = 3_000) {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {

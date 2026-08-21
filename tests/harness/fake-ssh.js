@@ -174,6 +174,8 @@ function replyLaunch(name, body) {
   });
 
   const args = [FAKE_WEB, '--port', portTok, '--label', name];
+  const owner = process.env.DSHC_HARNESS_OWNER_PID;
+  if (owner) args.push('--owner-pid', owner);
   if (forceBindErr) args.push('--force-bind-error');
   else if (failStart) args.push('--fail-start');
 

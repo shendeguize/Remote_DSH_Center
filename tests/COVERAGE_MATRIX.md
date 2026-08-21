@@ -318,3 +318,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 配置文件分类：不存在/截断/空文件/顶层非对象/权限不可读各自成一类；`dshc up` 遇损坏或不可读拒绝启动且不进向导、文案指明文件与出路；`init --force` 覆盖前备份 | `tests/cli.test.js`、`tests/integration/cli.test.js` |
 | XSS 面：前端静态禁用 innerHTML 一类注入口；日志里的 HTML 原样当文本显示、不解析成节点 | `tests/architecture.test.js`、`tests/web/mount.test.js` |
 | 安装器参数：不认识的旗标在 `install.sh` 与 `install.mjs` 两侧都退 3 并点名，且不留下半个安装 | `tests/install-sh.test.js` |
+| 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀 | `tests/harness/harness.test.js` |

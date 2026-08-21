@@ -9,6 +9,9 @@
 
 import http from 'node:http';
 
+/** 孤儿自查间隔：既要够快让开发机不攒残骸，又不至于把 CPU 耗在轮询上。 */
+const ORPHAN_CHECK_MS = 500;
+
 const argv = process.argv.slice(2);
 function flag(name, fallback = null) {
   const i = argv.indexOf(`--${name}`);
@@ -62,6 +65,20 @@ server.listen(port, '127.0.0.1', () => {
     }, dieAfter);
   }
 });
+
+// 孤儿看护：垫片是 detached 起的，运行被 Ctrl-C/SIGKILL 掐断或收尾里抛错时都不会有人来收。
+// 造它的那次运行一消失就自己退，免得在开发机上越攒越多、还占着真实 bind 的端口。
+const ownerPid = flag('owner-pid') === null ? null : Number(flag('owner-pid'));
+if (ownerPid !== null) {
+  const watchdog = setInterval(() => {
+    try {
+      process.kill(ownerPid, 0);
+    } catch {
+      process.exit(0);
+    }
+  }, ORPHAN_CHECK_MS);
+  watchdog.unref();
+}
 
 process.on('SIGTERM', () => {
   process.stdout.write('received SIGTERM, shutting down\n');

@@ -159,16 +159,21 @@ export async function bootServer(t, opts = {}) {
   await start();
 
   t.after(async () => {
-    // 契约校验（TST-05）：本用例收到的每一帧都必须过 13 章的校验器
-    for (const [i, c] of sseClients.entries()) {
-      assertSseStream(c.frames, { label: `SSE#${i}` });
-      c.close();
+    // 回收必须无条件发生：契约校验一抛，后面的清理若被跳过，假 dsh web 就成了孤儿
+    try {
+      // 契约校验（TST-05）：本用例收到的每一帧都必须过 13 章的校验器
+      for (const [i, c] of sseClients.entries()) {
+        assertSseStream(c.frames, { label: `SSE#${i}` });
+        c.close();
+      }
+    } finally {
+      for (const c of sseClients) c.close();
+      await server._shutdownForTest();
+      reset();
+      launcher._setWait(null);
+      harness.cleanup();
+      restore();
     }
-    await server._shutdownForTest();
-    reset();
-    launcher._setWait(null);
-    harness.cleanup();
-    restore();
   });
 
   return ctx;
