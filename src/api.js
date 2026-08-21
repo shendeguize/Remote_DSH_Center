@@ -19,6 +19,12 @@ import * as store from './store.js';
 import * as tunnel from './tunnel.js';
 
 const MAX_BODY_BYTES = 1_048_576;
+/**
+ * 超限之后还愿意替对面读完的上限（issue #89）。
+ * 超一点点多半是「值填大了」，读完再回 400，对面能看到那句人话；
+ * 超到这个量级就是在灌了，直接掐——排空不是义务。
+ */
+const MAX_DRAIN_BYTES = 4 * MAX_BODY_BYTES;
 const SSE_HEARTBEAT_MS = 25_000;
 
 /**
@@ -78,18 +84,33 @@ function sendError(res, err) {
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    let over = false;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > MAX_DRAIN_BYTES) {
+        // 排空也得有个头：一直读下去，对面每传 64MB 我们就得吃 64MB 的临时缓冲，
+        // 常驻进程的 RSS 会被这么顶上去。到这个量级已经不像「不小心传大了」，掐掉。
         reject(new DshError('VALIDATION', `请求体超过 ${MAX_BODY_BYTES} 字节上限`));
         req.destroy();
+        return;
+      }
+      if (over) return; // 超了就一路丢弃：不攒内存，但也不掐连接
+      if (size > MAX_BODY_BYTES) {
+        over = true;
+        chunks.length = 0; // 已经攒的立刻扔掉，超限的体一个字节也不留在内存里
         return;
       }
       chunks.push(c);
     });
     req.on('error', reject);
     req.on('end', () => {
+      // 等它传完再回话。半路 destroy 或半路回话都会让对面拿到 ECONNRESET/EPIPE，
+      // 只看到「网络错误」而不知道是体太大（issue #89）。
+      if (over) {
+        reject(new DshError('VALIDATION', `请求体超过 ${MAX_BODY_BYTES} 字节上限`));
+        return;
+      }
       const text = Buffer.concat(chunks).toString('utf8').trim();
       if (text === '') return resolve({});
       try {

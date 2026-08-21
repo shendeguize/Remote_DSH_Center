@@ -112,3 +112,34 @@ test('启动目录的元字符同样只当路径看', async (t) => {
     assert.equal(res.json.code, 'VALIDATION');
   }
 });
+
+test('请求体超限：回 400 说清原因，不是把连接掐了（issue #89）', async (t) => {
+  const ctx = await bootServer(t);
+
+  // 2MB：超了 1MB 上限，但还在「替对面读完再回话」的排空额度内——这是「值填大了」的形态
+  const res = await ctx.api('PUT', '/api/hosts/gpu-1/config', { workdir: `/tmp/${'x'.repeat(2 * 1024 * 1024)}` });
+
+  assert.equal(res.status, 400, `应回 400 而不是断链，实得 ${res.status}`);
+  assert.equal(res.json.code, 'VALIDATION');
+  assert.match(res.json.error, /请求体超过/, '要说清是体太大，否则页面只能显示「网络错误」');
+
+  // 拒了就不能留下痕迹，且连接没被拆坏
+  const host = (await ctx.get('/api/hosts')).json.hosts.find((h) => h.name === 'gpu-1');
+  assert.equal(host.config.workdir, null, '超限的请求居然还是把值写进去了');
+});
+
+test('灌超大体：排空有额度，掐掉之后 manager 照常服务（issue #89）', async (t) => {
+  const ctx = await bootServer(t);
+
+  // 64MB × 3：远超排空额度，服务端会掐链。客户端这侧因此可能拿到 ECONNRESET/EPIPE，
+  // 那是「灌」应得的待遇；要守的是 manager 不许被这么顶垮。
+  for (let i = 0; i < 3; i += 1) {
+    // eslint-disable-next-line no-await-in-loop -- 顺序灌
+    await ctx.api('PUT', '/api/hosts/gpu-1/config', { workdir: `/tmp/${'x'.repeat(64 * 1024 * 1024)}` })
+      .catch(() => null);
+  }
+
+  const after = await ctx.get('/api/hosts');
+  assert.equal(after.status, 200, '被灌完之后接口要照常');
+  assert.equal(after.json.hosts.find((h) => h.name === 'gpu-1').config.workdir, null, '一个字节也不许写进去');
+});

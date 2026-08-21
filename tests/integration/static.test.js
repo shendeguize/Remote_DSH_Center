@@ -50,8 +50,22 @@ test('GET / 返回页面外壳，且引用的模块与样式都可取', async (t
 test('目录穿越被拒，未知路径 404', async (t) => {
   const ctx = await bootServer(t);
 
-  const escaped = await ctx.get('/../defaults.js');
-  assert.equal(escaped.status === 403 || escaped.status === 404, true, `实得 ${escaped.status}`);
+  // 一种写法拦住了不代表都拦住：编码形态是这类漏洞的常客
+  const forms = [
+    '/../defaults.js',
+    '/../../../../etc/passwd',
+    '/..%2f..%2f..%2fetc/passwd',
+    '/%2e%2e/%2e%2e/%2e%2e/etc/passwd',
+    '/.%2e/.%2e/etc/passwd',
+    '/....//....//etc/passwd',
+    '/app.js/../../../../etc/passwd',
+  ];
+  for (const p of forms) {
+    // eslint-disable-next-line no-await-in-loop -- 逐条
+    const res = await ctx.get(p);
+    assert.equal([403, 404].includes(res.status), true, `${p} 实得 ${res.status}`);
+    assert.doesNotMatch(res.text, /root:x:0:0|configVersion/, `${p} 把文件内容漏出来了`);
+  }
 
   const missing = await ctx.get('/nope.js');
   assert.equal(missing.status, 404);
