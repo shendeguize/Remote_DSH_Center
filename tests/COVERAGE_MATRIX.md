@@ -193,6 +193,7 @@
 | 就地校验的时机：打字不吵、离开字段就报、改对即灭（`blur` 不冒泡——第一版把处理器挂在 form 上，垫片能过、真机收不到） | S4c |
 | 焦点扛住整表重建：驱动侧连续采样 14 次，全程守在原来那一行（页面里的 `setInterval` 会被后台节流打到 1s 一次，采不到忙碌窗口；摘掉守卫则 14/14 掉 `body`） | S4d |
 | 行内控件的按键归控件自己：真机上 Enter/Space 都发出探测请求且抽屉不开（原生激活只有真浏览器验得到——垫片不会因为 Enter 就替按钮生成 click；单测那半边在 `mount.test.js` 里守「按了不开抽屉」） | S4e |
+| 事件面板：按主机筛选、折叠（`hidden` + `aria-expanded`）、清空、以及单条 `host-changed` 带来的新主机要进筛选下拉（此前只订 `hosts:reset`，缺这台） | `tests/web/mount.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

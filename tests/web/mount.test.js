@@ -251,6 +251,57 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
 });
 
+test('事件面板：按主机筛选、折叠、清空，以及新出现的主机要进下拉', async (t) => {
+  const { dom, es } = await mount(t);
+  const panel = dom.app.querySelector('.event-panel');
+  const filter = panel.querySelector('.event-filter');
+  const lines = () => panel.querySelectorAll('.event-list .event-item').map((li) => li.textContent);
+
+  es().open();
+  const ts = new Date().toISOString();
+  es().send('snapshot', {
+    revision: 3,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('gpu-1'), hostView('gpu-2')],
+    logs: [
+      { ts, level: 'info', host: 'gpu-1', msg: '一号说话' },
+      { ts, level: 'warn', host: 'gpu-2', msg: '二号抱怨' },
+      { ts, level: 'info', host: null, msg: 'manager 自己' },
+    ],
+  });
+  assert.equal(lines().length, 3);
+
+  filter.value = 'gpu-2';
+  filter.dispatchEvent({ type: 'change' });
+  assert.deepEqual(lines().map((s) => /二号抱怨/.test(s)), [true], '筛选后只剩这台的');
+
+  filter.value = '';
+  filter.dispatchEvent({ type: 'change' });
+  assert.equal(lines().length, 3, '选回「全部主机」要全回来');
+
+  const toggle = panel.querySelector('.collapse-toggle');
+  const body = panel.querySelector('.event-body');
+  toggle.click();
+  assert.equal(body.hidden, true, '折叠要真藏起来（hidden 才会一并从无障碍树里消失）');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.textContent, '展开');
+  toggle.click();
+  assert.equal(body.hidden, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+
+  // 新主机是靠 host-changed 单条到达的（ssh config 里多出一台、向导收尾解门禁都走这条），
+  // 只认整份快照的话，下拉里就永远缺这台，没法单独看它的事件。
+  es().send('host-changed', { revision: 4, host: hostView('gpu-9') });
+  await flush();
+  assert.equal(filter.options.some((o) => o.value === 'gpu-9'), true, '新主机没进筛选下拉');
+  assert.equal(filter.value, '', '重建下拉不该悄悄换掉当前选择');
+
+  panel.querySelectorAll('.btn').find((b) => b.textContent === '清空').click();
+  assert.equal(lines().length, 0);
+  assert.match(panel.querySelector('.event-list').textContent, /暂无事件/);
+});
+
 test('行内控件上的 Enter/Space 归控件自己，不去开抽屉', async (t) => {
   const { dom } = await mount(t);
   const row = dom.app.querySelector('.host-table tbody tr');

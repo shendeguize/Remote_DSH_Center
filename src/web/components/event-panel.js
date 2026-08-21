@@ -69,12 +69,17 @@ export function createEventPanel({ store }) {
     }
   }
 
+  const rerenderAll = () => {
+    renderFilter();
+    render();
+  };
+
   const offs = [
     store.on('events:changed', render),
-    store.on('hosts:reset', () => {
-      renderFilter();
-      render();
-    }),
+    store.on('hosts:reset', rerenderAll),
+    // 单条 host-changed 也可能带来一台没见过的主机（ssh config 多出一台、向导收尾
+    // 解门禁都走这条）。只认整份快照的话，下拉里就一直缺这台。
+    store.on('hosts:changed', rerenderAll),
   ];
   renderFilter();
   render();
