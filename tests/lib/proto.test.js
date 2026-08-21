@@ -93,7 +93,7 @@ test('§1.1 探测模板逐字一致', () => {
   noRawNewline(s, 'probe');
   assert.equal(
     s,
-    'echo "DSH_BIN=$(command -v dsh || echo MISSING)"; if command -v dsh >/dev/null 2>&1; then echo "DSH_VERSION=$(dsh --version 2>/dev/null | head -n 1)"; fi; H="${DSH_HOME:-$HOME/.dsh}"; printf \'DSH_HOME=%s\\n\' "$H"; if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi; echo "RUNNING_DSH_WEB<<EOF"; ps -eo pid,args | grep "[d]sh.*web" || true; echo "EOF"; echo "PROBE_DONE=yes"',
+    'echo "DSH_BIN=$(command -v dsh || echo MISSING)"; if command -v dsh >/dev/null 2>&1; then echo "DSH_VERSION=$(dsh --version 2>/dev/null | head -n 1)"; fi; H="${DSH_HOME:-$HOME/.dsh}"; printf \'DSH_HOME=%s\\n\' "$H"; if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi; echo "RUNNING_DSH_WEB<<EOF"; ps -eo pid,args | grep "[d]sh.*web" | grep -v "^ *$$ " || true; echo "EOF"; echo "PROBE_DONE=yes"',
   );
 });
 

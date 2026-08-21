@@ -42,6 +42,7 @@
 | PROBE → no_dsh（缺二进制 / 缺 web profile 两种原因） | `tests/harness/harness.test.js`、`tests/prober.test.js` |
 | PROBE → unreachable（ssh 失败 / 超时 / 输出截断缺哨兵） | `tests/lib/ssh.test.js`、`tests/prober.test.js`、IT-01 |
 | PROBE 发现手动实例（RUNNING_DSH_WEB → manualInstances） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-05（拒杀演练） |
+| PROBE 不把自己那层 `sh -c` 记成手动实例（`$$` 排除；假 `ps` 一并回放调用方自身那行，否则测不出自匹配） | `tests/harness/harness.test.js`（ready 与 no_dsh 两态）、`tests/lib/proto.test.js` §1.1 |
 | LISTEN=unknown（远端无 ss）不作否定证据 | `tests/harness/harness.test.js`（no-ss） |
 | LAUNCH 模板逐字一致 + 双层转义算例 + `sh -n` 语法 | `tests/lib/proto.test.js` §1.2 |
 | LAUNCH `--patch` 紧跟 `web`（启动器旗标顺序） | `tests/lib/proto.test.js` §1.2、IT-09 |

@@ -67,7 +67,27 @@ function sleepBlocking(ms) {
   while (Date.now() < until) { /* spin：垫片是短命进程，无需异步 */ }
 }
 
-function replyProbe(name) {
+/**
+ * 还原远端 `ps -eo pid,args | grep …` 那条流水线。
+ *
+ * 关键点：真远端的 ps 表里**也有执行本脚本的那层 `sh -c`**，它的命令行就是脚本自身，
+ * 于是可能被脚本自己的 grep 命中（真机验收发现的自匹配）。垫片必须一并回放这一行，
+ * 否则这类自匹配缺陷在假远端永远测不出来。自身 pid 借用垫片进程号，不会与登记的假
+ * 远端 pid 相撞。
+ */
+function psMatches(h, body) {
+  const rows = [];
+  for (const [pid, p] of Object.entries(h.processes)) {
+    if (alive(Number(pid), h)) rows.push({ pid: Number(pid), args: p.args });
+  }
+  rows.push({ pid: process.pid, args: `sh -c ${body}` });
+
+  const excludesSelf = body.includes('grep -v "^ *$$ "');
+  return rows.filter((r) => /dsh.*web/.test(`${r.pid} ${r.args}`))
+    .filter((r) => !(excludesSelf && r.pid === process.pid));
+}
+
+function replyProbe(name, body) {
   const st = readState();
   const h = hostState({ hosts: st.hosts ?? {} }, name);
   if (h.faults.slowProbeMs) sleepBlocking(h.faults.slowProbeMs);
@@ -77,8 +97,8 @@ function replyProbe(name) {
   out(`DSH_HOME=${h.dshHome}\n`);
   out(`PROFILE_WEB=${h.profileWeb ? 'yes' : 'no'}\n`);
   out('RUNNING_DSH_WEB<<EOF\n');
-  for (const [pid, p] of Object.entries(h.processes)) {
-    if (alive(Number(pid), h)) out(`${String(pid).padStart(6, ' ')} ${p.args}\n`);
+  for (const r of psMatches(h, body)) {
+    out(`${String(r.pid).padStart(6, ' ')} ${r.args}\n`);
   }
   out('EOF\n');
   out('PROBE_DONE=yes\n');

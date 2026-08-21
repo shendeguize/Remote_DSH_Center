@@ -35,7 +35,10 @@ export function buildProbeScript() {
     "printf 'DSH_HOME=%s\\n' \"$H\"",
     'if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi',
     'echo "RUNNING_DSH_WEB<<EOF"',
-    'ps -eo pid,args | grep "[d]sh.*web" || true',
+    // `[d]sh` 只躲过 grep 自己；执行本脚本的那层 sh -c 仍会被命中——它的命令行里
+    // 既有 command -v dsh 又有 profiles/web。故再按 $$（本 shell 的 pid，子 shell 中
+    // 不变）排掉自身那行，否则每次探测都凭空多出一个「手动实例」。
+    'ps -eo pid,args | grep "[d]sh.*web" | grep -v "^ *$$ " || true',
     'echo "EOF"',
     'echo "PROBE_DONE=yes"',
   ].join('; ');

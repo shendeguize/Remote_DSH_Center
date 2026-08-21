@@ -368,6 +368,24 @@ test('探测发现手动实例（RUNNING_DSH_WEB 块 → manualInstances）', as
   assert.equal(result.manualInstances[0].args, r.fingerprint);
 });
 
+test('探测不把自己那层 sh -c 记成手动实例（真机自匹配回归）', async (t) => {
+  harnessFixture(t);
+
+  // 空场：远端一个 dsh web 都没跑，manualInstances 必须是空的。
+  // 修前的模板 grep "[d]sh.*web" 会命中脚本自身的命令行（里头既有 command -v dsh
+  // 又有 profiles/web），凭空造出一条幻影，页面于是恒显「另有 1 个手动实例」。
+  const ready = await probeOnce('gpu-1');
+  assert.equal(ready.phase, 'ready');
+  assert.deepEqual(ready.manualInstances, [], `不该有幻影：${JSON.stringify(ready.manualInstances)}`);
+
+  // 没装 dsh 的主机同样中招过——那条 sh -c 与 dsh 是否存在无关。
+  const h2 = harnessFixture(t, {});
+  h2.scenario('nobin', 'no-dsh-missing-bin');
+  const noDsh = await probeOnce('nobin');
+  assert.equal(noDsh.phase, 'no_dsh');
+  assert.deepEqual(noDsh.manualInstances, []);
+});
+
 test('slow-probe 场景不阻塞其他主机（并行探测）', async (t) => {
   const h = harnessFixture(t, {});
   h.scenario('slow', 'slow-probe', 700);
