@@ -346,6 +346,42 @@ test('行内控件上的 Enter/Space 归控件自己，不去开抽屉', async (
   assert.equal(dom.app.querySelector('.host-drawer').hidden, false, '落在行本身的 Enter 照旧开抽屉');
 });
 
+test('按住的那一下不许被重建吞掉：更新攒到松手后再刷', async (t) => {
+  const { dom, es } = await mount(t);
+  const table = dom.app.querySelector('.host-table-card');
+  const probe = () => dom.app.querySelector('.host-table tbody tr [data-act="probe"]');
+  const held = probe();
+
+  // 鼠标与 Space 的原生激活都在「抬起」那一刻，要求按下抬起是同一个节点。
+  // 表格若在这中间整行重建，这一次操作就悄无声息地没了（issue #61）。
+  held.dispatchEvent({ type: 'pointerdown', bubbles: true });
+  es().open();
+  es().send('host-changed', { revision: 9, host: hostView('gpu-1', { phase: 'ready' }) });
+  await flush();
+
+  assert.equal(probe(), held, '手指还按着，节点就不该被换掉');
+
+  held.dispatchEvent({ type: 'pointerup', bubbles: true });
+  await flush();
+  assert.notEqual(probe(), held, '松手之后要把攒下的更新刷上去');
+
+  // 按键那条路同理：Space 也是抬起才激活
+  const keyHeld = probe();
+  keyHeld.dispatchEvent({ type: 'keydown', key: ' ', bubbles: true });
+  es().send('host-changed', { revision: 10, host: hostView('gpu-1', { phase: 'running' }) });
+  await flush();
+  assert.equal(probe(), keyHeld, '按键按住期间同样不许换节点');
+
+  keyHeld.dispatchEvent({ type: 'keyup', key: ' ', bubbles: true });
+  await flush();
+  assert.equal(
+    dom.app.querySelector('.host-table tbody tr').textContent.includes('运行中'),
+    true,
+    '松手后表格必须追上最新数据，不能停在按住那一刻',
+  );
+  assert.ok(table, '表格还在');
+});
+
 test('抽屉里的启动目录：改值只提交 workdir，非法值就地报错不发请求', async (t) => {
   const saved = hostView('gpu-1', { config: { ...hostView('gpu-1').config, workdir: '~/proj' } });
   const { dom, calls } = await mount(t, {

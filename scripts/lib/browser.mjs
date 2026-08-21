@@ -128,6 +128,33 @@ export class Cdp {
     }
   }
 
+  /**
+   * 按下与抬起分开发。鼠标与 Space 的原生激活都在**抬起**那一刻，且要求这中间
+   * 节点没被换掉——要验这条（issue #61）就得能在两者之间插事。
+   */
+  async keyHalf(type, key, { code = key, keyCode = 0, text = DEFAULT_KEY_TEXT[key] } = {}) {
+    const isDown = type === 'down';
+    await this.send('Input.dispatchKeyEvent', {
+      type: isDown ? (text ? 'keyDown' : 'rawKeyDown') : 'keyUp',
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode: keyCode,
+      ...(text && isDown ? { text, unmodifiedText: text } : {}),
+    });
+  }
+
+  /** @param {'down'|'up'} type */
+  async mouseHalf(type, x, y) {
+    await this.send('Input.dispatchMouseEvent', {
+      type: type === 'down' ? 'mousePressed' : 'mouseReleased',
+      x,
+      y,
+      button: 'left',
+      clickCount: 1,
+    });
+  }
+
   /** 点击一个选择器命中的元素（用元素中心点发真鼠标事件）。 */
   async click(selector) {
     const box = await this.eval(`

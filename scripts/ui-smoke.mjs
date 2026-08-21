@@ -504,6 +504,58 @@ async function main() {
       return 'Enter 与 Space 都落到按钮自己身上';
     });
 
+    await check('S4f', '按住的那一下不被重建吞掉（鼠标与 Space 都在抬起才激活）', async () => {
+      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
+
+      // 只有真浏览器验得到：垫片里 click 是直接调的，不存在「按下与抬起要是同一个节点」
+      // 这回事。这条也是 CI 上 S4e 抽动的根：runner 一慢，一次重建就落进按下与抬起之间。
+      for (const how of ['mouse', 'space']) {
+        const mark = responses.length;
+        // eslint-disable-next-line no-await-in-loop -- 逐条按压
+        const box = await cdp.eval(`
+          const tr = document.querySelector('.host-table tbody tr');
+          const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+          b.scrollIntoView({ block: 'center' });
+          b.focus();
+          const r = b.getBoundingClientRect();
+          window.__mut = 0;
+          window.__obs?.disconnect();
+          window.__obs = new MutationObserver((rs) => { for (const x of rs) window.__mut += x.addedNodes.length + x.removedNodes.length; });
+          window.__obs.observe(document.querySelector('.host-table tbody'), { childList: true, subtree: true });
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), host: tr.dataset.host };
+        `);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        if (how === 'mouse') await cdp.mouseHalf('down', box.x, box.y);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        else await cdp.keyHalf('down', ' ', { code: 'Space', keyCode: 32 });
+
+        // 按住期间制造一次整表重建：另一台主机的状态变化
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await rig.api('POST', '/api/hosts/gpu-2/probe');
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(700);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const mutDuring = await cdp.eval('return window.__mut;');
+        assert(mutDuring === 0, `按住期间表格动了 ${mutDuring} 个节点——手指底下的节点会被换掉`);
+
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        if (how === 'mouse') await cdp.mouseHalf('up', box.x, box.y);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        else await cdp.keyHalf('up', ' ', { code: 'Space', keyCode: 32 });
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(600);
+
+        const named = how === 'mouse' ? '鼠标' : 'Space';
+        const hit = responses.slice(mark).some((r) => r.url.endsWith(`/api/hosts/${box.host}/probe`));
+        assert(hit, `${named}按住期间碰上重建，这一下就没了——请求一个都没发出`);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const mutAfter = await cdp.eval('return window.__mut;');
+        assert(mutAfter > 0, `${named}松手之后表格没刷——攒下的更新丢了`);
+      }
+      return '鼠标与 Space 都不丢，松手后表格追上';
+    });
+
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {
       await cdp.eval("document.activeElement?.blur(); return true;");
       const seen = [];

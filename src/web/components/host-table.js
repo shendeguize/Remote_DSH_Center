@@ -205,11 +205,67 @@ export function createHostTable({ store, actions }) {
     target.focus();
   }
 
+  /**
+   * 手指底下不换节点（issue #61）。
+   *
+   * 鼠标与 Space 的原生激活都在「抬起」那一刻，且要求按下与抬起落在同一个 DOM 节点上。
+   * 这张表在每条 `host-changed` 上重建对应行，一次重建插进按下与抬起之间，这次操作就
+   * 无声无息地没了——用户只知道「按了没反应」。焦点保护（#32）保不住这个：焦点是重建后
+   * 补回去的，对激活已经太晚；macOS 上点按钮更是压根不给焦点。
+   *
+   * 所以按压期间把重绘攒起来，松手再刷。攒的窗口是亚秒级，比丢掉一次点击划算得多。
+   */
+  let holding = false;
+  let queued = null; // null=没攒 | 'all'=整表 | Set<主机名>
+  /** @param {string|null} name 只影响一台就给名字，整表重绘给 null */
+  function gated(name, render) {
+    if (!holding) {
+      render();
+      return;
+    }
+    if (queued === 'all') return;
+    if (name === null) { queued = 'all'; return; }
+    queued ??= new Set();
+    queued.add(name);
+  }
+  let flushTimer = null;
+  /**
+   * 松手不能当场刷：click 是浏览器在 pointerup / keyup **之后**才派发的，
+   * 当场重建会把节点从 click 的派发路径上抽走——刷新自己反倒把这一次点击掐了
+   * （真页面上实测到过：闸门拦住了重建，请求却还是没发出）。所以让到下一拍。
+   */
+  function release() {
+    if (!holding || flushTimer !== null) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      holding = false;
+      const pending = queued;
+      queued = null;
+      if (pending === 'all') keepFocus(renderAll);
+      else if (pending) keepFocus(() => { for (const n of pending) renderOne(n); });
+    }, 0);
+  }
+
+  const onPressStart = (e) => {
+    // 只认落在表内控件上的按压；行本身与空白处重建了也无所谓
+    const node = e.target;
+    if (!(node instanceof HTMLElement) || !root.contains(node)) return;
+    if (e.type === 'keydown' && e.key !== ' ' && e.key !== 'Enter') return;
+    holding = true;
+  };
+  root.addEventListener('pointerdown', onPressStart);
+  root.addEventListener('keydown', onPressStart);
+  // 抬起可能落在表外（按住拖出去再松手），所以听在 document 上；
+  // 窗口整个失焦时 pointerup/keyup 永远不会来，靠 window 的 blur 兜住（blur 不冒泡）
+  const RELEASE_EVENTS = ['pointerup', 'pointercancel', 'keyup'];
+  for (const type of RELEASE_EVENTS) document.addEventListener(type, release);
+  window.addEventListener('blur', release);
+
   const offs = [
-    store.on('hosts:reset', () => keepFocus(renderAll)),
-    store.on('hosts:changed', (name) => keepFocus(() => renderOne(name))),
-    store.on('pending:changed', () => keepFocus(renderAll)),
-    store.on('connection:changed', () => keepFocus(renderAll)),
+    store.on('hosts:reset', () => gated(null, () => keepFocus(renderAll))),
+    store.on('hosts:changed', (name) => gated(name, () => keepFocus(() => renderOne(name)))),
+    store.on('pending:changed', () => gated(null, () => keepFocus(renderAll))),
+    store.on('connection:changed', () => gated(null, () => keepFocus(renderAll))),
   ];
   renderAll();
 
@@ -217,6 +273,9 @@ export function createHostTable({ store, actions }) {
     root,
     destroy() {
       for (const off of offs) off();
+      for (const type of RELEASE_EVENTS) document.removeEventListener(type, release);
+      window.removeEventListener('blur', release);
+      if (flushTimer !== null) clearTimeout(flushTimer);
     },
   };
 }

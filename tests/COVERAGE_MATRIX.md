@@ -198,6 +198,7 @@
 | 菜单方向键真的换项（首项 → ArrowDown → End → Home），选完一项还焦到标签；外加静态闸门禁止前端把 `querySelectorAll` 结果当数组使——这类差异被垫片永久掩盖，单测判不出来 | S6、`tests/web/a11y.test.js`、`tests/architecture.test.js` |
 | 重连的快照结算在飞写操作：已 running 的快照解锁按钮，`starting` 的快照不解锁；恢复本身（横幅消失、写操作解禁、快照回灌）另有真浏览器场景 | `tests/web/store.test.js`、S9b |
 | 跨站防线：环回名判定、同源放行（含不带 Origin 的 CLI）、跨站各形态（换协议/换端口/`null`/非 URL/子域名障眼法）、Host 先判、不回显攻击者域名；集成侧验「跨站 start 被拒且主机确实没被拉起」与「非环回 Host 连 `/`、`/app.js` 一起拒」 | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
+| 按住期间不重建：鼠标与 Space 的原生激活都在抬起那一刻且要求同一个节点，按住期间表格必须一个节点都不动，松手后又必须追上（松手当场刷也不行——click 在 pointerup 之后才派发，当场重建会把这一次点击掐掉） | S4f、`tests/web/mount.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |
