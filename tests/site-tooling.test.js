@@ -18,6 +18,7 @@ import {
 } from '../scripts/build-site.mjs';
 import {
   codeChunks, localHtmlTargets, localMarkdownTargets, mentionedCommands, unknownCommands,
+  waitUntil,
 } from '../scripts/site-check.mjs';
 import { COMMANDS } from '../src/cli.js';
 
@@ -149,6 +150,26 @@ test('闸门对真 README 的判定：命令全真（顺带确认它扫到了东
       assert.ok(mentions.includes(cmd), `${name} 没提到 ${cmd}`);
     }
   }
+});
+
+/**
+ * 回归（issue #79）：demo 冒烟里「mock 页有没有被 iframe 载入」原先是一次性判定——
+ * iframe 元素建出来那一刻，它的网络响应往往还没回来。本机快，CI 上偶发红。
+ * 这类判据必须是「等到」，不是「此刻」。
+ */
+test('waitUntil：条件后来才成立也算过，超时要把判据名带在错误里', async () => {
+  let hits = 0;
+  const late = () => { hits += 1; return hits >= 3; };
+  await waitUntil(late, 'mock 页载入', { timeoutMs: 1_000, stepMs: 10 });
+  assert.equal(hits, 3, '要真的重试到成立，而不是第一次不成立就放过');
+
+  await assert.rejects(
+    () => waitUntil(() => false, 'mock 页载入', { timeoutMs: 60, stepMs: 10 }),
+    (e) => {
+      assert.match(e.message, /mock 页载入/, `错误里要点明等的是什么：${e.message}`);
+      return true;
+    },
+  );
 });
 
 // ── site-check：链接抽取 ─────────────────────────────────────────────────

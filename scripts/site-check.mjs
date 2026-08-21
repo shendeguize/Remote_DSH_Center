@@ -37,6 +37,22 @@ const opt = (n, d = null) => {
   return i === -1 ? d : argv[i + 1];
 };
 
+/**
+ * 等到条件成立。浏览器侧的判据几乎都是「迟一点才成立」——iframe 元素建出来那一刻，
+ * 它的网络响应还在路上；本机快看不出来，CI 上就是偶发红（issue #79）。
+ * @param {() => boolean} ok
+ * @param {string} label 超时文案用：说清等的是什么
+ */
+export async function waitUntil(ok, label, { timeoutMs = 5_000, stepMs = 100 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (ok()) return;
+    if (Date.now() >= deadline) throw new Error(`${label}：等了 ${timeoutMs}ms 还没成立`);
+    // eslint-disable-next-line no-await-in-loop -- 就是在轮询
+    await sleep(stepMs);
+  }
+}
+
 // ── docs：链接与命令核对（纯函数，便于单测） ──────────────────────────────
 
 /** `service install` 这类二级子命令：README 会写全，命令表里只有一级。 */
@@ -238,8 +254,11 @@ async function checkDemo(outDir) {
       return frame.getAttribute('src') === host.mappedUrl && host.mappedUrl.includes('mock-dsh-web');
     `);
     if (!iframeOk) throw new Error('iframe src 与假 manager 下发的 mappedUrl 不一致');
-    const mockLoaded = responses.some((r) => r.url.includes('mock-dsh-web') && r.status === 200);
-    if (!mockLoaded) throw new Error('mock dsh web 页没有被 iframe 加载（应有 200 响应）');
+    // iframe 的 src 刚设上，响应还在路上：这里必须「等到」而不是「此刻」（issue #79）
+    await waitUntil(
+      () => responses.some((r) => r.url.includes('mock-dsh-web') && r.status === 200),
+      'mock dsh web 页被 iframe 加载（应有 200 响应）',
+    );
     notes.push('iframe 载入 mock 页');
 
     // ⑤ 注入断联：遮罩出现
