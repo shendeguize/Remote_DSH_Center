@@ -12,7 +12,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { PHASE_META } from '../../src/web/utils.js';
-import { flush, hostView, mount, running } from './app-harness.js';
+import { DEFAULTS, MANAGER_INFO, flush, hostView, mount, running } from './app-harness.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const key = (node, k, extra = {}) => node.dispatchEvent({ type: 'keydown', key: k, ...extra });
@@ -95,6 +95,85 @@ test('抽屉开着时后景 inert，关掉后恢复可交互', async (t) => {
   key(dom.document, 'Escape');
   await flush();
   assert.deepEqual(background.map((n) => Boolean(n.inert)), [false, false, false], '关了就得放开');
+});
+
+/**
+ * 回归（issue #32）：主机表在任何状态更新时整片重建（`pending:changed → renderAll`，
+ * `hosts:changed → renderOne` 整行 replaceWith），焦点跟着被扔回文档顶端。
+ * 真机实测：按 Enter 拉起之后焦点就一直是 body，整个启动过程键盘用户找不回自己的位置；
+ * 连「更新的是另一台」都会把当前这台的焦点掀掉。
+ */
+test('状态更新不许把表内焦点甩掉：同一控件还在就留在它上面', async (t) => {
+  const { dom, es } = await mount(t, { hosts: [running('gpu-1'), hostView('gpu-2')] });
+  es().open();
+  es().send('snapshot', {
+    revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [running('gpu-1'), hostView('gpu-2')], logs: [],
+  });
+  await flush();
+
+  const rowOf = (name) => dom.app.querySelectorAll('.host-table tbody tr').find((r) => r.dataset.host === name);
+  const btnOf = (name, label) => rowOf(name).querySelectorAll('button').find((b) => b.textContent === label);
+
+  // 焦点在 gpu-2 的行上，更新的是 gpu-1——凭什么动我
+  rowOf('gpu-2').focus();
+  es().send('host-changed', { revision: 2, host: running('gpu-1') });
+  await flush();
+  assert.equal(dom.document.activeElement?.dataset?.host, 'gpu-2', '更新别人却把我的焦点掀了');
+
+  // 焦点在自己行内的按钮上，自己被更新：同名控件还在，就该还在它上面
+  btnOf('gpu-2', '探测').focus();
+  es().send('host-changed', { revision: 3, host: hostView('gpu-2') });
+  await flush();
+  assert.equal(dom.document.activeElement?.textContent, '探测', '同一个按钮还在，焦点却跑了');
+  assert.equal(dom.document.activeElement?.closest('tr')?.dataset?.host, 'gpu-2');
+});
+
+/**
+ * 回归（issue #32）：确认关停之后那一行的按钮组会换成「拉起/探测」，
+ * 原来的触发键被移除——焦点于是掉到 body。控件没了也得有个落点。
+ */
+test('触发控件在更新后消失时，焦点退到它所在的那一行', async (t) => {
+  const { dom, es } = await mount(t, { hosts: [running('gpu-1')] });
+  es().open();
+  es().send('snapshot', {
+    revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [running('gpu-1')], logs: [],
+  });
+  await flush();
+
+  const row = () => dom.app.querySelector('.host-table tbody tr');
+  const stop = row().querySelectorAll('button').find((b) => b.textContent === '关停');
+  assert.ok(stop, '运行中的主机该有关停键');
+  stop.focus();
+
+  es().send('host-changed', { revision: 2, host: hostView('gpu-1') }); // 停了：关停键消失
+  await flush();
+  assert.equal(row().querySelectorAll('button').some((b) => b.textContent === '关停'), false, '前提：关停键确实没了');
+  assert.equal(dom.document.activeElement, row(), '控件没了就该退到那一行，别把人扔回文档顶端');
+});
+
+/**
+ * 回归（issue #32）：同名控件还在也未必接得住焦点——忙碌态下它是 disabled，
+ * `focus()` 静默失效。真机上按「拉起」的那一拍正是这样，焦点照样掉回 body。
+ */
+test('同名控件还在但已禁用时，焦点退到那一行而不是白焦一场', async (t) => {
+  const { dom, es } = await mount(t, { hosts: [hostView('gpu-1')] });
+  es().open();
+  es().send('snapshot', {
+    revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [hostView('gpu-1')], logs: [],
+  });
+  await flush();
+
+  const row = () => dom.app.querySelector('.host-table tbody tr');
+  const probe = row().querySelectorAll('button').find((b) => b.textContent === '探测');
+  probe.focus();
+
+  // 与 manager 失联 → 写操作禁用（探测键还在，但 disabled）
+  for (const fn of es().listeners.get('error')) fn({});
+  await flush();
+  const still = row().querySelectorAll('button').find((b) => b.textContent === '探测');
+  assert.ok(still, '前提：探测键还在');
+  assert.equal(still.disabled, true, '前提：它该是禁用的');
+  assert.equal(dom.document.activeElement, row(), '禁用键接不住焦点，就该退到那一行');
 });
 
 test('标签页菜单可纯键盘打开、上下移动、Esc 收回', async (t) => {

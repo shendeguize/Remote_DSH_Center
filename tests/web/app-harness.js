@@ -73,8 +73,17 @@ export class FakeEventSource {
     for (const fn of this.listeners.get('open') ?? []) fn({});
   }
 
+  /**
+   * 帧名打错会静默无事发生——前端只监听自己认得的那几种，别的一律没人接。
+   * 于是用例里一个 `host:changed`（真名是 `host-changed`）就能让整条断言空转，
+   * 而它照样是绿的。所以这里对没人监听的帧名直接抛。
+   */
   send(type, data) {
-    for (const fn of this.listeners.get(type) ?? []) fn({ data: JSON.stringify(data) });
+    const fns = this.listeners.get(type);
+    if (!fns || fns.size === 0) {
+      throw new Error(`没人监听 SSE 帧「${type}」——帧名打错了？现有：${[...this.listeners.keys()].join(', ')}`);
+    }
+    for (const fn of fns) fn({ data: JSON.stringify(data) });
   }
 
   close() {

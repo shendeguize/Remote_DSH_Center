@@ -165,6 +165,7 @@
 | 切主机时激活标签滚进可视区；同一路由重渲染不再滚（否则用户自己拖的位置会被拽回去） | `tests/web/mount.test.js`（垫片记 `scrollIntoView` 的账）、`scripts/ui-smoke.mjs` S11（真滚了多少像素） |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
 | 抽屉的 Esc 挂在 document 上（焦点在外也能关）、开着时后景 `inert`、关掉即放开 | `tests/web/a11y.test.js` |
+| 重渲染保焦：同控件还在→留在它上面；控件消失或被禁用→退到那一行；更新别人不掀我的焦点 | `tests/web/a11y.test.js`（垫片已如实建模「移除含焦点子树→焦点回 body」） |
 | 错误提示随输入更新（碰过的字段才实时报）、离开字段即校验、保存时全量校验 | `tests/web/mount.test.js` |
 
 `tests/web/*` 喂的是手写 fixture，抓不到「后端改了字段名 / 少一层对象」这类漂移。
@@ -190,6 +191,7 @@
 | Tab → 主机行 → Enter 开抽屉 → Esc 关且焦点归位 | S4（暴露过「抽屉一开即脏草稿」，回归见 `tests/web/drawer.test.js`） |
 | 抽屉即模态：25 次 Tab 一次都不落到遮罩后面的控件上，焦点在抽屉外按 Esc 照样能关（`inert` 是浏览器原生语义，垫片证不了；判据自带收尾，失败也不会把后面的场景带崩） | S4b |
 | 就地校验的时机：打字不吵、离开字段就报、改对即灭（`blur` 不冒泡——第一版把处理器挂在 form 上，垫片能过、真机收不到） | S4c |
+| 焦点扛住整表重建：驱动侧连续采样 14 次，全程守在原来那一行（页面里的 `setInterval` 会被后台节流打到 1s 一次，采不到忙碌窗口；摘掉守卫则 14/14 掉 `body`） | S4d |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

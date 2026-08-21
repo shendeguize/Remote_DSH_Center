@@ -60,14 +60,16 @@ async function cleanSlate() {
   if (!cdp) return;
   try {
     await cdp.eval(`
+      // 顺序要紧：确认框是真模态（showModal），它开着的时候外面全是 inert，
+      // 对抽屉按钮 click() 根本不生效——先收框，再收抽屉。
+      const dlg = document.querySelector('.confirm-dialog');
+      if (dlg?.open) [...dlg.querySelectorAll('button')].find((b) => /放弃|取消/.test(b.textContent))?.click();
       const d = document.querySelector('.host-drawer');
       if (d && !d.hidden) {
         const cancel = [...d.querySelectorAll('.btn')].find((b) => /放弃修改/.test(b.textContent));
-        if (cancel && !cancel.disabled) cancel.click();   // 先把草稿还原，否则关闭会弹确认
+        if (cancel && !cancel.disabled) cancel.click();   // 先把草稿还原，否则关闭又要弹确认
         d.querySelector('.drawer-close')?.click();
       }
-      const dlg = document.querySelector('.confirm-dialog');
-      if (dlg?.open) [...dlg.querySelectorAll('button')].find((b) => /放弃|取消/.test(b.textContent))?.click();
       const menu = document.querySelector('.context-menu');
       if (menu && !menu.hidden) menu.hidden = true;
       return true;
@@ -415,13 +417,60 @@ async function main() {
         return '不吵 / 就报 / 即灭 三步齐';
       } finally {
         await cdp.eval(`
-          const n = document.querySelector('.host-drawer input[type="number"]');
-          if (n) { n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); }
-          document.querySelector('.host-drawer .drawer-close')?.click();
+          const d = document.querySelector('.host-drawer');
+          const cancel = [...d.querySelectorAll('.btn')].find((b) => /放弃修改/.test(b.textContent));
+          if (cancel && !cancel.disabled) cancel.click();  // 还原草稿，否则关闭会弹确认框
+          d.querySelector('.drawer-close')?.click();
           return true;
         `);
         await sleep(150);
       }
+    });
+
+    // 焦点在重渲染中的存活只有真浏览器能证：垫片里 disabled 元素照样「聚焦」得上，
+    // 而真机上 focus() 对它静默失效——issue #32 最后那一段就栽在这儿。
+    await check('S4d', '状态更新不把键盘焦点甩掉（含忙碌态的禁用键）', async () => {
+      // 主机路由下管理台是 hidden 的，隐藏元素接不了焦点——先回管理台
+      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
+      // 从界面上按键触发，才会走「本页自己有在飞的写操作」那条路（pending:changed →
+      // 整表重建，且同名控件在忙碌态下变 disabled）。直接打后端 API 压不到它：
+      // pending 是页面对自己在飞请求的记账。
+      await cdp.eval(`
+        const tr = document.querySelector('.host-table tbody tr');
+        const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+        b.focus(); return Boolean(b);
+      `);
+      const before = await cdp.eval("return document.activeElement?.closest('tr')?.dataset?.host ?? null;");
+      assert(before, `前提：焦点没落在主机行上（${await cdp.eval(`
+        const a = document.activeElement;
+        return 'active=' + (a === document.body ? 'body' : a.tagName.toLowerCase())
+          + ' rows=' + document.querySelectorAll('.host-table tbody tr').length
+          + ' 抽屉还开着=' + !document.querySelector('.host-drawer').hidden;
+      `)}）`);
+
+      // 采样要覆盖忙碌窗口本身：只看最终态的话，pending 那条路上丢掉的焦点
+      // 会被随后的 host-changed 顺手救回来，判据于是抓不到 renderAll 这一路。
+      // 采样放在驱动侧：页面里的 setInterval 会被 Chrome 的后台节流打到 1s 一次，
+      // 1.4 秒只能采到 2 个点。
+      const trail = [];
+      // 用 click() 而不是按 Enter：焦点留在按钮上，同时页面记上一笔在飞的写操作。
+      // （行内按钮上按 Enter 目前会被行的 keydown 吃掉，那是另一条缺陷，见 issue #34）
+      await cdp.eval("document.activeElement.click(); return true;");
+      for (let i = 0; i < 14; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 逐次采样
+        trail.push(await cdp.eval(`
+          const a = document.activeElement;
+          return a === document.body ? 'body' : (a.closest?.('tr')?.dataset.host ?? a.tagName.toLowerCase());
+        `));
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(80);
+      }
+      const strayed = trail.filter((x) => x !== before);
+      assert(trail.length > 5, `采样太少（${trail.length}），判据在空转`);
+      assert(strayed.length === 0,
+        `${trail.length} 次采样里有 ${strayed.length} 次焦点不在 ${before} 行上：${[...new Set(strayed)].join(', ')}`);
+      return `${trail.length} 次采样全程守住 ${before} 行`;
     });
 
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {

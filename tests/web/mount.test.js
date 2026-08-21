@@ -194,7 +194,7 @@ test('切换主机时把激活标签滚进可视区，且只在切换时滚', as
 
   // 同一路由下再重渲染不许再滚：否则用户自己拖标签栏会被一直拽回去
   const before = dom.document.scrollCalls.length;
-  es().send('host:changed', { revision: 2, host: running('gpu-1') });
+  es().send('host-changed', { revision: 2, host: running('gpu-1') });
   await flush();
   assert.equal(dom.document.scrollCalls.length, before, '激活项没变却又滚了一次');
 });

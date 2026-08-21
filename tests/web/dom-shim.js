@@ -35,6 +35,9 @@ class FakeNode {
     const i = this.childNodes.indexOf(child);
     if (i !== -1) this.childNodes.splice(i, 1);
     child.parentNode = null;
+    // 真浏览器里，被移除的子树若含焦点，焦点就落回 body。垫片不照做的话，
+    // 「重渲染把焦点甩没了」这类缺陷在单测里根本看不见。
+    if (child.contains?.(document.activeElement)) document.activeElement = document.body;
   }
 
   remove() {
@@ -49,6 +52,7 @@ class FakeNode {
     node.parentNode = parent;
     parent.childNodes.splice(i, 1, node);
     this.parentNode = null;
+    if (this.contains?.(document.activeElement)) document.activeElement = document.body;
   }
 
   replaceChildren(...nodes) {
@@ -228,6 +232,14 @@ class FakeElement extends FakeNode {
 
   matches(selector) {
     return matchSelector(this, selector);
+  }
+
+  /** 往上找最近的匹配祖先（含自身），语义同浏览器。 */
+  closest(selector) {
+    for (let n = this; n; n = n.parentNode) {
+      if (n instanceof FakeElement && matchSelector(n, selector)) return n;
+    }
+    return null;
   }
 
   querySelector(selector) {
