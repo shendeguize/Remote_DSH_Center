@@ -104,7 +104,107 @@ export function formatReport(tiers) {
   return lines.join('\n');
 }
 
-async function runTestsWithCoverage(lcovPath) {
+// ── 点名：声明了多少用例，就该跑了多少 ────────────────────────────────────
+
+/**
+ * 顶格声明的用例数。缩进的是 `t.test` 子用例（由父用例负责），注释与字符串里的不算。
+ * @param {string} source
+ * @returns {number}
+ */
+export function countDeclaredTests(source) {
+  return (source.match(/^test(?:\.skip|\.todo|\.only)?\(/gm) ?? []).length;
+}
+
+/**
+ * 从 TAP 里读出总数与逐文件实跑数。多文件跑时每个文件是一层 subtest，
+ * 里面的用例缩进 4 格。
+ * @param {string} tap
+ * @returns {{total:number|null, perFile:Record<string,number>}}
+ */
+export function parseTapCensus(tap) {
+  const perFile = {};
+  let total = null;
+  let current = null;
+  for (const line of tap.split('\n')) {
+    const file = /^# Subtest: (tests\/.*\.test\.js)$/.exec(line);
+    if (file) {
+      current = file[1];
+      perFile[current] ??= 0;
+      continue;
+    }
+    const total_ = /^# tests (\d+)$/.exec(line);
+    if (total_) {
+      total = Number(total_[1]);
+      continue;
+    }
+    if (current && /^ {4}(?:not )?ok \d+ - /.test(line)) perFile[current] += 1;
+  }
+  return { total, perFile };
+}
+
+/**
+ * 逐文件对账。少跑的都要点名——一个用例把自己的进程弄死（自杀式 SIGTERM、
+ * process.exit）时，`node --test` 会把这个文件报成通过，后面的用例静静地消失。
+ * @param {Record<string,number>} declared
+ * @param {Record<string,number>} ran
+ * @returns {Array<{file:string, declared:number, ran:number}>}
+ */
+export function shortfall(declared, ran) {
+  const gaps = [];
+  for (const [file, n] of Object.entries(declared)) {
+    const actual = ran[file] ?? 0;
+    if (actual < n) gaps.push({ file, declared: n, ran: actual });
+  }
+  return gaps;
+}
+
+/**
+ * 逐文件复跑一遍，把短的那个点出来。TAP 里没有文件归属（同一批用例是平铺的），
+ * 所以只能这么定位——只在总数已经对不上、也就是已经红了的那条路上花这份时间。
+ * @param {Record<string,number>} declared
+ * @returns {Promise<Array<{file:string, declared:number, ran:number}>>}
+ */
+async function locateShortfall(declared) {
+  const gaps = [];
+  for (const [file, n] of Object.entries(declared)) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个文件跑，并发只会互相抢端口
+    const ran = await countRanIn(file);
+    if (ran < n) gaps.push({ file, declared: n, ran });
+  }
+  return gaps;
+}
+
+function countRanIn(file) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--test', '--test-reporter=tap', file], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let out = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('error', () => resolve(0));
+    child.on('close', () => resolve(parseTapCensus(out).total ?? 0));
+  });
+}
+
+/** 静态扫一遍：每个用例文件顶格声明了几个用例。 */
+function declaredCensus(root = process.cwd()) {
+  const out = {};
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.name.endsWith('.test.js')) {
+        const rel = path.relative(root, full).split(path.sep).join('/');
+        out[rel] = countDeclaredTests(fs.readFileSync(full, 'utf8'));
+      }
+    }
+  };
+  walk(path.join(root, 'tests'));
+  return out;
+}
+
+async function runTestsWithCoverage(lcovPath, tapPath) {
   const args = [
     '--test',
     '--experimental-test-coverage',
@@ -113,6 +213,8 @@ async function runTestsWithCoverage(lcovPath) {
     '--test-reporter-destination=stdout',
     '--test-reporter=lcov',
     `--test-reporter-destination=${lcovPath}`,
+    '--test-reporter=tap',
+    `--test-reporter-destination=${tapPath}`,
     'tests/**/*.test.js',
   ];
   return new Promise((resolve) => {
@@ -124,13 +226,32 @@ async function runTestsWithCoverage(lcovPath) {
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-cov-'));
   const lcovPath = path.join(tmp, 'lcov.info');
+  const tapPath = path.join(tmp, 'run.tap');
   let testExit;
   let files;
+  let census;
   try {
-    testExit = await runTestsWithCoverage(lcovPath);
+    testExit = await runTestsWithCoverage(lcovPath, tapPath);
     files = parseLcov(fs.readFileSync(lcovPath, 'utf8'));
+    census = parseTapCensus(fs.readFileSync(tapPath, 'utf8'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  const declared = declaredCensus();
+  const declaredTotal = Object.values(declared).reduce((a, b) => a + b, 0);
+  if (census.total !== null && census.total < declaredTotal) {
+    process.stdout.write(`\n用例点名不齐：声明 ${declaredTotal} 个，实跑 ${census.total} 个。`
+      + '多半是某个用例把自己的进程弄死了（自杀式 SIGTERM、process.exit）——'
+      + '`node --test` 会把这种半途而废的文件报成通过，后面的用例静静消失。\n正在逐文件定位……\n');
+    // TAP 是不是带文件归属，取决于 node 的隔离方式；平铺时 perFile 是空的，只能复跑定位
+    const located = Object.keys(census.perFile).length > 0
+      ? shortfall(declared, census.perFile)
+      : await locateShortfall(declared);
+    for (const g of located) process.stdout.write(`  ${g.file}：声明 ${g.declared}，实跑 ${g.ran}\n`);
+    if (located.length === 0) process.stdout.write('  逐文件复跑时都够数：大概率是跨文件互相干扰，按上面的总数差自己找\n');
+    process.exitCode = 1;
+    return;
   }
 
   const tiers = evaluateTiers(files);

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { isMainEntry } from '../src/lib/entry.js';
 import { parseVersion } from '../src/lib/semver.js';
 import { PACK_RULES, selectStages, summarize, verifyPackFiles } from '../scripts/check.mjs';
+import { countDeclaredTests, parseTapCensus, shortfall } from '../scripts/coverage-gate.mjs';
 import {
   NODE_RUNTIME_VERSION, makeBundleInfo, nodeDistUrl, nodeShasumsUrl, nodeTarballName,
   packFileList, resolveBuildVersion, shimScript,
@@ -247,6 +248,56 @@ test('summarize 三种状态各有记号', () => {
   assert.match(text, /· 乙.*没装 Chrome/);
   assert.match(text, /✘ 丙.*炸了/);
   assert.match(text, /1\.2s/);
+});
+
+/**
+ * 回归（issue #76）：用例文件半途把自己进程弄死时，`node --test` 会把这个文件报成
+ * 通过——后面十个用例压根没跑，闸门却是绿的。所以闸门自己要点名：声明了多少个，
+ * 就必须跑了多少个。
+ */
+test('countDeclaredTests：数顶格声明的用例，注释与嵌套的不算', () => {
+  const src = [
+    "import test from 'node:test';",
+    "test('甲', () => {});",
+    "test.skip('乙', () => {});",
+    "test.todo('丙');",
+    "// test('注释掉的不算', () => {});",
+    "  test('缩进的是嵌套子用例，不由这里数', () => {});",
+    "const s = \"test('字符串里的不算', ...)\";",
+  ].join('\n');
+  assert.equal(countDeclaredTests(src), 3);
+});
+
+test('parseTapCensus：从 TAP 里读出总数与逐文件实跑数', () => {
+  const tap = [
+    'TAP version 13',
+    '# Subtest: tests/a.test.js',
+    '    # Subtest: 甲一',
+    '    ok 1 - 甲一',
+    '    # Subtest: 甲二',
+    '    not ok 2 - 甲二',
+    'ok 1 - tests/a.test.js',
+    '# Subtest: tests/b.test.js',
+    '    ok 1 - 乙一',
+    'ok 2 - tests/b.test.js',
+    '# tests 3',
+    '# pass 2',
+    '# fail 1',
+  ].join('\n');
+  const census = parseTapCensus(tap);
+  assert.equal(census.total, 3);
+  assert.deepEqual(census.perFile, { 'tests/a.test.js': 2, 'tests/b.test.js': 1 });
+});
+
+test('shortfall：报出哪个文件少跑了几个，够数时闭嘴', () => {
+  const declared = { 'tests/a.test.js': 22, 'tests/b.test.js': 3 };
+  assert.deepEqual(shortfall(declared, { 'tests/a.test.js': 22, 'tests/b.test.js': 3 }), []);
+
+  const gaps = shortfall(declared, { 'tests/a.test.js': 12, 'tests/b.test.js': 3 });
+  assert.deepEqual(gaps, [{ file: 'tests/a.test.js', declared: 22, ran: 12 }]);
+
+  const none = shortfall(declared, {});
+  assert.deepEqual(none.map((g) => g.file), ['tests/a.test.js', 'tests/b.test.js'], '整个文件没跑也要点名');
 });
 
 // ── 版本管控 ─────────────────────────────────────────────────────────────

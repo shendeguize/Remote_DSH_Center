@@ -191,6 +191,45 @@ test('POST /api/manager/restart：裸后台模式由继任者接管', async (t) 
   assert.equal(alive(before.pid), false, '前任必须已退出');
 });
 
+/**
+ * 回归（issue #77）：拉起后没在预算内确认健康，就得把它收回来。留着不管的话，
+ * 命令明明报了失败，那个进程还在后台待着——等占着端口的人一走，它自己就把端口
+ * 接过去了，用户手上于是有一个「启动失败过」的 manager 在跑，谁也不知道它是谁。
+ */
+test('拉起后没确认健康：把拉起的进程收回来，不留在后台', async (t) => {
+  const { harness } = await isolate(t);
+
+  // 一个永远不落 pidfile、也不监听的「manager」：健康确认必然超时
+  const stuck = path.join(harness.homeDir, 'stuck-manager.js');
+  fs.writeFileSync(stuck, 'setInterval(() => {}, 1000);\n');
+
+  const res = await daemon.launchDetached({ waitMs: 600, entry: stuck });
+  assert.equal(res.confirmed, false, '这个假 manager 压根不该被确认健康');
+  assert.equal(res.reaped, true, '未确认就该收走');
+
+  const deadline = Date.now() + 3_000;
+  while (alive(res.pid) && Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop -- 等它落幕
+    await new Promise((r) => { setTimeout(r, 50); });
+  }
+  assert.equal(alive(res.pid), false, `pid ${res.pid} 还在跑：这就是没人管的后台进程`);
+});
+
+test('dshc up 拉起失败时也照样收：报了失败就不许有进程留着', async (t) => {
+  const { harness } = await isolate(t);
+  const stuck = path.join(harness.homeDir, 'stuck-manager.js');
+  fs.writeFileSync(stuck, 'setInterval(() => {}, 1000);\n');
+
+  const res = await dshc({ ...harness.env, DSHC_SERVER_ENTRY: stuck, DSHC_UP_WAIT_MS: '600' }, ['up']);
+  assert.equal(res.code, 2, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.match(res.stderr, /收走/, `要说清那个进程被收走了：${res.stderr}`);
+  assert.match(res.stderr, /manager\.log/, '要指到日志，不然人无从下手');
+
+  const pid = Number(/pid (\d+)/.exec(res.stderr)?.[1]);
+  assert.ok(Number.isInteger(pid), `stderr 里要点出是哪个 pid：${res.stderr}`);
+  assert.equal(alive(pid), false, '报了失败还留着进程');
+});
+
 test('launchd plist 快照：KeepAlive + 前台模式 + DSHC_MODE 注入', () => {
   const plist = daemon.buildPlist({
     logPath: '/tmp/x/manager.log',

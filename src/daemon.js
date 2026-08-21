@@ -117,14 +117,26 @@ export async function aliveCheck() {
 /**
  * detach 拉起 server（§3.4 第 7 步同款）。stdout/stderr 以 O_APPEND 重定向到 manager.log，
  * 两进程短暂共写安全。
- * @returns {Promise<{pid:number, port:number|null, confirmed:boolean}>}
+ *
+ * 预算内没确认健康就把它收回来（issue #77）：留着不管的话，命令报了失败，那个进程
+ * 还在后台待着——等占着端口的人一走它自己就把端口接过去，用户手上于是有一个
+ * 「启动失败过」的 manager 在跑。
+ *
+ * `entry` / `DSHC_SERVER_ENTRY` 是测试缝（同 `DSHC_SSH_BIN` 的用法）：换一个永远不落
+ * pidfile 的假 manager，才能验「没确认健康」这条路。
+ * @returns {Promise<{pid:number, port:number|null, confirmed:boolean, reaped:boolean}>}
  */
-export async function launchDetached({ port = null, waitMs = 10_000, env = {} } = {}) {
+export async function launchDetached({
+  port = null,
+  waitMs = Number(process.env.DSHC_UP_WAIT_MS ?? '') || 10_000,
+  env = {},
+  entry = process.env.DSHC_SERVER_ENTRY || SERVER_ENTRY,
+} = {}) {
   const p = paths();
   fs.mkdirSync(p.dir, { recursive: true });
   const fd = fs.openSync(p.log, 'a');
 
-  const args = [SERVER_ENTRY];
+  const args = [entry];
   if (port !== null) args.push('--port', String(port));
 
   const child = spawn(process.execPath, args, {
@@ -151,7 +163,34 @@ export async function launchDetached({ port = null, waitMs = 10_000, env = {} } 
       break;
     }
   }
-  return { pid: child.pid, port: seenPort, confirmed };
+  if (confirmed) return { pid: child.pid, port: seenPort, confirmed, reaped: false };
+  return { pid: child.pid, port: seenPort, confirmed: false, reaped: await reap(child.pid) };
+}
+
+/**
+ * 收走一个没确认健康的拉起：TERM → 1s → KILL。
+ * @returns {Promise<boolean>} 真的动过手才算 true（它自己已经退了就不算）
+ */
+async function reap(pid, { graceMs = 1_000 } = {}) {
+  if (!processAlive(pid)) return false;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    return false; // 竞态：刚好退了
+  }
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline && processAlive(pid)) {
+    // eslint-disable-next-line no-await-in-loop -- 等它落幕
+    await sleep(50);
+  }
+  if (processAlive(pid)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // 已退出
+    }
+  }
+  return true;
 }
 
 /**

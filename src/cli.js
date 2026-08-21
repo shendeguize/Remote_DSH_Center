@@ -515,7 +515,10 @@ async function cmdUp({ flags }) {
 
   const res = await daemon.launchDetached({ port: flags.port ?? null });
   if (!res.confirmed) {
-    errOut(`已拉起 pid ${res.pid}，但 10s 内未确认健康。查看 ${resolvePaths().log}`);
+    // 报了失败就不许有进程留着：否则占端口的人一走，它自己就把端口接过去了（issue #77）
+    errOut(res.reaped
+      ? `已拉起 pid ${res.pid}，但未在预算内确认健康，已把它收走。查看 ${resolvePaths().log}`
+      : `已拉起 pid ${res.pid}，但它自己退了（未确认健康）。查看 ${resolvePaths().log}`);
     return EXIT.comm;
   }
   out(`manager 已启动：pid ${res.pid}，http://127.0.0.1:${res.port}`);

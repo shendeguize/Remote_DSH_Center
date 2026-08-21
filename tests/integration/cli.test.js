@@ -266,10 +266,13 @@ test('manager 跑着时手改 config.json：下一次 config set 拒写并指路
 test('参数写错就是用法错误：退 3、带前缀、把 usage 一并打出来', async (t) => {
   const ctx = await bootServer(t);
 
+  // 注意：`dshc restart` 不在此列——无参的 restart 是「重启 manager」（11 §6.1），
+  // 在这套装置里它会照约定给 pidfile 里那个 pid 发 SIGTERM，而 pidfile 里写的正是
+  // 本用例进程自己。此前这一行把整个文件从这里起截断了：后面十个用例压根没跑，
+  // `node --test` 却把文件报成通过（issue #76）。
   for (const [args, usage] of [
     [['start'], /dshc start <host>/],
     [['stop'], /dshc stop <host>/],
-    [['restart'], /dshc restart <host>/],
     [['log'], /dshc log <host>/],
   ]) {
     // eslint-disable-next-line no-await-in-loop -- 逐条命令看口径
