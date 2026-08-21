@@ -230,6 +230,34 @@ test('dshc up 拉起失败时也照样收：报了失败就不许有进程留着
   assert.equal(alive(pid), false, '报了失败还留着进程');
 });
 
+/**
+ * 回归（issue #81）：manager.log 只追加、从不回收，而这进程在 launchd 下是 7×24 的。
+ * 这条要在真进程上验：日志是被继承的 O_APPEND fd 在写，只有原地截断才管用——
+ * 改名换文件的话进程还往原来那个 inode 里写，用户看到的新文件永远是空的。
+ */
+test('manager.log 到顶：起来时原地截断，尾巴还在，起来之后照样能往里写', async (t) => {
+  const { harness } = await isolate(t);
+  const logFile = path.join(harness.homeDir, 'manager.log');
+
+  const filler = `${'2026-01-01T00:00:00.000Z INFO [manager] 上辈子的日志'.padEnd(200, '.')}\n`;
+  fs.writeFileSync(logFile, filler.repeat(Math.ceil((9 * 1024 * 1024) / filler.length)));
+  fs.appendFileSync(logFile, '2026-01-01T00:00:00.000Z INFO [manager] 最后一行旧日志\n');
+  const before = fs.statSync(logFile);
+  assert.ok(before.size > 8 * 1024 * 1024, `先得真把它撑到上限以上：${before.size}`);
+
+  const up = await dshc(harness.env, ['up']);
+  assert.equal(up.code, 0, `stderr=${up.stderr}`);
+
+  const after = fs.statSync(logFile);
+  assert.ok(after.size < 3 * 1024 * 1024, `起来之后该被截到保留量附近，实得 ${after.size}`);
+  assert.equal(after.ino, before.ino, '必须原地截断：换了 inode，写日志的那个 fd 就写进孤立文件里了');
+
+  const text = fs.readFileSync(logFile, 'utf8');
+  assert.match(text, /截断/, '要留一行说明，别让人以为日志本来就这么短');
+  assert.match(text, /最后一行旧日志/, '截断保留的是尾巴，最近发生的事不许丢');
+  assert.match(text, /已监听/, '截断之后这个进程还得能往同一个文件里继续写');
+});
+
 test('launchd plist 快照：KeepAlive + 前台模式 + DSHC_MODE 注入', () => {
   const plist = daemon.buildPlist({
     logPath: '/tmp/x/manager.log',

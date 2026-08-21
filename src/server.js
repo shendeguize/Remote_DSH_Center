@@ -11,10 +11,11 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { FACTORY_DEFAULTS } from './defaults.js';
+import { FACTORY_DEFAULTS, resolvePaths } from './defaults.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { isMainEntry } from './lib/entry.js';
 import { logEvent } from './lib/bus.js';
+import { trimLogFile } from './lib/logfile.js';
 import { checkRequestOrigin } from './lib/origin-guard.js';
 import { reopenSsh, shutdownSsh } from './lib/ssh.js';
 import * as daemon from './daemon.js';
@@ -62,6 +63,8 @@ export const runtime = {
   startedAt: null,
   setupGate: false,
   shuttingDown: false,
+  /** @type {NodeJS.Timeout|null} */
+  logTrimTimer: null,
 };
 
 // ── 静态资源（01 文档前端；无构建链，原样吐 ESM） ─────────────────────────
@@ -264,6 +267,7 @@ export async function main({ portOverride = null, skipBoot = false } = {}) {
   }
 
   installSignalHooks();
+  startLogTrimLoop();
 
   if (!runtime.setupGate && !skipBoot) {
     const recovered = await recoverState();
@@ -274,6 +278,25 @@ export async function main({ portOverride = null, skipBoot = false } = {}) {
   }
 
   return { port: runtime.port, setupGate: runtime.setupGate };
+}
+
+// ── 日志封顶（issue #81） ────────────────────────────────────────────────
+
+const LOG_TRIM_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * manager.log 只追加、从不回收，而这进程在 launchd 下是 7×24 的：一台链路不稳的主机
+ * 实测约 8MB/天。开机看一眼、之后每 10 分钟看一眼，超了就原地截断留尾巴。
+ */
+function startLogTrimLoop() {
+  const once = () => {
+    const res = trimLogFile(resolvePaths().log);
+    if (res.trimmed) logEvent(null, 'info', `manager.log 到顶，已原地截断（丢掉较早的 ${res.dropped} 字节）`);
+  };
+  once();
+  if (runtime.logTrimTimer) clearInterval(runtime.logTrimTimer);
+  runtime.logTrimTimer = setInterval(once, LOG_TRIM_INTERVAL_MS);
+  runtime.logTrimTimer.unref?.(); // 它不该成为「进程还有事做」的理由
 }
 
 // ── 退出与自我重启（§3.4） ───────────────────────────────────────────────
@@ -296,6 +319,10 @@ function destroySockets() {
 /** §3.4 的 2–6 步，gracefulExit 与 selfRestart 共用。 */
 async function teardown() {
   monitor.stopLoop();
+  if (runtime.logTrimTimer) {
+    clearInterval(runtime.logTrimTimer);
+    runtime.logTrimTimer = null;
+  }
   // 在飞的一次性 ssh（探测 / 拉起 / 回读）也要收，且从此不再起新的：不收就是把它们
   // 交给 init 当孤儿，重启后新老两批命令同时打同一台远端（issue #73）。
   // 隧道由下面的 closeAll 管。
@@ -374,6 +401,10 @@ function installSignalHooks() {
 /** 集成测试用：拆掉服务但不退出进程。 */
 export async function _shutdownForTest() {
   monitor.stopLoop();
+  if (runtime.logTrimTimer) {
+    clearInterval(runtime.logTrimTimer);
+    runtime.logTrimTimer = null;
+  }
   shutdownSsh(); // 与 teardown 同一条：用例进程里留下的孤儿会跨用例互相干扰
   await tunnel.closeAll();
   runtime.handler?.sseHub?.dispose();
