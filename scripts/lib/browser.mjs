@@ -103,12 +103,27 @@ export class Cdp {
     }
   }
 
-  /** 键盘事件要 rawKeyDown + keyUp 成对，否则页面收不到 keydown。 */
-  async key(key, { code = key, keyCode = 0, modifiers = 0 } = {}) {
-    for (const type of ['rawKeyDown', 'keyUp']) {
+  /**
+   * 键盘事件要 rawKeyDown + keyUp 成对，否则页面收不到 keydown。
+   *
+   * 想让按钮**真被按下**，光有 rawKeyDown 不够：Enter 的原生激活走 keypress，
+   * 而 `rawKeyDown` 按定义不产生字符事件，于是 Enter 永远只惊动监听器、按钮一动不动
+   * （Space 反而能动——它的激活在 keyUp）。这种不对称会把产品的毛病和驱动的毛病搅在
+   * 一起：实测里「焦点在清空键上按 Enter，条数不变」看着像产品 bug，其实是驱动没发全。
+   * 所以带 text 的按键改用 `keyDown`。
+   */
+  async key(key, { code = key, keyCode = 0, modifiers = 0, text = DEFAULT_KEY_TEXT[key] } = {}) {
+    const down = text ? 'keyDown' : 'rawKeyDown';
+    for (const type of [down, 'keyUp']) {
       // eslint-disable-next-line no-await-in-loop -- 顺序发
       await this.send('Input.dispatchKeyEvent', {
-        type, key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers,
+        type,
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+        modifiers,
+        ...(text && type === down ? { text, unmodifiedText: text } : {}),
       });
     }
   }
@@ -135,6 +150,9 @@ export class Cdp {
     this.ws.close();
   }
 }
+
+/** 会触发原生激活的按键，其 text 必须带上（见 CdpSession#key）。 */
+const DEFAULT_KEY_TEXT = { Enter: '\r', ' ': ' ', Space: ' ' };
 
 export async function launchChrome({ headful = false, noSandbox = null, env = process.env } = {}) {
   const bin = findChrome({ env });

@@ -118,6 +118,9 @@ class FakeClassList {
   }
 }
 
+/** 真浏览器里这些事件不冒泡，垫片跟着来，免得单测里挂错层也能过。 */
+const NON_BUBBLING = new Set(['blur', 'focus', 'load', 'error']);
+
 class FakeElement extends FakeNode {
   constructor(tag) {
     super();
@@ -194,13 +197,31 @@ class FakeElement extends FakeNode {
     this.listeners.get(type)?.delete(fn);
   }
 
+  /**
+   * 真沿祖先链冒泡，并给出 `currentTarget` 与可生效的 `stopPropagation`。
+   *
+   * 不冒泡的垫片会让一整类缺陷隐形：凡是「父节点上的委托处理器」与「子控件靠
+   * stopPropagation 自保」的配合，在只派发给自己的垫片里永远和睦——主机行上
+   * 的 Enter 抢掉行内按钮的原生激活（issue #34）就是这么躲过单测的。
+   * `blur`/`focus` 这类天生不冒泡的事件按真规矩只派给自己。
+   */
   dispatchEvent(event) {
-    const ev = { target: this, preventDefault() {}, stopPropagation() {}, ...event };
-    for (const fn of [...(this.listeners.get(ev.type) ?? [])]) fn(ev);
+    let stopped = false;
+    const ev = {
+      target: this,
+      preventDefault() {},
+      stopPropagation() { stopped = true; },
+      ...event,
+    };
+    const path = NON_BUBBLING.has(ev.type) ? [this] : [];
+    if (!path.length) for (let n = this; n; n = n.parentNode) path.push(n);
+    for (const node of path) {
+      if (stopped) break;
+      for (const fn of [...(node.listeners?.get(ev.type) ?? [])]) fn({ ...ev, currentTarget: node });
+    }
     return true;
   }
 
-  /** 组件里只用到 click/change/submit 等直接派发，无需真冒泡。 */
   click() {
     return this.dispatchEvent({ type: 'click' });
   }

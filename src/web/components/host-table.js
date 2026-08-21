@@ -68,6 +68,11 @@ export function createHostTable({ store, actions }) {
       on: {
         click: () => actions.openHostDrawer(host.name),
         keydown: (e) => {
+          // 只认落在行本身的按键。行内控件的 Enter/Space 是它们自己的：这个
+          // preventDefault 会连带取消按钮的原生激活，于是键盘用户按「探测」
+          // 只会开抽屉、请求一个都发不出去——鼠标点却一切正常（那条路上控件
+          // 各自 stopPropagation，压根到不了这里）。
+          if (e.target !== e.currentTarget) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             actions.openHostDrawer(host.name);

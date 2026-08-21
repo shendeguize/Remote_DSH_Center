@@ -454,8 +454,7 @@ async function main() {
       // 采样放在驱动侧：页面里的 setInterval 会被 Chrome 的后台节流打到 1s 一次，
       // 1.4 秒只能采到 2 个点。
       const trail = [];
-      // 用 click() 而不是按 Enter：焦点留在按钮上，同时页面记上一笔在飞的写操作。
-      // （行内按钮上按 Enter 目前会被行的 keydown 吃掉，那是另一条缺陷，见 issue #34）
+      // 用 click()：焦点留在按钮上，同时页面记上一笔在飞的写操作。
       await cdp.eval("document.activeElement.click(); return true;");
       for (let i = 0; i < 14; i += 1) {
         // eslint-disable-next-line no-await-in-loop -- 逐次采样
@@ -471,6 +470,34 @@ async function main() {
       assert(strayed.length === 0,
         `${trail.length} 次采样里有 ${strayed.length} 次焦点不在 ${before} 行上：${[...new Set(strayed)].join(', ')}`);
       return `${trail.length} 次采样全程守住 ${before} 行`;
+    });
+
+    await check('S4e', '行内控件的 Enter/Space 真按得动（不被行吞掉）', async () => {
+      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
+
+      // 原生激活只有真浏览器能验：单测垫片不会因为 Enter 就替按钮生成 click，
+      // 「行抢掉了按钮的按键」在那里只能验到一半（行不开抽屉）。
+      for (const key of ['Enter', ' ']) {
+        const mark = responses.length;
+        // eslint-disable-next-line no-await-in-loop -- 逐个按键
+        await cdp.eval(`
+          const tr = document.querySelector('.host-table tbody tr');
+          [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe').focus();
+          return true;
+        `);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await cdp.key(key === ' ' ? ' ' : 'Enter', { code: key === ' ' ? 'Space' : 'Enter', keyCode: key === ' ' ? 32 : 13 });
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(400);
+        const named = key === ' ' ? 'Space' : 'Enter';
+        const hit = responses.slice(mark).some((r) => /\/api\/hosts\/[^/]+\/probe$/.test(r.url));
+        assert(hit, `按 ${named} 没发出探测请求——行的 keydown 又把控件的原生激活废了`);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const drawerOpen = await cdp.eval("return !document.querySelector('.host-drawer').hidden;");
+        assert(!drawerOpen, `按 ${named} 顺手把抽屉开了`);
+      }
+      return 'Enter 与 Space 都落到按钮自己身上';
     });
 
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {

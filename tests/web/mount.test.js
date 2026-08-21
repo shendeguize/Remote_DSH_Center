@@ -251,6 +251,27 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
 });
 
+test('行内控件上的 Enter/Space 归控件自己，不去开抽屉', async (t) => {
+  const { dom } = await mount(t);
+  const row = dom.app.querySelector('.host-table tbody tr');
+  const probe = row.querySelector('[data-act="probe"]');
+  const toggle = row.querySelector('input[type="checkbox"]');
+
+  for (const [node, what] of [[probe, '探测键'], [toggle, '自启开关']]) {
+    for (const key of ['Enter', ' ']) {
+      node.dispatchEvent({ type: 'keydown', key });
+      // eslint-disable-next-line no-await-in-loop -- 逐个按键看反应
+      await flush();
+      assert.equal(dom.app.querySelector('.host-drawer').hidden, true,
+        `${what}上按 ${key === ' ' ? 'Space' : key} 不该开抽屉——行的 preventDefault 会连带废掉控件的原生激活`);
+    }
+  }
+
+  row.dispatchEvent({ type: 'keydown', key: 'Enter' });
+  await flush();
+  assert.equal(dom.app.querySelector('.host-drawer').hidden, false, '落在行本身的 Enter 照旧开抽屉');
+});
+
 test('抽屉里的启动目录：改值只提交 workdir，非法值就地报错不发请求', async (t) => {
   const saved = hostView('gpu-1', { config: { ...hostView('gpu-1').config, workdir: '~/proj' } });
   const { dom, calls } = await mount(t, {
