@@ -1,6 +1,6 @@
 {
   "name": "dsh-center",
-  "version": "0.2.0-rc.4",
+  "version": "0.2.0-rc.5",
   "description": "Local manager for remote dsh web instances: ssh tunnels, single-entry iframe shell, CLI lifecycle control",
   "type": "module",
   "private": true,
