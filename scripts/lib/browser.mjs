@@ -175,7 +175,9 @@ export async function launchChrome({ headful = false, noSandbox = null, env = pr
         resolve(m[0]);
       }
     });
-    proc.once('exit', (code) => {
+    // 挂 close 而不是 exit：exit 只说进程没了，stdio 可能还没读完——而「Chrome 退出」
+    // 这条路上最有价值的信息（缺哪个库）恰恰在 stderr 里，抢在它到达之前报错等于白报。
+    proc.once('close', (code) => {
       clearTimeout(timer);
       fail(`Chrome 退出（code ${code}）`);
     });
