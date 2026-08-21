@@ -283,6 +283,24 @@ test('参数写错就是用法错误：退 3、带前缀、把 usage 一并打�
   }
 });
 
+/**
+ * 回归（issue #98）：`--help`/`-h` 都收，`--version` 却报「未知命令」退 3。
+ * 排查现场问「你装的哪版」，第一反应就是敲 `--version`——那不是用法错误，是我们没接。
+ */
+test('--version / -V 与 version 子命令同义（issue #98）', async (t) => {
+  const ctx = await bootServer(t);
+  const baseline = await dshc(ctx, ['version']);
+  assert.equal(baseline.code, 0);
+
+  for (const flag of ['--version', '-V']) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个旗标验
+    const res = await dshc(ctx, [flag]);
+    assert.equal(res.code, 0, `${flag} 不该被当成用法错误：\n${res.stderr}`);
+    assert.equal(res.stdout, baseline.stdout, `${flag} 该和 version 打出同一份`);
+    assert.match(res.stdout, /dsh-center \d/);
+  }
+});
+
 test('manager 不在时：需要服务的命令报错退出码 2', async (t) => {
   const ctx = await bootServer(t);
   // 直接打一个没人监听的端口，等价于 manager 未启动

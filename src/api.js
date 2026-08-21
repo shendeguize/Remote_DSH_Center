@@ -332,10 +332,19 @@ function requirePhase(view, allowed, action) {
   }
 }
 
+/**
+ * 「这个动作只对本 manager 拉起的实例生效」。
+ *
+ * 两种落空要分开说（issue #98）：远端确实有个不是我们拉的实例，和远端上压根什么都没有。
+ * 揉成一句「不动手动实例」，会让一台根本没在跑的主机也收到这句话——把人往
+ * 「是不是有个我不知道的进程」上引，而真相只是「它没在跑」。
+ */
 function requireManaged(view, action) {
-  if (view.web?.startedByUs !== true) {
-    throw new DshError('NOT_ALLOWED', `${action} 仅适用于本 manager 拉起的实例（不动手动实例）`, { host: view.name });
+  if (view.web?.startedByUs === true) return;
+  if ((view.manualInstances?.length ?? 0) > 0 || view.web) {
+    throw new DshError('NOT_ALLOWED', `${action} 不动手动实例：${view.name} 上跑的不是本 manager 拉起的`, { host: view.name });
   }
+  throw new DshError('NOT_ALLOWED', `${view.name} 上没有本 manager 拉起的实例，无从${action}`, { host: view.name });
 }
 
 // ── 路由表 ───────────────────────────────────────────────────────────────

@@ -1266,11 +1266,15 @@ export function usageText() {
  * @returns {Promise<number>} 退出码
  */
 export async function run(argv) {
-  const [name, ...rest] = argv;
-  if (!name || name === '-h' || name === '--help' || name === 'help') {
+  const [rawName, ...rest] = argv;
+  if (!rawName || rawName === '-h' || rawName === '--help' || rawName === 'help') {
     out(usageText());
-    return name ? EXIT.ok : EXIT.usage;
+    return rawName ? EXIT.ok : EXIT.usage;
   }
+
+  // `--help`/`-h` 收而 `--version` 不收，说不过去：排查现场问「你装的哪版」，
+  // 第一反应就是敲 `--version`（issue #98）。`-v` 留着不占——`--verbose` 迟早要个短名。
+  const name = rawName === '--version' || rawName === '-V' ? 'version' : rawName;
 
   const cmd = COMMANDS[name];
   if (!cmd) {

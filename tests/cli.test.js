@@ -118,6 +118,7 @@ test('命令表覆盖 02 §9.2 与 §10 的全部子命令', () => {
   assert.match(usageText(), /退出码/);
 });
 
+
 test('config set 的 defaults 侧只放行三个可写键', () => {
   assert.deepEqual(buildDefaultsPatchFor('manager.port', 7799), { manager: { port: 7799 } });
   assert.deepEqual(buildDefaultsPatchFor('defaults.remoteWebPort', 9000), { remoteWebPort: 9000 });

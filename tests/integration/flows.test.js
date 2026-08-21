@@ -140,6 +140,10 @@ test('preflight 门槛：未知主机 404、状态不符 409、非受管/停用 
   const stopReady = await ctx.api('POST', '/api/hosts/gpu-1/stop');
   assert.equal(stopReady.status, 409);
   assert.equal(stopReady.json.code, 'NOT_ALLOWED', '没有受管实例可停');
+  // 上面一个实例都没有，更没有什么手动实例。提「手动实例」会把人往「是不是有个我不知道
+  // 的进程」上引，而真相只是「它没在跑」（issue #98）
+  assert.doesNotMatch(stopReady.json.error, /手动实例/, `无实例时不许拿手动实例搪塞：${stopReady.json.error}`);
+  assert.match(stopReady.json.error, /没有|未/, `要直说没有：${stopReady.json.error}`);
 
   const reconnectReady = await ctx.api('POST', '/api/hosts/gpu-1/reconnect');
   assert.equal(reconnectReady.status, 409);
