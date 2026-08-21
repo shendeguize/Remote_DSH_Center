@@ -293,3 +293,69 @@ test('确认框：打开落焦取消键，Esc 等价取消', async (t) => {
   await flush();
   assert.equal(calls.some((c) => c.path === '/api/manager/restart'), false, 'Esc 取消不该发请求');
 });
+
+/**
+ * 回归（issue #110）：标签栏标着 `role="tablist"`/`role="tab"`，这套角色对辅助技术
+ * 就是一句承诺——方向键在标签间走、Home/End 跳首尾。真浏览器实测四个键一动不动，
+ * 焦点钉在原处。切标签会给没打开过的主机新建 iframe 去拉远端页面，故按 ARIA 的
+ * **手动激活**办：方向键只移焦点，Enter/Space 才切。
+ */
+test('标签栏方向键：左右环绕移焦点、Home/End 跳首尾，且只移焦点不切换', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1'), running('gpu-2'), running('gpu-3')] });
+
+  const tabs = () => dom.app.querySelectorAll('.host-tabs .tab');
+  const focused = () => dom.document.activeElement?.dataset?.host ?? '—';
+  const route = () => dom.window.location.hash;
+  const atStart = route();
+  assert.deepEqual([...tabs()].map((n) => n.dataset.host), ['gpu-1', 'gpu-2', 'gpu-3']);
+
+  tabs()[0].focus();
+  key(tabs()[0], 'ArrowRight');
+  assert.equal(focused(), 'gpu-2', 'ArrowRight 该走到下一个标签');
+  assert.equal(route(), atStart, '手动激活：方向键不许顺手切页（会拉起 iframe）');
+
+  key(tabs()[1], 'ArrowRight');
+  key(tabs()[2], 'ArrowRight');
+  assert.equal(focused(), 'gpu-1', '走到末尾该环绕回第一个');
+
+  key(tabs()[0], 'ArrowLeft');
+  assert.equal(focused(), 'gpu-3', '在头上按左键该环绕到最后一个');
+
+  key(tabs()[2], 'Home');
+  assert.equal(focused(), 'gpu-1', 'Home 跳首');
+  key(tabs()[0], 'End');
+  assert.equal(focused(), 'gpu-3', 'End 跳尾');
+
+  // 激活走 click：<button> 上 Enter 的原生激活是浏览器行为，垫片不模拟——
+  // 「焦点标签上按 Enter 真能切页」那半边判据在 scripts/ui-smoke.mjs 的 S13。
+  tabs()[2].click();
+  await flush();
+  assert.equal(route(), '#/host/gpu-3', '激活才切页');
+});
+
+/**
+ * 回归（issue #110）：ARIA 的 tablist 是**一个** Tab 落点（roving tabindex）。原来
+ * 每个标签都在 Tab 序里，24 台就得按 24 次 Tab 才走得过标签栏。
+ */
+test('标签栏只占一个 Tab 落点，且落在当前选中的那个上', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1'), running('gpu-2'), running('gpu-3')] });
+  const tabs = () => dom.app.querySelectorAll('.host-tabs .tab');
+  const stops = () => [...tabs()].filter((n) => n.getAttribute('tabindex') !== '-1');
+
+  assert.equal(stops().length, 1, `标签栏该收成一个 Tab 落点，现在有 ${stops().length} 个`);
+  assert.equal(stops()[0].dataset.host, 'gpu-1', '没选中任何主机时落在第一个上');
+
+  dom.window.location.hash = '#/host/gpu-2';
+  await flush();
+  assert.equal(stops().length, 1);
+  assert.equal(stops()[0].dataset.host, 'gpu-2', 'Tab 进标签栏该落在当前选中的标签上');
+});
+
+/** 回归（issue #110）：`role="tab"` 必须是 tablist 的后代，否则它不属于任何标签组。 */
+test('没有游荡在 tablist 之外的 role="tab"', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const strays = dom.app.querySelectorAll('[role="tab"]')
+    .filter((n) => !n.closest?.('[role="tablist"]'))
+    .map((n) => n.className);
+  assert.deepEqual(strays, [], `这些 role="tab" 不在 tablist 里：${strays.join(', ')}`);
+});

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { clampMenuPosition, menuItems, visibleTabs } from '../../src/web/components/tabbar.js';
+import { clampMenuPosition, menuItems, nextTabIndex, visibleTabs } from '../../src/web/components/tabbar.js';
 
 const host = (name, phase, patch = {}) => ({
   name, phase, mappedUrl: null, web: { pid: 1, startedByUs: true }, ...patch,
@@ -105,4 +105,26 @@ test('层序：菜单在 toast 之上、对话框之下', () => {
   assert.ok(z('toast') > z('scrim'), `--z-toast(${z('toast')}) 要高于 --z-scrim(${z('scrim')})`);
   assert.match(css, /\.toast-region\s*\{[^}]*pointer-events:\s*none/, 'toast 容器不该吃指针事件（间隙也会吞点击）');
   assert.match(css, /\.toast\s*\{[^}]*pointer-events:\s*auto/, 'toast 本体要照常可点（有关闭键）');
+});
+
+/**
+ * 方向键落点（issue #110）。`role="tablist"` 承诺了左右移动与 Home/End 跳首尾，
+ * 真机上原来四个键一动不动。环绕与「焦点不在环上」的边界都在这里收口。
+ */
+test('方向键落点：左右环绕、Home/End 跳首尾、无关键返回 null', () => {
+  assert.equal(nextTabIndex('ArrowRight', 0, 3), 1);
+  assert.equal(nextTabIndex('ArrowRight', 2, 3), 0, '到尾环绕回头');
+  assert.equal(nextTabIndex('ArrowLeft', 0, 3), 2, '在头上按左键环绕到尾');
+  assert.equal(nextTabIndex('Home', 2, 3), 0);
+  assert.equal(nextTabIndex('End', 0, 3), 2);
+  assert.equal(nextTabIndex('ArrowDown', 0, 3), null, 'ArrowDown 是「开操作菜单」，不许被抢');
+  assert.equal(nextTabIndex('Enter', 0, 3), null, '激活不走这里');
+});
+
+test('方向键落点：焦点不在环上时从头算，空标签栏一律不动', () => {
+  assert.equal(nextTabIndex('ArrowRight', -1, 3), 1, '焦点在别处（如管理台）时右键进第二个之前先当在首位');
+  assert.equal(nextTabIndex('ArrowLeft', -1, 3), 2);
+  for (const k of ['ArrowRight', 'ArrowLeft', 'Home', 'End']) {
+    assert.equal(nextTabIndex(k, -1, 0), null, `一个标签都没有时 ${k} 不该算出下标`);
+  }
 });

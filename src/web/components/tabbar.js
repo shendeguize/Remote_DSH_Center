@@ -47,6 +47,27 @@ export function clampMenuPosition({ x, y, menuW, menuH, viewW, viewH }) {
   return { left: fit(x, menuW, viewW), top: fit(y, menuH, viewH) };
 }
 
+/**
+ * 方向键在标签环里落到哪一格（issue #110）。`role="tablist"` 对辅助技术就是一句
+ * 承诺：左右移动、Home/End 跳首尾、到头环绕。纯函数，边界（空标签栏、焦点不在环上）
+ * 一并在这里收口。
+ * @param {string} key 按下的键
+ * @param {number} current 当前焦点所在下标，不在环上传 -1
+ * @param {number} count 标签总数
+ * @returns {number|null} 目标下标；null = 这个键与标签环无关
+ */
+export function nextTabIndex(key, current, count) {
+  if (count <= 0) return null;
+  const from = current >= 0 ? current : 0;
+  switch (key) {
+    case 'ArrowRight': return (from + 1) % count;
+    case 'ArrowLeft': return (from - 1 + count) % count;
+    case 'Home': return 0;
+    case 'End': return count - 1;
+    default: return null;
+  }
+}
+
 /** 菜单项按 phase / 归属裁剪（无效项禁用而非隐藏，位置稳定）。 */
 export function menuItems(host) {
   const managed = isManaged(host);
@@ -62,8 +83,10 @@ export function menuItems(host) {
 }
 
 export function createTabbar({ store, actions, panes }) {
+  // 「管理台」不进 tablist：它不是主机面板的同侪，而是回首页的导航键（issue #110）。
+  // 顶着 role="tab" 却待在 tablist 外面，对辅助技术是个不属于任何标签组的孤儿。
   const dashTab = el('button.tab.tab-dashboard', {
-    type: 'button', role: 'tab', text: '⌂ 管理台', on: { click: () => actions.navigate('#/') },
+    type: 'button', text: '⌂ 管理台', on: { click: () => actions.navigate('#/') },
   });
   const hostTabs = el('div.host-tabs', { role: 'tablist' });
   const probeAllBtn = el('button.icon-button.probe-all', {
@@ -165,6 +188,19 @@ export function createTabbar({ store, actions, panes }) {
     }[e.key];
     items[next].focus();
   });
+  /**
+   * 标签环里的方向键（issue #110）。走**手动激活**：方向键只移焦点，Enter/Space 才切
+   * 页——切到没打开过的主机会新建 iframe 去拉远端页面，一路划过去不该顺手拉起十个。
+   * ArrowDown 已被「开操作菜单」占着，这里不碰。
+   */
+  hostTabs.addEventListener('keydown', (e) => {
+    const tabs = [...hostTabs.querySelectorAll('.tab')];
+    const next = nextTabIndex(e.key, tabs.indexOf(document.activeElement), tabs.length);
+    if (next === null) return;
+    e.preventDefault();
+    focusTab(tabs[next]);
+  });
+
   const onKeyDown = (e) => {
     if (e.key === 'Escape' && !menu.hidden) closeMenu({ restoreFocus: true });
   };
@@ -174,6 +210,17 @@ export function createTabbar({ store, actions, panes }) {
   window.addEventListener('scroll', closeMenu, true);
 
   // ── 标签渲染 ─────────────────────────────────────────────────────────
+
+  /**
+   * 焦点跟着 tabindex 一起走（roving tabindex）：tablist 按 ARIA 只该占**一个** Tab
+   * 落点，否则 24 台就得按 24 次 Tab 才走得过标签栏。落点跟着焦点挪，人 Tab 出去再
+   * 回来还在原地。
+   */
+  function focusTab(node) {
+    if (!node) return;
+    for (const tab of hostTabs.querySelectorAll('.tab')) tab.setAttribute('tabindex', tab === node ? '0' : '-1');
+    node.focus();
+  }
 
   function tabNode(host) {
     const meta = phaseMeta(host.phase);
@@ -231,11 +278,23 @@ export function createTabbar({ store, actions, panes }) {
       currentHost: route.kind === 'host' ? route.host : null,
     });
 
+    // 标签整片重建，旧节点带着焦点被移除，浏览器只能把焦点交回 body——方向键走到
+    // 一半来一帧 SSE 就丢位置。认「同一个标签」靠 data-host（issue #110）。
+    const held = document.activeElement;
+    const heldHost = held && hostTabs.contains?.(held) ? held.dataset?.host ?? null : null;
+
     clear(hostTabs);
     for (const host of tabs) hostTabs.append(tabNode(host));
 
+    // roving tabindex：Tab 进标签栏落在当前选中的那个上，没选中就落第一个
+    const nodes = [...hostTabs.querySelectorAll('.tab')];
+    const stop = nodes.find((n) => n.dataset.host === route.host) ?? nodes[0];
+    for (const n of nodes) n.setAttribute('tabindex', n === stop ? '0' : '-1');
+    if (heldHost) focusTab(nodes.find((n) => n.dataset.host === heldHost) ?? stop);
+
     dashTab.classList.toggle('is-active', route.kind !== 'host');
-    dashTab.setAttribute('aria-selected', String(route.kind !== 'host'));
+    if (route.kind === 'host') dashTab.removeAttribute('aria-current');
+    else dashTab.setAttribute('aria-current', 'page');
     probeAllBtn.disabled = store.isPending('probe-all') || !store.canWrite();
     probeAllBtn.classList.toggle('is-busy', store.isPending('probe-all'));
 

@@ -920,6 +920,50 @@ async function main() {
       return '横幅消失且写操作恢复';
     });
 
+    await check('S13', '标签栏方向键：左右环绕移焦点、Enter 才切页（issue #110）', async () => {
+      // 只有真浏览器验得到两件事：原生按键真派到焦点元素上（垫片是手写 dispatch），
+      // 以及 <button> 上的 Enter 会不会自己变成 click（垫片不模拟原生激活）。
+      await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => {});
+      // 单独跑（--only S13）时前面那些场景没起过主机，自己把两台拉起来；已经在跑的
+      // 那台再 start 一次会被拒，那是意料之中，等它 running 即可
+      for (const name of ['gpu-1', 'gpu-2']) {
+        // eslint-disable-next-line no-await-in-loop -- 逐台拉起
+        await rig.api('POST', `/api/hosts/${name}/start`).catch(() => {});
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await waitHost(rig, name, ['running']);
+      }
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
+      await cdp.waitFor("document.querySelectorAll('.host-tabs .tab').length >= 2", '标签栏至少两个标签');
+
+      const names = await cdp.eval("return [...document.querySelectorAll('.host-tabs .tab')].map((t) => t.dataset.host);");
+      assert(names.length >= 2, `只有 ${names.length} 个标签，方向键判据在空转`);
+      const focused = () => cdp.eval("return document.activeElement?.dataset?.host ?? '';");
+      const stops = () => cdp.eval("return [...document.querySelectorAll('.host-tabs .tab')].filter((t) => t.getAttribute('tabindex') !== '-1').length;");
+
+      assert(await stops() === 1, `标签栏占了 ${await stops()} 个 Tab 落点——roving tabindex 没生效`);
+      await cdp.eval("document.querySelector('.host-tabs .tab').focus(); return true;");
+      await cdp.key('ArrowRight', { code: 'ArrowRight', keyCode: 39 });
+      await sleep(120);
+      assert(await focused() === names[1], `ArrowRight 后焦点在「${await focused()}」，该在 ${names[1]}`);
+      const routeAfterArrow = await cdp.eval('return location.hash;');
+      assert(!routeAfterArrow.startsWith('#/host/'),
+        `方向键顺手切页了（${routeAfterArrow}）——手动激活才不会一路划过去拉起一串 iframe`);
+
+      await cdp.key('ArrowRight', { code: 'ArrowRight', keyCode: 39 });
+      await sleep(120);
+      assert(await focused() === names[0], `走到末尾该环绕回 ${names[0]}，实测「${await focused()}」`);
+      await cdp.key('End', { code: 'End', keyCode: 35 });
+      await sleep(120);
+      const last = names[names.length - 1];
+      assert(await focused() === last, `End 该跳到 ${last}，实测「${await focused()}」`);
+
+      await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+      await cdp.waitFor(`location.hash === '#/host/' + encodeURIComponent(${JSON.stringify(last)})`, 'Enter 激活焦点标签');
+      assert(await stops() === 1, '切页后 Tab 落点又散开了');
+      await rig.api('POST', '/api/hosts/gpu-2/stop');
+      return `${names.length} 个标签：方向键环绕、Enter 落在 ${last}`;
+    });
+
     await check('S12', '事件风暴不冻住页面：重绘合到帧边界（issue #106）', async () => {
       // 修复前：1500 条事件 → 14.8 万次 DOM 变更、一个 2278ms 的长任务，那 2.3 秒里
       // 页面点不动。判据取「变更批次」这个与机器快慢无关的量，长任务只作兜底。
