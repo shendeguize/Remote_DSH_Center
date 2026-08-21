@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   COMMON_SSH_OPTS,
   TUNNEL_SSH_OPTS,
+  SSH_OUTPUT_CAP_BYTES,
   sshExec,
   scpTo,
   execFailure,
@@ -49,6 +50,22 @@ setInterval(() => {}, 1000);
 const FAIL = shim('fail.cjs', `
 process.stderr.write('ssh: connect to host x port 22: Connection refused');
 process.exit(255);
+`);
+
+/**
+ * 狂吐的远端：先刷 N MB，最后才打我们要的那行。
+ * 真机对应两种常见货色——日志里带 \\r 的进度条（整段就是一行），
+ * 以及刷屏的 .bashrc/motd（每条一次性 ssh 都走登录 shell）。
+ */
+const SPEW = shim('spew.cjs', `
+const mb = Number(process.env.DSHC_TEST_SPEW_MB || '600');
+const fd = process.env.DSHC_TEST_SPEW_FD === '2' ? process.stderr : process.stdout;
+const chunk = Buffer.alloc(1 << 20, 0x61);
+(function pump(i) {
+  if (i >= mb) { fd.write('\\nMARKER=tail-survived\\n'); return; }
+  if (fd.write(chunk)) pump(i + 1);
+  else fd.once('drain', () => pump(i + 1));
+}(0));
 `);
 
 test('COMMON_SSH_OPTS / TUNNEL_SSH_OPTS 与契约逐字一致', () => {
@@ -155,6 +172,51 @@ test('在飞账本：已经收场的不再挂着（不许无限长的账本）',
   assert.equal(liveChildCount(), 0);
   shutdownSsh(); // 空账本上调也不许抛
   reopenSsh();
+});
+
+/**
+ * 回归（issue #92）：远端吐多少 manager 就吃多少。256MB 能把 RSS 顶上去且不还，
+ * 过了 V8 的字符串上限（约 512MB）就是 `RangeError: Invalid string length`——
+ * 抛在流的 data 回调里没人接得住，manager 当场死、隧道全陪葬。
+ */
+test('sshExec 对狂吐的远端封顶：不崩、内存有界、留的是尾（issue #92）', async (t) => {
+  t.after(() => { delete process.env.DSHC_SSH_BIN; delete process.env.DSHC_TEST_SPEW_MB; });
+  process.env.DSHC_SSH_BIN = SPEW;
+  process.env.DSHC_TEST_SPEW_MB = '600'; // 越过 V8 字符串上限，红的时候就是这里崩
+
+  const before = process.memoryUsage().rss;
+  const res = await sshExec('gpu-1', 'probe', { timeoutMs: 120_000 });
+  const grew = process.memoryUsage().rss - before;
+
+  assert.equal(res.code, 0, '封顶不该影响命令本身的成败判定');
+  assert.ok(
+    res.stdout.length <= SSH_OUTPUT_CAP_BYTES,
+    `收上来的量必须封顶，实得 ${res.stdout.length} 字节`,
+  );
+  assert.ok(
+    grew < 128 * 1024 * 1024,
+    `远端不许决定 manager 的内存，实测涨了 ${Math.round(grew / 1048576)}MB`,
+  );
+  assert.match(res.stdout, /MARKER=tail-survived/, '留尾不留头：我们的 KEY=VALUE 在最后一行');
+  assert.ok(res.stdoutDropped > 0, '丢了多少要记账，否则调用方没法告诉用户日志被截过');
+});
+
+test('sshExec 的 stderr 同样封顶（刷屏的 .bashrc 走的是这条）（issue #92）', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_SSH_BIN;
+    delete process.env.DSHC_TEST_SPEW_MB;
+    delete process.env.DSHC_TEST_SPEW_FD;
+  });
+  process.env.DSHC_SSH_BIN = SPEW;
+  process.env.DSHC_TEST_SPEW_MB = '600';
+  process.env.DSHC_TEST_SPEW_FD = '2';
+
+  const res = await sshExec('gpu-1', 'probe', { timeoutMs: 120_000 });
+  assert.ok(res.stderr.length <= SSH_OUTPUT_CAP_BYTES, `stderr 也得封顶，实得 ${res.stderr.length} 字节`);
+  assert.ok(res.stderrDropped > 0);
+  // detail 会原样进错误框/日志，封顶之后还得说清「这不是全部」
+  const err = execFailure('gpu-1', '探测', { ...res, code: 1 });
+  assert.match(err.detail, /截断|丢弃|过大/, `要告诉用户被截过：${err.detail.slice(-200)}`);
 });
 
 test('sshExec 连不上：code 255 + stderr，execFailure 归类 SSH_UNREACHABLE', async (t) => {

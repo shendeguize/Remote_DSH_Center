@@ -6,6 +6,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createTailCapture } from './capture.js';
 import { DshError } from './errors.js';
 import { assertSafeHost, shq } from './shq.js';
 import { PROTO_TIMING } from './proto.js';
@@ -24,6 +25,16 @@ export const TUNNEL_SSH_OPTS = Object.freeze([
 ]);
 
 const KILL_ESCALATE_MS = 2_000;
+
+/**
+ * 每条流各自收上来的上限（issue #92）。
+ *
+ * 2MB 的选法：协议输出（POLL/VERIFY/STOP 的 KEY=VALUE）都在几百字节量级，永远碰不到；
+ * 日志抓取是 `tail -n ≤10000`，正常文本行一万行约 1MB 上下，也在里面。
+ * 真能撞上这条线的只有非正常输出——带 `\r` 的进度条压成的超长单行、刷屏的 .bashrc。
+ * 时间维度另有 onceTimeoutMs 兜着，所以撞线之后照常排空到命令自然结束，不额外掐连接。
+ */
+export const SSH_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 
 /**
  * 在飞的一次性子进程。manager 退出时要把它们一并收走：不收就是把 ssh 交给 init
@@ -91,8 +102,13 @@ export function openerBin() {
 }
 
 /**
- * @typedef {{code:number|null, signal:string|null, stdout:string, stderr:string, timedOut:boolean, aborted:boolean}} ExecResult
+ * @typedef {{code:number|null, signal:string|null, stdout:string, stderr:string,
+ *   stdoutDropped:number, stderrDropped:number, timedOut:boolean, aborted:boolean}} ExecResult
+ * `*Dropped` 是封顶时从**头部**丢掉的字符数（issue #92），0 表示这份是全的。
  */
+
+/** 压根没跑起来的那几条早退路径，输出字段一律取这份，省得各处漏填。 */
+const EMPTY_OUTPUT = Object.freeze({ stdout: '', stderr: '', stdoutDropped: 0, stderrDropped: 0 });
 
 /**
  * 收集子进程输出并管理超时/中止的强杀链：TERM → 2s → KILL。
@@ -102,7 +118,12 @@ function runChild(bin, args, { timeoutMs, signal }) {
   return new Promise((resolve) => {
     if (closed) {
       resolve({
-        code: null, signal: null, stdout: '', stderr: 'manager 正在退出，这次远端命令没有发出', timedOut: false, aborted: true,
+        ...EMPTY_OUTPUT,
+        code: null,
+        signal: null,
+        stderr: 'manager 正在退出，这次远端命令没有发出',
+        timedOut: false,
+        aborted: true,
       });
       return;
     }
@@ -110,12 +131,14 @@ function runChild(bin, args, { timeoutMs, signal }) {
     try {
       child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
-      resolve({ code: null, signal: null, stdout: '', stderr: String(err.message ?? err), timedOut: false, aborted: false });
+      resolve({
+        ...EMPTY_OUTPUT, code: null, signal: null, stderr: String(err.message ?? err), timedOut: false, aborted: false,
+      });
       return;
     }
 
-    let stdout = '';
-    let stderr = '';
+    const stdout = createTailCapture(SSH_OUTPUT_CAP_BYTES);
+    const stderr = createTailCapture(SSH_OUTPUT_CAP_BYTES);
     let timedOut = false;
     let aborted = false;
     let escalate = null;
@@ -123,8 +146,8 @@ function runChild(bin, args, { timeoutMs, signal }) {
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    child.stdout.on('data', (d) => stdout.push(d));
+    child.stderr.on('data', (d) => stderr.push(d));
 
     const killChain = () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
@@ -152,11 +175,20 @@ function runChild(bin, args, { timeoutMs, signal }) {
       if (escalate) clearTimeout(escalate);
       inFlight.delete(killChain);
       signal?.removeEventListener('abort', onAbort);
-      resolve({ code, signal: sig, stdout, stderr, timedOut, aborted });
+      resolve({
+        code,
+        signal: sig,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        stdoutDropped: stdout.dropped(),
+        stderrDropped: stderr.dropped(),
+        timedOut,
+        aborted,
+      });
     };
 
     child.on('error', (err) => {
-      stderr += (stderr ? '\n' : '') + String(err.message ?? err);
+      stderr.push((stderr.text() ? '\n' : '') + String(err.message ?? err));
       finish(null, null);
     });
     child.on('close', (code, sig) => finish(code, sig));
@@ -189,18 +221,30 @@ export async function scpTo(host, localPath, remoteRelPath, { timeoutMs = PROTO_
   return runChild(bin, args, { timeoutMs, signal });
 }
 
+/**
+ * 截断告知（issue #92）。detail 会原样进错误框和日志，被截过还不说，看的人会以为
+ * 远端就只说了这么多——而真正的头几行（往往正是原因）已经被丢掉了。
+ * @returns {string|null}
+ */
+export function noteTruncation(text, dropped) {
+  const body = text || '';
+  if (!dropped) return body || null;
+  return `（远端输出过大，已丢弃开头 ${dropped} 字符，以下是末尾部分）\n${body}`;
+}
+
 /** 把 ExecResult 的失败面转成 DshError（调用方决定是否抛）。 */
 export function execFailure(host, label, res) {
+  const detail = noteTruncation(res.stderr, res.stderrDropped);
   if (res.timedOut) {
-    return new DshError('SSH_TIMEOUT', `${label} 超时（${host}）`, { host, detail: res.stderr || null });
+    return new DshError('SSH_TIMEOUT', `${label} 超时（${host}）`, { host, detail });
   }
   if (res.aborted) {
-    return new DshError('SSH_TIMEOUT', `${label} 被中止（${host}）`, { host, detail: res.stderr || null });
+    return new DshError('SSH_TIMEOUT', `${label} 被中止（${host}）`, { host, detail });
   }
   if (res.code !== 0) {
     return new DshError('SSH_UNREACHABLE', `${label} 失败（${host}，退出码 ${res.code ?? res.signal}）`, {
       host,
-      detail: res.stderr || null,
+      detail,
     });
   }
   return null;

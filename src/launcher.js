@@ -15,7 +15,9 @@ import {
   parseLaunchUrl,
   parseProtoOutput,
 } from './lib/proto.js';
-import { execFailure, hostQueue, sshExec } from './lib/ssh.js';
+import {
+  execFailure, hostQueue, noteTruncation, sshExec,
+} from './lib/ssh.js';
 import { ensureLocalPort } from './ports.js';
 import { syncPatches } from './patchsync.js';
 import * as store from './store.js';
@@ -124,7 +126,9 @@ export async function tailRemoteLog(host, { logName, lines = 200 }, { signal } =
   const res = await sshExec(host, buildLogTailScript({ logName, lines }), { signal });
   const err = execFailure(host, '取远端日志', res);
   if (err) throw err;
-  return res.stdout;
+  // 行数在远端限了（tail -n），字节数没限：一条带 \r 的进度条就是超长的单行，
+  // 撞上封顶只能收到末尾那截。得说一声，否则看的人以为日志本来就长这样（issue #92）。
+  return noteTruncation(res.stdout, res.stdoutDropped) ?? '';
 }
 
 // ── RMT-06 拉起协议状态机（12 §3 的 S0–S5） ─────────────────────────────
