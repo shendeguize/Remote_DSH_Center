@@ -242,6 +242,26 @@ test('install.sh：缺 git 时说清缺的是 git', { skip }, (t) => {
   assert.match(res.stderr, /git/);
 });
 
+test('install.sh：不认识的旗标当场报用法错误，不按别的意思照做', { skip }, (t) => {
+  // 拼错 --standalone 写成 --no-git 的人，本意是「别走 git」，静默忽略的后果是
+  // 他拿到 release 分支上的旧版本，还以为 --pre 生效了（issue #55）。
+  const r = rig(t);
+  const res = runInstall(r.env, ['--no-git', '--prefix', r.prefix]);
+  assert.equal(res.status, 3, `用法错误该退 3，实得 ${res.status}；${res.stderr}`);
+  assert.match(res.stderr, /--no-git/, '要指出是哪个旗标');
+  assert.match(res.stderr, /--standalone|可用|支持/, '要给出可用的写法');
+  assert.equal(fs.existsSync(r.appDir), false, '拦住了就不该已经装起来');
+});
+
+test('install.mjs：不认识的旗标也拦（它才是最终解析处）', { skip }, (t) => {
+  const r = rig(t);
+  const res = spawnSync(process.execPath, [
+    path.join(ROOT, 'scripts', 'install.mjs'), '--prefix', r.prefix, '--srevice',
+  ], { encoding: 'utf8', env: r.env });
+  assert.equal(res.status, 3, `实得 ${res.status}；${res.stderr}`);
+  assert.match(res.stderr, /--srevice/);
+});
+
 // ── standalone（发布包）通道 ─────────────────────────────────────────────
 //
 // 这条通道的全部价值在「没有 node 的机器上一条命令能装上并跑起来」。

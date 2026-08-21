@@ -206,7 +206,10 @@ export function classifyConfigFile(file = resolvePaths().config) {
     text = fs.readFileSync(file, 'utf8');
   } catch (err) {
     if (err.code === 'ENOENT') return { kind: 'missing' };
-    return { kind: 'unreadable', reason: `${err.code ?? ''} ${err.message}`.trim() };
+    // fs 的 message 本来就以错误码开头（`EACCES: permission denied, …`），
+    // 再拼一遍 err.code 会读成「EACCES EACCES: …」
+    const reason = err.message.startsWith(`${err.code}:`) ? err.message : `${err.code ?? ''} ${err.message}`.trim();
+    return { kind: 'unreadable', reason };
   }
   // 空文件不算「没有」：它承载不了配置，可覆盖它照样丢东西（比如上一次写了一半）
   if (text.trim() === '') return { kind: 'damaged', reason: '文件是空的' };

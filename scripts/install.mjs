@@ -112,6 +112,19 @@ async function main() {
   silenceBrokenPipe();
   const argv = process.argv.slice(2);
   const flag = (name) => argv.includes(`--${name}`);
+
+  // 不认识的旗标当用法错误。只挑认识的、其余不响，等于「按另一套意思照做」：
+  // 把 --service 拼成 --srevice 的人以为装了自启，实际什么都没装（issue #55）。
+  const KNOWN = new Set(['--prefix', '--service', '--uninstall', '--no-next-steps']);
+  const unknown = argv.filter((a, i) => a.startsWith('--') && !KNOWN.has(a)
+    // --prefix 的值不是旗标
+    && argv[i - 1] !== '--prefix');
+  if (unknown.length > 0) {
+    process.stderr.write(`不认识的参数：${unknown.join(' ')}\n可用：${[...KNOWN].join(' | ')}\n`);
+    process.exitCode = 3;
+    return;
+  }
+
   const prefixArg = argv.indexOf('--prefix');
   const prefix = path.resolve(prefixArg === -1 ? DEFAULT_PREFIX : argv[prefixArg + 1]);
   const linkPath = path.join(prefix, 'dshc');

@@ -54,6 +54,12 @@ die() {
   exit 1
 }
 
+# 用法错误单独退 3，与 dshc 的退出码约定一致（0 成功 / 1 操作失败 / 2 超时 / 3 用法）
+die_usage() {
+  printf '\n\033[31m用法错误：\033[0m%s\n' "$1" >&2
+  exit 3
+}
+
 # ── 0. 参数分流（自己的旗标 vs 透传给 install.mjs 的） ──────────────────────
 
 CHANNEL='auto'
@@ -65,8 +71,14 @@ while [ "$#" -gt 0 ]; do
     --standalone) CHANNEL='standalone' ;;
     --git)        CHANNEL='git' ;;
     --pre)        ALLOW_PRE='1' ;;
-    --version)    PIN_TAG="${2:-}"; [ -n "${PIN_TAG}" ] || die '--version 后面要跟 tag，如 --version v0.2.0-rc.1'; shift ;;
-    *)            PASS+=("$1") ;;
+    --version)    PIN_TAG="${2:-}"; [ -n "${PIN_TAG}" ] || die_usage '--version 后面要跟 tag，如 --version v0.2.0-rc.1'; shift ;;
+    # 透传给 install.mjs 的那几个（它自己也会再认一遍并拦下不认识的）
+    --prefix)     PASS+=("$1" "${2:-}"); [ -n "${2:-}" ] || die_usage '--prefix 后面要跟目录'; shift ;;
+    --service|--uninstall|--no-next-steps) PASS+=("$1") ;;
+    # 认不出来的一律拦住：静默忽略的后果是「按另一套意思照做」——把 --standalone
+    # 拼成 --no-git 的人会拿到 release 分支上的旧版本，还以为 --pre 生效了。
+    *)            die_usage "不认识的参数：$1
+可用：--standalone | --git | --pre | --version <tag> | --prefix <dir> | --service | --uninstall" ;;
   esac
   shift
 done

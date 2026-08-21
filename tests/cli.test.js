@@ -187,5 +187,9 @@ test('classifyConfigFile 分清「没有」「坏了」「读不了」', (t) => 
   const denied = classifyConfigFile(file);
   fs.chmodSync(file, 0o600);
   // root 跑测试时 chmod 000 照样能读，那就跳过这条判据
-  if (process.getuid?.() !== 0) assert.equal(denied.kind, 'unreadable', '权限读不了该单独成一类');
+  if (process.getuid?.() !== 0) {
+    assert.equal(denied.kind, 'unreadable', '权限读不了该单独成一类');
+    // fs 的 message 已经以错误码开头，别再拼一遍读成「EACCES EACCES: …」
+    assert.doesNotMatch(denied.reason, /EACCES\s+EACCES/, denied.reason);
+  }
 });
