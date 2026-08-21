@@ -7,6 +7,8 @@ import { buildProbeScript, kvOne, parseProtoOutput } from './lib/proto.js';
 import { hostQueue, sshExec } from './lib/ssh.js';
 import { PROBE_PROTECTED_PHASES } from './lib/machine.js';
 import { asDshError } from './lib/errors.js';
+import { mapPool } from './lib/pool.js';
+import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
 
 /**
@@ -157,11 +159,10 @@ export function applyProbe(name, result) {
  */
 export function probeAll(names = null) {
   const targets = names ?? store.listHostNames();
-  return Promise.allSettled(
-    targets.map((name) => probeHost(name).catch((err) => {
-      const e = asDshError(err);
-      logEvent(name, 'warn', `探测失败：${e.message}`, e.detail);
-      throw e;
-    })),
-  );
+  // 有闸：主机一多，无闸的扇出会把共用跳板机的 MaxStartups 打爆（issue #85）
+  return mapPool(targets, (name) => probeHost(name).catch((err) => {
+    const e = asDshError(err);
+    logEvent(name, 'warn', `探测失败：${e.message}`, e.detail);
+    throw e;
+  }), SSH_FANOUT_LIMIT);
 }

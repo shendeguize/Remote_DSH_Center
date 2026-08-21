@@ -9,6 +9,8 @@
 import { logEvent } from './lib/bus.js';
 import { buildVerifyScript, kvOne, parseProtoOutput } from './lib/proto.js';
 import { execFailure, hostQueue, sshExec } from './lib/ssh.js';
+import { mapPool } from './lib/pool.js';
+import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
 import * as tunnel from './tunnel.js';
 
@@ -43,7 +45,14 @@ export async function tick() {
   running = true;
   try {
     const targets = store.listHostNames().filter((n) => store.getPhase(n) === 'running');
-    const results = await Promise.all(targets.map((n) => checkOne(n)));
+    // 有闸：合盖睡醒时所有隧道会一起断，深复核随之一起发——那正是跳板机最忙的时候（issue #85）
+    const settled = await mapPool(targets, (n) => checkOne(n), SSH_FANOUT_LIMIT);
+    const results = settled.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      // 有闸之后单台抛错不再连坐整轮，但也不许悄无声息
+      logEvent(targets[i], 'warn', `巡检这一台出错：${r.reason?.message ?? r.reason}`);
+      return { host: targets[i], outcome: /** @type {const} */ ('unknown') };
+    });
     return { checked: targets.length, results };
   } finally {
     running = false;

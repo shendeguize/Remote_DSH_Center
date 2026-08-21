@@ -11,12 +11,13 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { FACTORY_DEFAULTS, resolvePaths } from './defaults.js';
+import { FACTORY_DEFAULTS, SSH_FANOUT_LIMIT, resolvePaths } from './defaults.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { isMainEntry } from './lib/entry.js';
 import { logEvent } from './lib/bus.js';
 import { trimLogFile } from './lib/logfile.js';
 import { checkRequestOrigin } from './lib/origin-guard.js';
+import { mapPool } from './lib/pool.js';
 import { reopenSsh, shutdownSsh } from './lib/ssh.js';
 import * as daemon from './daemon.js';
 import * as launcher from './launcher.js';
@@ -169,7 +170,7 @@ async function recoverState() {
   const targets = store.listHostNames().filter((n) => ['running', 'degraded'].includes(store.getPhase(n)));
   if (targets.length === 0) return [];
   logEvent(null, 'info', `恢复复核 ${targets.length} 台主机`);
-  const results = await Promise.allSettled(targets.map((n) => launcher.recoverOne(n)));
+  const results = await mapPool(targets, (n) => launcher.recoverOne(n), SSH_FANOUT_LIMIT);
   return targets.map((name, i) => ({
     name,
     outcome: results[i].status === 'fulfilled' ? results[i].value : 'crashed',
@@ -185,7 +186,8 @@ export async function runAutoStart() {
   });
   if (targets.length === 0) return [];
   logEvent(null, 'info', `autoStart：${targets.join(', ')}`);
-  const results = await Promise.allSettled(targets.map((n) => launcher.start(n)));
+  // 有闸：一次拉起要走 LAUNCH/POLL/VERIFY 数趟 ssh，几十台一起冲最容易把跳板机打爆（issue #85）
+  const results = await mapPool(targets, (n) => launcher.start(n), SSH_FANOUT_LIMIT);
   results.forEach((r, i) => {
     if (r.status === 'rejected') {
       const e = asDshError(r.reason);

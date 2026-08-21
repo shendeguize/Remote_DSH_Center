@@ -76,3 +76,12 @@ export const LAUNCHD_LABEL = 'com.dsh-center.manager';
 
 /** 远端落地目录（03 §1），相对远端 $HOME。 */
 export const REMOTE_DIR = '.dsh_center_remote';
+
+/**
+ * 「对每台各来一次 ssh」这类扇出的同时在飞上限（issue #85）。
+ *
+ * 取 6 是照着 sshd 的出厂 `MaxStartups 10:30:100` 来的：未完成认证的连接过 10 条就开始
+ * 被随机丢，而多台远端共用一台跳板机时这个额度是合起来算的。留 4 条余量给用户自己的
+ * ssh 会话与隧道重连。这不是用户可调项，故只在出厂表里，不进 config schema。
+ */
+export const SSH_FANOUT_LIMIT = 6;

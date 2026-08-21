@@ -399,8 +399,30 @@ const parsed = parseArgv(process.argv.slice(2));
 const name = parsed.positional[0];
 if (!name) die('缺少目标主机');
 
+/**
+ * 跳板机的 MaxStartups：额度是所有主机合起来算的，所以记在全局而非某台的 faults 里。
+ * 超额的连接在**认证之前**就被掐，真 ssh 客户端给的正是下面这句。
+ */
+function admitOrDrop() {
+  const cap = Number(process.env.DSHC_HARNESS_MAX_STARTUPS ?? '') || 0;
+  if (!cap) return;
+  const now = mutate((s) => {
+    s.inflight = (s.inflight ?? 0) + 1;
+    s.peakInflight = Math.max(s.peakInflight ?? 0, s.inflight);
+    return s.inflight;
+  });
+  const release = () => mutate((s) => { s.inflight = Math.max(0, (s.inflight ?? 1) - 1); });
+  if (now > cap) {
+    release();
+    process.stderr.write('kex_exchange_identification: Connection closed by remote host\n');
+    process.exit(255);
+  }
+  process.on('exit', release);
+}
+
 const st0 = readState();
 const h0 = hostState({ hosts: st0.hosts ?? {} }, name);
+admitOrDrop();
 
 if (h0.faults.hostkeyFail) {
   process.stderr.write('Host key verification failed.\n');
