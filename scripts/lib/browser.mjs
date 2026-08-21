@@ -136,8 +136,8 @@ export class Cdp {
   }
 }
 
-export async function launchChrome({ headful = false, noSandbox = null } = {}) {
-  const bin = findChrome();
+export async function launchChrome({ headful = false, noSandbox = null, env = process.env } = {}) {
+  const bin = findChrome({ env });
   if (!bin) throw new Error('找不到 Chrome/Chromium；用 DSHC_CHROME=<路径> 指定');
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-chrome-'));
   const args = [
@@ -149,13 +149,23 @@ export async function launchChrome({ headful = false, noSandbox = null } = {}) {
   ];
   if (!headful) args.unshift('--headless=new', '--disable-gpu', '--hide-scrollbars');
   // CI 容器里多半是 root，沙箱起不来（Chrome 直接退出）
-  const needsNoSandbox = noSandbox ?? (process.getuid?.() === 0 || Boolean(process.env.CI));
+  const needsNoSandbox = noSandbox ?? (process.getuid?.() === 0 || Boolean(env.CI));
   if (needsNoSandbox) args.unshift('--no-sandbox', '--disable-dev-shm-usage');
 
   const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // 冷启动在共享 runner 上会被 IO 拖到二十几秒（实测 CI 上偶发超时判红，而本机从不复现）。
+  // 放宽到 60s，并在超时时把 Chrome 自己的 stderr 一起交出来——否则只剩一句「没报出端口」，
+  // 分不清是慢、是缺库、还是沙箱起不来。
+  const startupMs = Number(env.DSHC_CHROME_TIMEOUT_MS) || 60_000;
   const wsUrl = await new Promise((resolve, reject) => {
     let buf = '';
-    const timer = setTimeout(() => reject(new Error('Chrome 未在 20s 内报出调试端口')), 20_000);
+    const fail = (why) => reject(new Error(
+      `${why}${buf.trim() ? `\nChrome 说：${buf.trim().split('\n').slice(-8).join('\n')}` : ''}`,
+    ));
+    const timer = setTimeout(
+      () => fail(`Chrome 未在 ${Math.round(startupMs / 1000)}s 内报出调试端口`),
+      startupMs,
+    );
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', (chunk) => {
       buf += chunk;
@@ -165,7 +175,10 @@ export async function launchChrome({ headful = false, noSandbox = null } = {}) {
         resolve(m[0]);
       }
     });
-    proc.once('exit', (code) => reject(new Error(`Chrome 退出（code ${code}）`)));
+    proc.once('exit', (code) => {
+      clearTimeout(timer);
+      fail(`Chrome 退出（code ${code}）`);
+    });
   });
 
   return {

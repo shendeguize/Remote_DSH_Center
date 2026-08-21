@@ -476,6 +476,29 @@ test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO'
   assert.deepEqual(problems, []);
 });
 
+/**
+ * CI 上偶发「Chrome 未在 20s 内报出调试端口」判红，本机从不复现——共享 runner 的
+ * 冷启动能被 IO 拖到二十几秒。放宽之外更要紧的是：超时消息必须把 Chrome 自己的
+ * stderr 带出来，否则分不清是慢、是缺库、还是沙箱起不来（那三种处置完全不同）。
+ */
+test('launchChrome 超时：错误里带上 Chrome 自己的输出', async (t) => {
+  const { launchChrome } = await import('../scripts/lib/browser.mjs');
+  // 用一个必然不吐调试端口、又会往 stderr 说话的可执行文件冒充 Chrome
+  const fake = path.join(tmpdir(t), 'fake-chrome');
+  fs.writeFileSync(fake, '#!/bin/sh\necho "libnss3.so: cannot open shared object file" >&2\nsleep 5\n');
+  fs.chmodSync(fake, 0o755);
+
+  await assert.rejects(
+    () => launchChrome({ env: { DSHC_CHROME: fake, DSHC_CHROME_TIMEOUT_MS: '2000' } }),
+    (err) => {
+      assert.match(err.message, /未在 \d+s 内报出调试端口|退出/);
+      assert.match(err.message, /Chrome 说：/, '没把 Chrome 的自述带出来');
+      assert.match(err.message, /libnss3/, '丢了真正有诊断价值的那一行');
+      return true;
+    },
+  );
+});
+
 test('findChrome：显式指定优先，找不到给 null', () => {
   const exists = (p) => ['/usr/bin/chromium', '/custom/chrome'].includes(p);
   assert.equal(findChrome({ env: { DSHC_CHROME: '/custom/chrome' }, exists }), '/custom/chrome');
