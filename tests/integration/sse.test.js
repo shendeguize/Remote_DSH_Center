@@ -6,6 +6,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
+import net from 'node:net';
+
+import { logEvent } from '../../src/lib/bus.js';
 import { bootServer, server, waitPhase } from './helpers.js';
 import { assertShape, hostChanged, snapshot as snapshotSchema } from '../contract/schemas.js';
 
@@ -121,4 +124,47 @@ test('客户端硬断（进程被杀 / 网线被拔）也从广播名单里除�
     else c.res.destroy();
   }
   await waitUntil(() => hub().size === 0, `名单没清空（还剩 ${hub().size}）`);
+});
+
+test('客户端不读就把它踢掉：写队列不许无上限地涨', async (t) => {
+  const ctx = await bootServer(t);
+  const hub = () => server.runtime.handler.sseHub;
+  const port = Number(new URL(ctx.base).port);
+
+  // 僵死客户端：发完请求就 pause()。接收窗口填满后，服务端每帧只能往内存里排队——
+  // 这正是「标签被系统冻结 / 笔记本合盖 / 网络黑洞」在服务端看到的样子。
+  const sock = await new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1', () => {
+      s.write('GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n');
+      s.pause();
+      resolve(s);
+    });
+  });
+  t.after(() => sock.destroy());
+  await waitUntil(() => hub().size === 1, '前提：僵死客户端没连上');
+
+  // 每条 1KB × 4000 条 ≈ 4MB，稳稳越过上限
+  const fat = 'x'.repeat(1024);
+  for (let i = 0; i < 4000; i += 1) logEvent('gpu-1', 'info', `洪峰 ${i}`, fat);
+
+  await waitUntil(() => hub().size === 0, '不读的客户端始终没被踢掉——写队列会一直涨到 OOM');
+});
+
+test('读得动的客户端不许被误踢', async (t) => {
+  const ctx = await bootServer(t);
+  const hub = () => server.runtime.handler.sseHub;
+  let bytes = 0;
+  const req = http.request({
+    host: '127.0.0.1', port: Number(new URL(ctx.base).port), path: '/api/events', method: 'GET',
+  }, (res) => {
+    res.on('data', (c) => { bytes += c.length; });
+  });
+  req.end();
+  t.after(() => req.destroy());
+  await waitUntil(() => hub().size === 1, '前提：客户端没连上');
+
+  const fat = 'x'.repeat(1024);
+  for (let i = 0; i < 4000; i += 1) logEvent('gpu-1', 'info', `洪峰 ${i}`, fat);
+  await waitUntil(() => bytes > 2_000_000, `收得太少（${bytes}B）`, { timeoutMs: 10_000 });
+  assert.equal(hub().size, 1, '一直在读的客户端被踢了');
 });

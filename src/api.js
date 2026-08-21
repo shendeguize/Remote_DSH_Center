@@ -11,7 +11,7 @@
 import crypto from 'node:crypto';
 
 import { DshError, asDshError } from './lib/errors.js';
-import { bus, emitOperationDone, recentLogs } from './lib/bus.js';
+import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import { assertValid, defaultsPatchSchema, hostConfigPatchSchema, setupBodySchema } from './lib/validate.js';
 import * as launcher from './launcher.js';
 import * as prober from './prober.js';
@@ -20,6 +20,22 @@ import * as tunnel from './tunnel.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 const SSE_HEARTBEAT_MS = 25_000;
+
+/**
+ * 一条 SSE 连接的积压上限。客户端不读的时候（标签被系统冻结、笔记本合盖、网络黑洞），
+ * `res.write` 只能把帧堆在内存里——manager 是常驻进程，堆着堆着就涨到几个 G，而没人
+ * 会想到是「那个后台标签没在读」。实测：一个不读的客户端 + 20000 条 1KB 日志 = 堆从
+ * 8MB 涨到 56MB，线性且 GC 收不回（无客户端的对照组恒定 8MB）。
+ *
+ * 判据是「**一直**积压」，不是「这一下超线」：日志本来就成串来，一个读得很正常的
+ * 客户端也可能在一个 tick 里被灌进几 MB，然后几毫秒内就排空。只按瞬时值踢会误伤它。
+ * 所以软线（超了开始计时）+ 宽限期（期间排空就一笔勾销）+ 硬顶（再离谱也不许过）。
+ *
+ * 踢掉是安全的：页面本来就有断线重连，重连首帧是完整 snapshot，状态照样对得上。
+ */
+const SSE_BACKLOG_SOFT_BYTES = 4_194_304;
+const SSE_BACKLOG_HARD_BYTES = 33_554_432;
+const SSE_BACKLOG_GRACE_MS = 3_000;
 
 /** setup 门禁白名单（13 §4）。 */
 const SETUP_ALLOWED = [
@@ -95,6 +111,68 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
   /** @type {Set<import('node:http').ServerResponse>} */
   const clients = new Set();
 
+  /** 本轮广播里被踢掉的连接，攒到广播结束再收尾（免得在 for…of 里边改边遍历）。 */
+  const dropped = [];
+
+  /** 超了软线的连接：记一个宽限期结束后的复查定时器。排空即撤。 */
+  const recheck = new Map();
+
+  const kick = (res) => {
+    clients.delete(res);
+    clearTimeout(recheck.get(res));
+    recheck.delete(res);
+    dropped.push(res);
+  };
+
+  /**
+   * 写一帧，顺手判这条连接是不是已经积压得不像话了；是就踢掉。
+   *
+   * 量的是 `writableLength`（还没交给内核的字节数），不是 `write()` 的返回值：
+   * 返回 false 只说明「这一下超过了 highWaterMark」，读得好好的客户端也常有。
+   *
+   * 超软线不当场踢，而是挂一次复查——洪峰可能打完就静默，光靠「下一帧再看」会一直
+   * 等不到那一帧（心跳 25s 才来一次，这期间那几 MB 就白占着）。
+   */
+  const push = (res, frame) => {
+    res.write(frame);
+    const backlog = res.writableLength ?? 0;
+    if (backlog >= SSE_BACKLOG_HARD_BYTES) {
+      kick(res);
+      return;
+    }
+    if (backlog <= SSE_BACKLOG_SOFT_BYTES) {
+      // 排空了，之前那次超线一笔勾销
+      clearTimeout(recheck.get(res));
+      recheck.delete(res);
+      return;
+    }
+    if (recheck.has(res)) return;
+    const timer = setTimeout(() => {
+      recheck.delete(res);
+      if (!clients.has(res)) return;
+      if ((res.writableLength ?? 0) <= SSE_BACKLOG_SOFT_BYTES) return;
+      kick(res);
+      reapDropped();
+    }, SSE_BACKLOG_GRACE_MS);
+    timer.unref?.();
+    recheck.set(res, timer);
+  };
+
+  const reapDropped = () => {
+    if (dropped.length === 0) return;
+    const n = dropped.length;
+    for (const res of dropped.splice(0)) {
+      try {
+        res.destroy();
+      } catch {
+        // 已经断了
+      }
+    }
+    // 这行日志本身又要广播一次（log-line）。此时被踢的连接已经不在名单里，
+    // 递归只会多走一层就停，且那一层没有可踢的对象。
+    logEvent(null, 'warn', `${n} 个页面连接积压过多（不在读），已断开；它们会自行重连并重新同步`);
+  };
+
   const write = (res, type, payload) => {
     // revision 在发送时刻自增：全客户端同帧同值，且天然合并 debounce 窗口内的连续变化
     const data = JSON.stringify({ revision: store.bumpRevision(), ...payload });
@@ -107,7 +185,8 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
     if (payload === null) return;
     const data = JSON.stringify({ revision: store.bumpRevision(), ...payload });
     const frame = `event: ${type}\ndata: ${data}\n\n`;
-    for (const res of clients) res.write(frame);
+    for (const res of clients) push(res, frame);
+    reapDropped();
   };
 
   const onHostChanged = (name) => broadcast('host-changed', () => {
@@ -127,7 +206,8 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
   bus.on('operation-done', onOperationDone);
 
   const heartbeat = setInterval(() => {
-    for (const res of clients) res.write(':hb\n\n');
+    for (const res of clients) push(res, ':hb\n\n');
+    reapDropped();
   }, heartbeatMs);
   heartbeat.unref?.();
 
@@ -157,6 +237,8 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
 
       const drop = () => {
         clients.delete(res);
+        clearTimeout(recheck.get(res));
+        recheck.delete(res);
       };
       req.on('close', drop);
       req.on('error', drop);
@@ -177,6 +259,8 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
 
     dispose() {
       clearInterval(heartbeat);
+      for (const timer of recheck.values()) clearTimeout(timer);
+      recheck.clear();
       bus.off('host-changed', onHostChanged);
       bus.off('log-line', onLogLine);
       bus.off('config-changed', onConfigChanged);

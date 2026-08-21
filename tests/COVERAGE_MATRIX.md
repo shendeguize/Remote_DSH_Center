@@ -312,3 +312,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | IT-10 远端禁止转发 | 需改共享节点 sshd 配置并重启服务 | 假远端 `forward-disabled` |
 | IT-12 页面向导 | 需人工点击（UI-28 清单第 1 项） | CLI 侧向导 `tests/setup-wizard.test.js`、挂载测试 `tests/web/setup-mount.test.js`、门禁跳转 `tests/integration/ui-live.test.js` |
 | UI 观感（字号/对比度/留白）与灰度可辨 | 好不好看只能人眼判 | `npm run ui:smoke` 出两个宽度的截图供人过目；结构性判据（文字+形状、不溢出）已自动化 |
+| SSE 背压：不读的客户端持续积压后被断开（宽限期内排空的不算）、读得动的客户端不被误踢、连接断开与 hub dispose 都撤掉复查定时器 | `tests/integration/sse.test.js` |
