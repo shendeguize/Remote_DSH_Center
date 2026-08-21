@@ -106,6 +106,55 @@ test('多主机连续分配互不冲突', async (t) => {
   assert.equal(await ensureLocalPort('c'), 17703);
 });
 
+/**
+ * 回归（issue #94）：分配是「读 config 算已占用 → await 试绑 → 回写 config」，
+ * 读在 await 之前、写在之后。同时进来两台，两边看到的「已占用」都是旧的，分到同一个号。
+ *
+ * 真机路径：`runAutoStart`/`recoverState` 现在走 mapPool，一次有 6 台在飞；全新安装
+ * 加了几台又开了 autoStart，它们都还没有 localPort，正好一起进分配。
+ * 而 localPort 是分配即回写、此后固定的——撞号会被**永久**写进 config，重启也修不回来，
+ * 后面那几台的隧道每次都撞 `bind: Address already in use`。
+ */
+test('并发首次分配不许撞号（issue #94）', async (t) => {
+  const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+  const hosts = Object.fromEntries(names.map((n) => [n, hostCfg()]));
+  const { paths } = await fixture(t, hosts, [17701, 17799]);
+  // 一次 listen/close 的真实开销量级：正是这段 await 让两台看到同一份旧账
+  _setProbe(async () => { await new Promise((r) => { setTimeout(r, 5); }); return true; });
+
+  const got = await Promise.all(names.map((n) => ensureLocalPort(n)));
+  assert.equal(new Set(got).size, names.length, `分到的端口不许重复：${got.join(', ')}`);
+
+  const onDisk = JSON.parse(fs.readFileSync(paths.config, 'utf8')).hosts;
+  const persisted = names.map((n) => onDisk[n].localPort);
+  assert.deepEqual(persisted, got, '回写的和返回的必须是同一份');
+  assert.equal(new Set(persisted).size, names.length, '撞号一旦落盘就是永久的，重启也修不回来');
+  assert.deepEqual([...got].sort((x, y) => x - y), [17701, 17702, 17703, 17704, 17705, 17706, 17707, 17708]);
+});
+
+test('同一台被并发要两次只分一次（issue #94）', async (t) => {
+  await fixture(t, { a: hostCfg(), b: hostCfg() });
+  _setProbe(async () => { await new Promise((r) => { setTimeout(r, 5); }); return true; });
+
+  const [x, y] = await Promise.all([ensureLocalPort('a'), ensureLocalPort('a')]);
+  assert.equal(x, y, '同一台两次要到不同的号，等于把先建的那条隧道的号让出去了');
+  assert.equal(await ensureLocalPort('b'), 17702, '也不许白占掉一个号');
+});
+
+test('并发分配撞上耗尽：先到的拿满，后到的报 PORT_EXHAUSTED（issue #94）', async (t) => {
+  const names = ['a', 'b', 'c', 'd'];
+  const hosts = Object.fromEntries(names.map((n) => [n, hostCfg()]));
+  await fixture(t, hosts, [17701, 17702]);
+  _setProbe(async () => { await new Promise((r) => { setTimeout(r, 5); }); return true; });
+
+  const res = await Promise.allSettled(names.map((n) => ensureLocalPort(n)));
+  const ok = res.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+  const bad = res.filter((r) => r.status === 'rejected');
+  assert.deepEqual([...ok].sort((x, y) => x - y), [17701, 17702], '区间只有两个号，就只能成两台');
+  assert.equal(bad.length, 2);
+  assert.ok(bad.every((r) => r.reason.code === 'PORT_EXHAUSTED'), '没号了要明说，别让调用方以为分到了');
+});
+
 test('isFree 真实探测：被占端口返回 false', async (t) => {
   await fixture(t, { a: hostCfg() });
   const srv = net.createServer();
