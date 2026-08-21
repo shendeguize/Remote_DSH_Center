@@ -556,6 +556,66 @@ async function main() {
       return '鼠标与 Space 都不丢，松手后表格追上';
     });
 
+    // 有改动时 Esc 要弹「放弃未保存的修改？」。这条只有真键盘按得出来：`showModal()`
+    // 是在这一记 Esc 的处理器里调的，而同一记 Esc 的原生默认动作（CloseWatcher）
+    // 紧接着就把刚开的框关掉——用户看到的是「按 Esc 毫无反应」。
+    await check('S4g', '有改动时 Esc 弹确认框，且框不会被同一记 Esc 自己关掉', async () => {
+      try {
+        await cdp.eval("document.querySelector('.host-table tbody tr').focus(); return true;");
+        await cdp.key('Enter', { keyCode: 13 });
+        await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
+        await cdp.eval(`
+          const d = document.querySelector('.host-drawer');
+          const input = [...d.querySelectorAll('input')].find((i) => i.type === 'text');
+          input.focus();
+          input.value = '/tmp/dirty';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
+        `);
+        await cdp.waitFor(`
+          [...document.querySelectorAll('.host-drawer .drawer-actions .btn')]
+            .some((b) => /放弃修改/.test(b.textContent) && !b.disabled)
+        `, '草稿已算脏（放弃修改可点）');
+
+        await cdp.key('Escape', { keyCode: 27 });
+        await sleep(250);
+        const after = await cdp.eval(`
+          const dlg = document.querySelector('.confirm-dialog');
+          return {
+            dialogOpen: Boolean(dlg?.open),
+            drawerOpen: !document.querySelector('.host-drawer').hidden,
+            title: dlg?.querySelector('h2')?.textContent ?? '',
+          };
+        `);
+        assert(after.dialogOpen, 'Esc 之后确认框没留住（用户看到的是「按了没反应」）');
+        assert(after.drawerOpen, '还没确认就把抽屉关了，等于悄悄丢草稿');
+        assert(/放弃/.test(after.title), `确认框标题不对：${after.title}`);
+
+        // 第二记 Esc 是原生 cancel：收框、留抽屉（草稿还在）
+        await cdp.key('Escape', { keyCode: 27 });
+        await sleep(250);
+        const back = await cdp.eval(`
+          const dlg = document.querySelector('.confirm-dialog');
+          return { dialogOpen: Boolean(dlg?.open), drawerOpen: !document.querySelector('.host-drawer').hidden };
+        `);
+        assert(!back.dialogOpen, '第二记 Esc 该把确认框收掉');
+        assert(back.drawerOpen, '取消了却还是把抽屉关了');
+        return 'Esc 弹框、再 Esc 收框，草稿都还在';
+      } finally {
+        await cdp.eval(`
+          const dlg = document.querySelector('.confirm-dialog');
+          if (dlg?.open) [...dlg.querySelectorAll('button')].find((b) => /取消/.test(b.textContent))?.click();
+          const d = document.querySelector('.host-drawer');
+          if (d && !d.hidden) {
+            [...d.querySelectorAll('.btn')].find((b) => /放弃修改/.test(b.textContent) && !b.disabled)?.click();
+            d.querySelector('.drawer-close')?.click();
+          }
+          return true;
+        `);
+        await sleep(200);
+      }
+    });
+
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {
       await cdp.eval("document.activeElement?.blur(); return true;");
       const seen = [];
