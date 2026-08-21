@@ -710,6 +710,19 @@ async function cmdVersion({ flags }) {
   return info.channel === 'unknown' ? EXIT.failed : EXIT.ok;
 }
 
+/**
+ * 「无需更新」怎么说。跟着预发布的人在稳定口径下会一直停在旧 rc 上（正式版比 rc 旧，
+ * 只会看到「已是最新」），所以有更新的预发布时必须点名，否则这条路是个哑口。
+ * @returns {string[]}
+ */
+export function upToDateLines({ from, pre = false, newerPrerelease = null }) {
+  const lines = [`已是最新：v${from}${pre ? '（含预发布口径）' : ''}。`];
+  if (newerPrerelease) {
+    lines.push(`有更新的预发布 v${newerPrerelease}，要跟就 dshc update --pre。`);
+  }
+  return lines;
+}
+
 /** 更新完要不要重启：默认只提示——重启会瞬断所有隧道页签，时机该由人挑。 */
 async function offerRestart(flags) {
   const check = await daemon.aliveCheck();
@@ -764,7 +777,9 @@ async function cmdUpdate({ flags }) {
     return EXIT.failed;
   }
   if (res.action === 'up-to-date') {
-    out(`已是最新：v${res.from}${flags.pre ? '（含预发布口径）' : ''}。`);
+    for (const line of upToDateLines({ from: res.from, pre: Boolean(flags.pre), newerPrerelease: res.newerPrerelease })) {
+      out(line);
+    }
     return EXIT.ok;
   }
   out(`已更新：v${res.from} → v${res.to}`);

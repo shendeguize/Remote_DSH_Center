@@ -236,6 +236,7 @@
 |---|---|
 | SemVer 解析 + pre-release 优先级四条规则（数值比 / 字典序 / 数字段小于字母段 / 字段少的更小 / 正式版大于预发布） | `tests/lib/semver.test.js`（含规范完整序列一次跑通） |
 | 稳定口径不挑 pre-release，`--pre` 才看得见 | 同上（`pickLatest`）、`tests/updater.test.js`（`chooseTarget` 与 `updateBundle` 双层） |
+| 本机装着预发布时「已是最新」要点出更新的预发布（rc 用户不被卡在旧 rc 上），装正式版的人不受打扰、已在 `--pre` 口径上不重复啰嗦 | `tests/updater.test.js`（`chooseTarget.newerPrerelease`）、`tests/cli.test.js`（`upToDateLines` 文案） |
 | 产物名与 `SHA256SUMS` 格式的逐字形态（改名 = 下载 404，静默） | `tests/lib/bundle.test.js` |
 | 发布仓库单一源：`install.sh` 默认 URL == `RELEASE_REPO` | 同上（跨语言一致性用例） |
 | 安装通道识别：git / bundle / 认不出（含 `BUNDLE_INFO.json` 坏掉） | `tests/updater.test.js`（`resolveInstall`、`collectVersionInfo`） |

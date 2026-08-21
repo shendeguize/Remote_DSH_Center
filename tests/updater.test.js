@@ -155,6 +155,28 @@ test('chooseTarget：已是最新 / 更旧的远端都不动', () => {
   );
 });
 
+test('chooseTarget：本机装着预发布时，把更新的预发布报出来（正式版用户不受打扰）', () => {
+  const releases = usableReleases([
+    { tag_name: 'v0.1.0' },
+    { tag_name: 'v0.2.0-rc.3', prerelease: true },
+    { tag_name: 'v0.2.0-rc.4', prerelease: true },
+  ]);
+
+  const onRc = chooseTarget({ current: '0.2.0-rc.3', releases });
+  assert.equal(onRc.action, 'up-to-date', '正式版 0.1.0 更旧，不降级');
+  assert.equal(onRc.newerPrerelease, '0.2.0-rc.4', '跟着预发布的人得知道有新的 rc');
+
+  const onFinal = chooseTarget({ current: '0.1.0', releases });
+  assert.equal(onFinal.newerPrerelease, null, '装正式版的人不该被预发布打扰');
+
+  const withPre = chooseTarget({ current: '0.2.0-rc.3', releases, includePrerelease: true });
+  assert.equal(withPre.action, 'update', '--pre 本来就会去装，不需要再提示');
+  assert.equal(withPre.newerPrerelease, null);
+
+  const newest = chooseTarget({ current: '0.2.0-rc.4', releases });
+  assert.equal(newest.newerPrerelease, null, '已经是最新的 rc 就别再提');
+});
+
 test('chooseTarget：点名 tag 绕过挑选；点不到给人话', () => {
   const releases = usableReleases([{ tag_name: 'v0.1.0' }, { tag_name: 'v0.2.0-rc.1', prerelease: true }]);
   const pinned = chooseTarget({ current: '0.2.0-rc.1', releases, pinned: 'v0.1.0' });

@@ -8,8 +8,24 @@ import test from 'node:test';
 
 import {
   COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, classifyConfigFile, coerceConfigValue,
-  createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile, usageText,
+  createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile,
+  upToDateLines, usageText,
 } from '../src/cli.js';
+
+test('update 的「已是最新」：跟着 rc 的人得看到新 rc，装正式版的人不受打扰', () => {
+  assert.deepEqual(upToDateLines({ from: '0.1.0' }), ['已是最新：v0.1.0。']);
+
+  const onRc = upToDateLines({ from: '0.2.0-rc.3', newerPrerelease: '0.2.0-rc.4' });
+  assert.equal(onRc.length, 2);
+  assert.match(onRc[1], /v0\.2\.0-rc\.4/);
+  assert.match(onRc[1], /--pre/, '必须给出下一步怎么做');
+
+  assert.deepEqual(
+    upToDateLines({ from: '0.2.0-rc.4', pre: true }),
+    ['已是最新：v0.2.0-rc.4（含预发布口径）。'],
+    '已经在 --pre 口径上就别再啰嗦',
+  );
+});
 
 test('parseArgv 支持 --key value / --key=value / 短旗标', () => {
   assert.deepEqual(parseArgv(['up', '--port', '7799']), { positionals: ['up'], flags: { port: 7799 } });

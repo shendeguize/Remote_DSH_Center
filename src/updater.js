@@ -25,7 +25,9 @@ import { DshError } from './lib/errors.js';
 import {
   BUNDLE_INFO_FILE, SUMS_FILE, assetName, bundleDirName, normalizeArch, parseSums,
 } from './lib/bundle.js';
-import { compareVersions, parseVersion, pickLatest } from './lib/semver.js';
+import {
+  compareVersions, isPrerelease, parseVersion, pickLatest,
+} from './lib/semver.js';
 
 /** 仓库根（含 package.json）。bundle 安装下它是 `<bundle 根>/app`。 */
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -209,9 +211,24 @@ export function chooseTarget({
 
   const target = candidates.find((r) => r.version === latest);
   if (current && compareVersions(latest, current) <= 0) {
-    return { action: 'up-to-date', target, reason: null };
+    return {
+      action: 'up-to-date', target, reason: null, newerPrerelease: newerPrereleaseThan(current, releases),
+    };
   }
-  return { action: 'update', target, reason: null };
+  return { action: 'update', target, reason: null, newerPrerelease: null };
+}
+
+/**
+ * 跟着预发布的人，稳定口径下会一直停在旧 rc 上——正式版比 rc 旧，`update` 只会说
+ * 「已是最新」。所以在这种情形下把更新的预发布报出来；装正式版的人不受打扰。
+ * @returns {string|null} 更新的预发布版本号，没有则 null
+ */
+function newerPrereleaseThan(current, releases) {
+  if (!isPrerelease(current)) return null;
+  const newer = releases
+    .filter((r) => r.prerelease && compareVersions(r.version, current) > 0)
+    .map((r) => r.version);
+  return pickLatest(newer, { includePrerelease: true });
 }
 
 /** bundle 通道换目录用的三个路径。只留一代 `.prev`，够回滚又不攒垃圾。 */
@@ -388,7 +405,7 @@ export async function updateBundle({
   if (decision.action !== 'update') {
     return {
       action: decision.action, from: current, to: decision.target?.version ?? null,
-      previous: null, reason: decision.reason,
+      previous: null, reason: decision.reason, newerPrerelease: decision.newerPrerelease ?? null,
     };
   }
 
