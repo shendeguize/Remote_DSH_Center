@@ -20,6 +20,8 @@ import { isMainEntry } from './lib/entry.js';
 import {
   RELEASE_REPO, SUMS_FILE, assetUrl, releasesUrl,
 } from './lib/bundle.js';
+import { openerBin } from './lib/ssh.js';
+import { BINDABLE_PORT_RANGE, isBindablePort } from './lib/validate.js';
 import {
   SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, previewJson, setByPath,
 } from './web/setup-schema.js';
@@ -205,6 +207,16 @@ function managerPort(flags) {
   return Number.isInteger(cfg?.manager?.port) ? cfg.manager.port : FACTORY_DEFAULTS.manager.port;
 }
 
+/**
+ * manager 不在时的唯一口径。
+ *
+ * 前置探活（needsServer）与请求半路撞墙是同一件事的两条路，用户不该因为敲的是
+ * `start` 还是 `config set` 就看到两套说法（issue #22）。这句话只许有一份。
+ */
+export function managerDownMessage(port) {
+  return `manager 未在 127.0.0.1:${port} 运行。先执行 dshc up。`;
+}
+
 function apiRequest(port, method, p, body) {
   const payload = body === undefined ? null : JSON.stringify(body);
   return new Promise((resolve, reject) => {
@@ -244,8 +256,11 @@ function apiRequest(port, method, p, body) {
     });
     req.on('error', (err) => reject(new ApiError({
       status: 0,
-      code: 'INTERNAL',
-      message: `无法连接 manager（127.0.0.1:${port}）：${err.message}`,
+      // 端口上没人监听 = manager 没起，这是最常见的一种，给人话而不是 errno
+      code: err.code === 'ECONNREFUSED' ? 'MANAGER_DOWN' : 'INTERNAL',
+      message: err.code === 'ECONNREFUSED'
+        ? managerDownMessage(port)
+        : `无法连接 manager（127.0.0.1:${port}）：${err.message}`,
       detail: '先执行 dshc up 启动 manager。',
     })));
     if (payload) req.write(payload);
@@ -373,6 +388,12 @@ export function exitCodeFor({ status, code }) {
 
 function reportApiError(err, flags) {
   if (err instanceof ApiError) {
+    // manager 没起：那句话本身就是完整交代，别再套「错误：…（MANAGER_DOWN）」
+    // 和「加 --verbose」这两层壳（issue #22）
+    if (err.code === 'MANAGER_DOWN') {
+      errOut(err.message);
+      return EXIT.comm;
+    }
     errOut(`错误：${err.message}${err.code ? `（${err.code}）` : ''}`);
     if (err.detail) {
       if (flags?.verbose) errOut(err.detail);
@@ -387,6 +408,14 @@ function reportApiError(err, flags) {
 // ── 生命周期命令（ENG-21） ──────────────────────────────────────────────
 
 async function cmdUp({ flags }) {
+  // 端口写错是用法错误，在拉起之前就该判掉：否则会 spawn 一个必然绑不上的 manager，
+  // 等满 10s 健康检查，最后报「未确认健康」——把人往权限、launchd 的方向带（issue #21）
+  if (flags.port !== undefined && !isBindablePort(flags.port)) {
+    throw new UsageError(
+      `--port 需在 ${BINDABLE_PORT_RANGE.min}–${BINDABLE_PORT_RANGE.max} 之间，收到 ${flags.port}`,
+    );
+  }
+
   const check = await daemon.aliveCheck();
   if (check.alive) {
     out(`manager 已在运行：pid ${check.info.pid}，端口 ${check.info.port}，模式 ${check.info.mode}`);
@@ -817,7 +846,8 @@ async function cmdOpen(parsed) {
     }
   }
   out(url);
-  const child = spawn('open', [url], { stdio: 'ignore', detached: true });
+  const opener = openerBin();
+  const child = spawn(opener.bin, [...opener.prefixArgs, url], { stdio: 'ignore', detached: true });
   child.unref();
   return EXIT.ok;
 }
@@ -1110,7 +1140,9 @@ export const COMMANDS = {
   stop: { usage: 'dshc stop <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('stop', p) },
   reconnect: { usage: 'dshc reconnect <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('reconnect', p) },
   log: { usage: 'dshc log <host> [-n N]', needsServer: true, run: cmdLog },
-  open: { usage: 'dshc open [<host>]', needsServer: false, run: cmdOpen },
+  // 先探活再开浏览器：manager 没起时打开一个必定打不开的页面，还报成功，
+  // 只会让人去怀疑浏览器和端口（issue #23）。引导模式要放行，页面就是向导。
+  open: { usage: 'dshc open [<host>]', needsServer: true, allowSetupMode: true, run: cmdOpen },
   config: { usage: 'dshc config get|set <key> [value]', needsServer: false, run: cmdConfig },
 };
 
@@ -1155,10 +1187,11 @@ export async function run(argv) {
     const port = managerPort(parsed.flags);
     const info = await daemon.fetchInfo(port);
     if (!info) {
-      errOut(`manager 未在 127.0.0.1:${port} 运行。先执行 dshc up。`);
+      errOut(managerDownMessage(port));
       return EXIT.comm;
     }
-    if (info.setupCompleted === false) {
+    // open 是引导模式下唯一还该放行的命令——页面就是向导本身，拦住它等于把人锁在门外
+    if (info.setupCompleted === false && !cmd.allowSetupMode) {
       errOut('manager 处于首启引导模式（配置未完成）。先执行 dshc init 或打开管理台完成配置。');
       return EXIT.failed;
     }

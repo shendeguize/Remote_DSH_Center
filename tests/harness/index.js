@@ -22,6 +22,7 @@ import { applyScenario, crashRemote, reusePid, setFaults } from './scenarios.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_SSH = path.join(HERE, 'fake-ssh.js');
 export const FAKE_SCP = path.join(HERE, 'fake-scp.js');
+export const FAKE_OPEN = path.join(HERE, 'fake-open.js');
 export const REPO_ROOT = path.resolve(HERE, '..', '..');
 
 /**
@@ -56,6 +57,8 @@ export function createHarness(opts = {}) {
     DSHC_SSH_CONFIG: sshConfigPath,
     DSHC_SSH_BIN: `${process.execPath} ${FAKE_SSH}`,
     DSHC_SCP_BIN: `${process.execPath} ${FAKE_SCP}`,
+    // 拦住浏览器：跑用例不该弹窗，而「有没有去开」本身是 dshc open 的核心行为
+    DSHC_OPEN_BIN: `${process.execPath} ${FAKE_OPEN}`,
   };
 
   return {
@@ -78,6 +81,15 @@ export function createHarness(opts = {}) {
           else process.env[k] = v;
         }
       };
+    },
+
+    /** 假 open 的账本：每次被调用记一行 URL。 */
+    openedUrls() {
+      try {
+        return fs.readFileSync(path.join(harnessDir, 'open.log'), 'utf8').trim().split('\n').filter(Boolean);
+      } catch {
+        return [];
+      }
     },
 
     state: () => readState(harnessDir),

@@ -157,7 +157,16 @@ export function assertValid(schema, value, summary) {
 // ── 复用片段 ─────────────────────────────────────────────────────────────
 
 const port = V.int({ min: 1, max: 65535 });
-const bindablePort = V.int({ min: 1024, max: 65535 });
+
+/**
+ * manager 与本机隧道能真正 bind 的范围。1024 以下要 root，写进去只会在拉起时
+ * 撞一个看不懂的失败。`dshc up --port` 也用这一份判据（issue #21）。
+ */
+export const BINDABLE_PORT_RANGE = { min: 1024, max: 65535 };
+export function isBindablePort(v) {
+  return Number.isInteger(v) && v >= BINDABLE_PORT_RANGE.min && v <= BINDABLE_PORT_RANGE.max;
+}
+const bindablePort = V.int(BINDABLE_PORT_RANGE);
 
 const injectSchema = V.obj({
   env: V.rec(ENV_KEY_RE, V.str()),

@@ -18,9 +18,11 @@ const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..
 /**
  * @returns {Promise<{code:number, stdout:string, stderr:string}>}
  */
-function dshc(ctx, args, { timeoutMs = 60_000 } = {}) {
+function dshc(ctx, args, { timeoutMs = 60_000, ownPort = false } = {}) {
+  // ownPort：由用例自己给 --port（验旗标本身的判据时用，否则会被这里追加的真端口盖掉）
+  const argv = ownPort ? [CLI, ...args] : [CLI, ...args, '--port', String(ctx.port)];
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args, '--port', String(ctx.port)], {
+    const child = spawn(process.execPath, argv, {
       env: { ...process.env, ...ctx.harness.env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -41,6 +43,21 @@ function dshc(ctx, args, { timeoutMs = 60_000 } = {}) {
       resolve({ code, stdout, stderr });
     });
   });
+}
+
+/**
+ * 假 open 是 detached 子进程（真 `open` 也必须这么起，否则 CLI 会被浏览器吊住），
+ * 所以它落账在 CLI 退出之后——直接读必然读到空。
+ */
+async function waitOpened(ctx, count, { timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let urls = ctx.harness.openedUrls();
+  while (urls.length < count && Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop -- 轮询
+    await new Promise((r) => { setTimeout(r, 50); });
+    urls = ctx.harness.openedUrls();
+  }
+  return urls;
 }
 
 test('dshc ls：表格与 --json 都能反映 manager 视图', async (t) => {
@@ -218,4 +235,73 @@ test('manager 不在时：需要服务的命令报错退出码 2', async (t) => 
   const res = await dshc(dead, ['ls']);
   assert.equal(res.code, 2);
   assert.match(res.stderr, /dshc up/);
+});
+
+/**
+ * 回归（issue #22 / #23）：manager 没起是同一件事，用户不该因为敲的是 start 还是
+ * config set 就看到两套说法——前者给人话，后者曾把 ECONNREFUSED 和内部码
+ * (INTERNAL) 原样甩出来。open 更糟：它压根不探活，退 0 还真把浏览器拉起来，
+ * 落在一个没人监听的地址上。
+ */
+test('manager 不在时：所有命令同一句人话，不漏 errno 与内部码', async (t) => {
+  const ctx = await bootServer(t);
+  const dead = { ...ctx, port: 1 };
+
+  for (const args of [['ls'], ['start', 'gpu-1'], ['open'], ['open', 'gpu-1'],
+    ['config', 'set', 'hosts.gpu-1.workdir', '/tmp']]) {
+    // eslint-disable-next-line no-await-in-loop -- 逐条命令
+    const res = await dshc(dead, args);
+    const what = `dshc ${args.join(' ')}`;
+    assert.equal(res.code, 2, `${what} 退出码应为 2；stderr=${res.stderr}`);
+    assert.match(res.stderr, /manager 未在 127\.0\.0\.1:1 运行。先执行 dshc up。/, what);
+    assert.doesNotMatch(res.stderr, /ECONNREFUSED|INTERNAL|MANAGER_DOWN/, `${what} 漏了实现细节`);
+    assert.doesNotMatch(res.stdout, /http:\/\//, `${what} 不该在 manager 没起时给出页面地址`);
+  }
+  // 给 detached 子进程留出落账时间，否则「没开浏览器」只是没等到
+  await new Promise((r) => { setTimeout(r, 500); });
+  assert.deepEqual(ctx.harness.openedUrls(), [], 'manager 没起还去开浏览器，落地必然是错误页');
+});
+
+/**
+ * 回归（issue #21）：`--port 99999` 曾一路走到 spawn，等满 10s 健康检查才报
+ * 「已拉起 pid X，但未确认健康」——退错码（2 而非 3）、白等十秒、还真起了个必死的进程。
+ */
+test('up --port 越界：当场判用法错误，不起进程', async (t) => {
+  const ctx = await bootServer(t);
+  for (const bad of ['99999', '80', '0']) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个取值
+    const res = await dshc(ctx, ['up', '--port', bad], { timeoutMs: 8_000, ownPort: true });
+    assert.equal(res.code, 3, `--port ${bad} 应是用法错误；stderr=${res.stderr}`);
+    assert.match(res.stderr, /1024–65535/, res.stderr);
+    assert.doesNotMatch(res.stdout, /已拉起/, `--port ${bad} 不该真去 spawn`);
+  }
+});
+
+test('config get 读本地文件，manager 没起也照样能用', async (t) => {
+  const ctx = await bootServer(t, { hostConfig: { 'gpu-1': { workdir: '/srv/x' } } });
+  const dead = { ...ctx, port: 1 };
+  const res = await dshc(dead, ['config', 'get', 'hosts.gpu-1.workdir']);
+  assert.equal(res.code, 0, `stderr=${res.stderr}`);
+  assert.equal(res.stdout.trim(), '/srv/x');
+});
+
+test('引导模式下 open 仍放行（那个页面就是向导）', async (t) => {
+  const ctx = await bootServer(t, { setupCompleted: false, skipBoot: true });
+
+  // 对照组：主机命令在引导模式下照旧拦住
+  const ls = await dshc(ctx, ['ls']);
+  assert.equal(ls.code, 1);
+  assert.match(ls.stderr, /引导模式/);
+
+  const opened = await dshc(ctx, ['open']);
+  assert.equal(opened.code, 0, `stderr=${opened.stderr}`);
+  assert.match(opened.stdout, new RegExp(`http://127.0.0.1:${ctx.port}/`));
+  assert.deepEqual(await waitOpened(ctx, 1), [`http://127.0.0.1:${ctx.port}/`], '该真去开浏览器');
+});
+
+test('open <host>：拉起的是那台主机的深链', async (t) => {
+  const ctx = await bootServer(t);
+  const res = await dshc(ctx, ['open', 'gpu-1']);
+  assert.equal(res.code, 0, `stderr=${res.stderr}`);
+  assert.deepEqual(await waitOpened(ctx, 1), [`http://127.0.0.1:${ctx.port}/#/host/gpu-1`]);
 });

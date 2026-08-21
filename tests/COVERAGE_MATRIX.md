@@ -253,6 +253,17 @@
 | 收尾「下一步」只印一遍（`install.sh` 那份为准，`install.mjs` 由 `--no-next-steps` 让位） | 同上（数「下一步」出现次数） |
 | stdout 被下游提前关掉（`\| head`）不抛 EPIPE 栈，且该建的软链照建 | 同上（用 `\| true` 让读端立刻关闭，触发不依赖时序）、`tests/tooling.test.js`（`isBrokenPipe` 码表） |
 
+CLI 在「manager 没起」与「参数写错」这两类误用上的口径：
+
+| 约束 | 覆盖 |
+|---|---|
+| manager 没起时所有命令同一句人话、同一退出码（2），不漏 errno 与内部码 | `tests/integration/cli.test.js`（`ls`/`start`/`open`/`open <host>`/`config set` 逐条过） |
+| `config get` 读本地文件，manager 没起也能用（不能为了统一口径把它一起拦掉） | 同上 |
+| `open` 先探活再拉浏览器；manager 没起时**不开**浏览器 | 同上（假 `open` 记账，`DSHC_OPEN_BIN` 注入，见 `tests/harness/fake-open.js`） |
+| 引导模式下 `open` 仍放行（页面就是向导），其他主机命令照旧拦住 | 同上 + `tests/cli.test.js`（`allowSetupMode` 只有 open 有） |
+| `open <host>` 拉起的是那台主机的深链 | 同上（账本里就是 `#/host/<name>`） |
+| `up --port` 越界当场退 3，不 spawn | 同上；判据单一源 `src/lib/validate.js` 的 `isBindablePort` |
+
 发版守卫的 rc 语义（补丁集 0.1.0 · PR ③）：
 
 | 约束 | 覆盖 |

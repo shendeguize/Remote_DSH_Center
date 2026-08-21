@@ -47,6 +47,14 @@ export function scpBin() {
 }
 
 /**
+ * 拉起浏览器用的命令（mac 上是 `open`）。同样允许覆盖——`dshc open` 在测试里必须
+ * 能验「到底有没有真去开浏览器」，而不是每跑一次用例就弹一个窗口。
+ */
+export function openerBin() {
+  return resolveBin(process.env.DSHC_OPEN_BIN, 'open');
+}
+
+/**
  * @typedef {{code:number|null, signal:string|null, stdout:string, stderr:string, timedOut:boolean, aborted:boolean}} ExecResult
  */
 

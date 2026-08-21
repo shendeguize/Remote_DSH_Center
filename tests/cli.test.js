@@ -90,8 +90,13 @@ test('命令表覆盖 02 §9.2 与 §10 的全部子命令', () => {
   // version / update 得出现在用法里，否则装了也没人知道有这两条
   assert.match(usageText(), /dshc version/);
   assert.match(usageText(), /dshc update/);
-  for (const name of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log']) {
+  for (const name of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log', 'open']) {
     assert.equal(COMMANDS[name].needsServer, true, `${name} 应先探活 manager`);
+  }
+  // open 是引导模式下唯一放行的：那个页面就是向导本身，拦住它等于把人锁在门外
+  assert.equal(COMMANDS.open.allowSetupMode, true);
+  for (const name of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log']) {
+    assert.notEqual(COMMANDS[name].allowSetupMode, true, `${name} 不该在引导模式下放行`);
   }
   assert.match(usageText(), /退出码/);
 });
