@@ -38,8 +38,22 @@ agent 的一屏速查见 [AGENTS.md](AGENTS.md)（那边只放指针，不复制
 npm run check          # 四关：测试+覆盖率 → 真浏览器 → 打包清单 → CLI 入口
 ```
 
-CI 在 macOS 与 Ubuntu 上各跑一遍同一条命令（Ubuntu 那边浏览器关必须真跑）。
-**两个 check 都是 required**，红了合不进去。
+CI 跑的是同一条命令，但按事件分平台（成本管控——同一套闸门 × 两平台 × 「PR 一次 +
+合入 main 又一次」= 每个 PR 四遍，其中最贵的 macOS 两遍）：
+
+| 触发 | 平台 | 理由 |
+|---|---|---|
+| `pull_request` | ubuntu | 镜像自带 Chrome，真浏览器关只有这儿能真跑，也最便宜 |
+| `push`（合入 main） | macOS | launchd / `dshc service` 是 mac 语义，产品也只发 mac |
+| 手动 `workflow_dispatch` | 两个都跑 | 合入前想自己确认双平台时用 |
+
+**required check 只有 `check (ubuntu-latest)`**，红了合不进去。mac 侧的最终兜底在
+tag 上：`release.yml` 的 verify 段会在 arm64 与 intel 两台真 mac 上解包实跑，
+mac 问题出不了 Release。
+
+改 `ci.yml` 的 os 矩阵，就必须同步改 `.github/rulesets/main.json` 的
+`required_status_checks`——只改一边的后果不是 CI 变红，而是 PR 永久卡在等一个
+永不到来的检查。`tests/tooling.test.js` 有一条用例把这对耦合钉死。
 
 ## CHANGELOG 纪律
 
@@ -148,9 +162,9 @@ gh api -X PUT repos/:owner/:repo/rulesets/<id> -f enforcement=disabled
 gh api -X PUT repos/:owner/:repo/rulesets/<id> -f enforcement=active
 ```
 
-**两个坑**：required checks 的名字（`check (macos-latest)` / `check (ubuntu-latest)`）
-与 `ci.yml` 的 job 名 + matrix 值耦合，改名必须同步 JSON；required checks 只能引用
-已有运行记录的 check，新仓库得先让 CI 跑过一次。
+**两个坑**：required check 的名字（`check (ubuntu-latest)`）与 `ci.yml` 的 job 名 +
+matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节）；required checks 只能
+引用已有运行记录的 check，新仓库得先让 CI 跑过一次。
 
 其余仓库设置（一次性，`gh api -X PATCH repos/:owner/:repo` 或对应端点）：
 

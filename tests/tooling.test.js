@@ -391,6 +391,43 @@ test('resolveBuildVersion：版本只有一个源，点名不同的版本要拦�
  * 判据用文本切 job 而不是解析 YAML（零依赖，没有 yaml parser）：按两空格缩进的
  * job 名切段，段内出现 `gh ` 命令的，必须要么自带 checkout，要么显式给 GH_REPO。
  */
+/**
+ * required check 必须真能在 PR 上产生，否则合入会永久卡在「等一个永不到来的检查」。
+ *
+ * 这条判据是 CI 成本管控的安全带：PR 只跑 ubuntu、合入后才补 macOS，省下来的是
+ * 每个 PR 两次 macOS。代价是矩阵与 ruleset 从此耦合——谁改矩阵不改 ruleset（或反之），
+ * 后果不是 CI 变红而是 PR 合不进去，这种故障最难自证，所以钉在这里。
+ *
+ * 同样是文本判据（零依赖无 yaml parser）：只认两种矩阵形状，形状变了就红，
+ * 逼人回来重新核对 required_status_checks。
+ */
+export function prMatrixOsList(chunk) {
+  const line = /^\s*os:\s*(.+)$/m.exec(chunk)?.[1]?.trim() ?? '';
+  // 形状 A：静态列表 `os: [a, b]` —— PR 上两个都跑
+  if (line.startsWith('[')) return JSON.parse(line.replace(/'/g, '"'));
+  // 形状 B：按事件分流的表达式 —— 取 pull_request 那一支
+  const m = /event_name\s*==\s*'pull_request'\s*&&\s*fromJSON\('(\[[^']*\])'\)/.exec(line);
+  return m ? JSON.parse(m[1]) : null;
+}
+
+test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边就红）', () => {
+  const ruleset = JSON.parse(fs.readFileSync(path.join(ROOT, '.github', 'rulesets', 'main.json'), 'utf8'));
+  const checks = ruleset.rules.find((r) => r.type === 'required_status_checks');
+  const contexts = checks.parameters.required_status_checks.map((c) => c.context);
+  assert.ok(contexts.length > 0, 'main 分支一个 required check 都没有，闸门等于没设');
+
+  const text = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
+  assert.match(text.slice(0, text.indexOf('jobs:')), /pull_request/, 'CI 必须在 PR 上触发');
+
+  const osList = prMatrixOsList(text.slice(text.indexOf('\njobs:')));
+  assert.ok(osList, 'ci.yml 的 os 矩阵不是已知形状，请回来核对 required_status_checks');
+  assert.deepEqual(
+    [...contexts].sort(),
+    osList.map((o) => `check (${o})`).sort(),
+    'required check 与 PR 上真会跑的 job 名对不上：合入会卡在等一个永不到来的检查',
+  );
+});
+
 test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO', () => {
   const dir = path.join(ROOT, '.github', 'workflows');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml'));

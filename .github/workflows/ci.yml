@@ -17,12 +17,19 @@ concurrency:
 
 jobs:
   check:
-    # 主战场是 macOS（launchd、dshc service 都是 mac 语义），但绝大部分逻辑与平台无关，
-    # 两边都跑一遍能挡住「只在我机器上成立」的假设。
+    # 平台分工（成本管控）：同一套闸门跑两个平台再乘以「PR 一次 + 合入 main 又一次」，
+    # 等于每个 PR 跑四遍，其中最贵的 macOS 跑两遍（私有仓计费时 mac 是 10 倍单价）。
+    #
+    #   pull_request      → ubuntu：镜像自带 Chrome，真浏览器关只有这儿能真跑，且最便宜
+    #   push（合入 main） → macOS：launchd / dshc service 是 mac 语义，产品也只发 mac
+    #   workflow_dispatch → 两个都跑：合入前想手动确认双平台时用
+    #
+    # 兜底不在这里：tag 上的 release.yml 会在 arm64 与 intel 两台真 mac 上解包实跑，
+    # 任何 mac 侧问题在出 Release 之前必然被拦住。
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || (github.event_name == 'push' && fromJSON('["macos-latest"]') || fromJSON('["ubuntu-latest","macos-latest"]')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
