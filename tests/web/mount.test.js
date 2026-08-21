@@ -167,6 +167,38 @@ test('深链首屏：主机数据迟到也不许把地址改回管理台', async
   assert.equal(frame.getAttribute('src'), 'http://127.0.0.1:17701/');
 });
 
+/**
+ * 回归（issue #25）：主机多、名字长时标签栏内容宽过可视区（真机实测 8 台
+ * 2058px vs 1024px）。容器能横向滚，但从不自己跟到当前位置，切到靠后那台之后
+ * 激活标签停在可视区外——看起来像一个都没选中。
+ *
+ * 垫片没有布局，判据只能是「有没有对着正确的元素滚」；滚了多少像素由 ui-smoke S11 盯。
+ */
+test('切换主机时把激活标签滚进可视区，且只在切换时滚', async (t) => {
+  const { dom, es } = await mount(t, { hosts: [running('gpu-1'), running('gpu-2')] });
+  es().open();
+  es().send('snapshot', {
+    revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [running('gpu-1'), running('gpu-2')], logs: [],
+  });
+  await flush();
+
+  dom.document.scrollCalls.length = 0;
+  dom.window.location.hash = '#/host/gpu-2';
+  await flush();
+
+  const scrolled = dom.document.scrollCalls.at(-1);
+  assert.ok(scrolled, '切到 gpu-2 却没滚标签栏');
+  assert.equal(scrolled.node.dataset.host, 'gpu-2', '滚的应该是激活的那个标签');
+  assert.ok(scrolled.node.classList.contains('is-active'));
+  assert.equal(scrolled.opts.inline, 'nearest', '要最小滚动，别把标签甩到正中');
+
+  // 同一路由下再重渲染不许再滚：否则用户自己拖标签栏会被一直拽回去
+  const before = dom.document.scrollCalls.length;
+  es().send('host:changed', { revision: 2, host: running('gpu-1') });
+  await flush();
+  assert.equal(dom.document.scrollCalls.length, before, '激活项没变却又滚了一次');
+});
+
 test('主机真的从状态里消失（不是尚未同步）→ 仍回管理台', async (t) => {
   const { dom, es } = await mount(t, { hosts: [running('gpu-1')] });
   es().open();

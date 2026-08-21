@@ -58,6 +58,9 @@ async function check(id, title, fn) {
   }
 }
 
+/** 取自真机配置的命名风格与长度（最长的一台就是这个样子）。 */
+const LONG_HOST = 'GPU_Node_jiangyue_mig40-sim_daily-pfs';
+
 const assert = (cond, msg) => {
   if (!cond) throw new Error(msg);
 };
@@ -188,7 +191,9 @@ const FOCUS_PROBE = `
 
 async function main() {
   console.log('启动本机 manager（远端为假装置）…');
-  const rig = await bootManager(['gpu-1', 'gpu-2']);
+  // 第三台故意用真机那种命名风格（37 字符）——短名字撑不出标签栏溢出，
+  // 表格与标签栏对长名字的处理也就一直没被测过（issue #25 就是这么漏的）
+  const rig = await bootManager(['gpu-1', 'gpu-2', LONG_HOST]);
   console.log(`  manager: ${rig.base}`);
 
   console.log('启动 Chrome…');
@@ -222,7 +227,7 @@ async function main() {
     console.log('检查项：');
 
     await check('S1', '首屏无控制台错误、无 4xx/5xx 资源', async () => {
-      await cdp.waitFor("document.querySelectorAll('.host-table tbody tr').length === 2", '两台主机都到位');
+      await cdp.waitFor("document.querySelectorAll('.host-table tbody tr').length === 3", '三台主机都到位');
       const bad = responses.filter((r) => r.status >= 400 && r.url.startsWith(rig.base));
       assert(bad.length === 0, `有失败请求：${bad.map((b) => `${b.status} ${b.url}`).join(', ')}`);
       assert(consoleErrors.length === 0, consoleErrors.join(' | '));
@@ -378,7 +383,61 @@ async function main() {
       return '冷启动与刷新都落在主机页';
     });
 
-    // 回管理台，别把后面的场景留在 iframe 页上
+    // 真机上是 8 台主机 + 37 字符长名把标签栏撑到 2058px（可视 1024px），激活标签
+    // 停在可视区外，看起来像一个都没选中（issue #25）。假装置只有两台短名主机，
+    // 撑不出溢出——把视口收窄到 480px 等价复现，且不用为此多起几台主机。
+    await check('S11', '标签栏溢出时激活标签仍在可视区内', async () => {
+      await rig.api('POST', `/api/hosts/${encodeURIComponent(LONG_HOST)}/start`);
+      await waitHost(rig, LONG_HOST, ['running']);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 900, deviceScaleFactor: 1, mobile: false });
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
+      // gpu-1 在 S6/S7 里已经起着，加上长名这台就是两个标签
+      await cdp.waitFor("document.querySelectorAll('.host-tabs .tab').length === 2", '长名主机的标签也在');
+
+      const overflowing = await cdp.eval(`
+        const bar = document.querySelector('.tabbar');
+        return { scroll: bar.scrollWidth, client: bar.clientWidth, overflowX: getComputedStyle(bar).overflowX };
+      `);
+      assert(overflowing.overflowX === 'auto', `标签栏 overflow-x=${overflowing.overflowX}，溢出就滚不动了`);
+      assert(overflowing.scroll > overflowing.client,
+        `480px 下标签栏没撑出溢出（${overflowing.scroll}/${overflowing.client}），判据在空转`);
+
+      // 挑排在最后的那个标签——只有它才需要真的滚一段才看得见
+      const target = await cdp.eval(`
+        const tabs = [...document.querySelectorAll('.host-tabs .tab')];
+        const last = tabs[tabs.length - 1];
+        const bar = document.querySelector('.tabbar');
+        return {
+          host: last.dataset.host,
+          // 不滚的话它够不够得着（offsetLeft 是内容坐标，与 scrollLeft 无关）
+          needsScroll: last.offsetLeft + last.offsetWidth > bar.clientWidth + 1,
+        };
+      `);
+      assert(target.needsScroll,
+        `最后那个标签不滚也看得见，S11 在空转（视口 420px 撑得下 ${target.host}）`);
+
+      await cdp.eval(`window.location.hash = '#/host/' + encodeURIComponent(${JSON.stringify(target.host)}); return true;`);
+      await cdp.waitFor(`document.querySelector('.host-tabs .tab.is-active')?.dataset.host === ${JSON.stringify(target.host)}`, '激活标签就位');
+      await sleep(200);
+      const at = await cdp.eval(`
+        const bar = document.querySelector('.tabbar');
+        const t = document.querySelector('.host-tabs .tab.is-active');
+        const bb = bar.getBoundingClientRect(); const tb = t.getBoundingClientRect();
+        return {
+          scrollLeft: Math.round(bar.scrollLeft),
+          visible: tb.left >= bb.left - 1 && tb.right <= bb.right + 1,
+          tab: [Math.round(tb.left), Math.round(tb.right)], bar: [Math.round(bb.left), Math.round(bb.right)],
+        };
+      `);
+      assert(at.scrollLeft > 0, `标签栏没滚（scrollLeft=0），激活标签只能靠运气露出来`);
+      assert(at.visible, `激活标签在可视区外：tab ${at.tab.join('–')} vs 可视 ${at.bar.join('–')}`);
+      await screenshot(cdp, 'tabbar-overflow');
+      await rig.api('POST', `/api/hosts/${encodeURIComponent(LONG_HOST)}/stop`);
+      return `滚到 ${at.scrollLeft}px，激活标签在视野内`;
+    });
+
+    // 回管理台与 1440 宽，别把后面的场景留在 iframe 页 / 窄视口上
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
     await cdp.waitFor("document.querySelector('.host-table tbody tr')", '回到管理台');
 

@@ -162,6 +162,7 @@
 | 20 GET 首屏与 SSE 全量交错 | `tests/web/store.test.js`（mergeFetchedHosts） |
 | 首屏即 host 路由（书签 / 刷新 / `dshc open <host>`）：主机集合迟到也不改写地址；到齐后建 iframe | `tests/web/mount.test.js`（用 responder 把 `/api/hosts` 卡住造出迟到）、`scripts/ui-smoke.mjs` S10 |
 | 主机真从状态里消失（≠ 尚未同步）→ 仍回管理台 | `tests/web/mount.test.js`（snapshot 整体替换掉该主机） |
+| 切主机时激活标签滚进可视区；同一路由重渲染不再滚（否则用户自己拖的位置会被拽回去） | `tests/web/mount.test.js`（垫片记 `scrollIntoView` 的账）、`scripts/ui-smoke.mjs` S11（真滚了多少像素） |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
 
 `tests/web/*` 喂的是手写 fixture，抓不到「后端改了字段名 / 少一层对象」这类漂移。
@@ -191,6 +192,7 @@
 | `prefers-reduced-motion: reduce` 下动画真为 none | S8 |
 | 掉线横幅 + 禁写 + 不堆 `/api/events` 连接 | S9 |
 | 深链冷启动与刷新都落在主机页（S7 走页内改 hash，抓不到「首屏即 host 路由」那条时序） | S10 |
+| 标签栏溢出时激活标签仍在可视区内（视口收窄 + 长名主机撑出溢出，且先断言「不滚就够不着」防空转） | S11 |
 
 ## 8. 架构约束（ENG-24）
 

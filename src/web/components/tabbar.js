@@ -177,6 +177,9 @@ export function createTabbar({ store, actions, panes }) {
     return node;
   }
 
+  // 上次滚到哪个主机（null = 管理台）；用来只在切换时滚，不在每次重渲染时滚
+  let lastScrolledTo;
+
   function render() {
     const route = store.state.route;
     const tabs = visibleTabs(store.listHosts(), {
@@ -201,6 +204,16 @@ export function createTabbar({ store, actions, panes }) {
       actions.navigate('#/');
     }
     if (!menu.hidden && !tabs.some((h) => h.name === menuHost)) closeMenu();
+
+    // 标签栏能横向滚（.tabbar overflow-x: auto），但从不自己跟到当前位置：主机多、
+    // 名字长时，切到靠后那台之后激活标签停在可视区外，看起来像一个都没选中（issue #25）。
+    // 只在激活项变化时滚——每次重渲染都滚会把用户自己拖的位置一直拽回去。
+    const activeHost = route.kind === 'host' ? route.host : null;
+    if (activeHost !== lastScrolledTo) {
+      lastScrolledTo = activeHost;
+      const node = activeHost ? hostTabs.querySelector('.tab.is-active') : dashTab;
+      node?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
   }
 
   const offs = [

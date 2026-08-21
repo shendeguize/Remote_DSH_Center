@@ -209,6 +209,15 @@ class FakeElement extends FakeNode {
     if (document.activeElement === this) document.activeElement = document.body;
   }
 
+  /**
+   * 垫片没有布局，滚不动真东西——记一笔就够了。
+   * 判据是「有没有对着正确的元素滚」（标签栏跟随，issue #25），
+   * 「滚了多少像素」得靠真浏览器（ui-smoke S11）。
+   */
+  scrollIntoView(opts) {
+    document.scrollCalls.push({ node: this, opts });
+  }
+
   showModal() {
     this.open = true;
   }
@@ -288,6 +297,8 @@ class FakeDocument extends FakeElement {
     this.body.parentNode = this;
     this.childNodes.push(this.body);
     this.activeElement = this.body;
+    /** scrollIntoView 的账本（见 FakeElement.scrollIntoView）。 */
+    this.scrollCalls = [];
   }
 
   createElement(tag) {
