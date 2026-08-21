@@ -401,6 +401,10 @@ export function installDom() {
     Node: FakeNode,
     HTMLElement: FakeElement,
     CSS: { escape: (s) => String(s).replace(/["\\]/g, '\\$&') },
+    // 这一层测的是「状态 → DOM」的映射，不测调度，故帧回调就地执行：断言紧跟在
+    // 派发之后就能看到结果。合帧本身另有判据（utils 的 coalesce 单测 + 真浏览器
+    // 长任务判据），不靠这个垫片来验。
+    requestAnimationFrame: (cb) => { cb(0); return 0; },
   };
   const descriptors = {};
   for (const [key, value] of Object.entries(globals)) {

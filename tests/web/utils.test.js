@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  DASH, dshSummary, fmtAgo, fmtClock, fmtDuration, isManaged, mappingSummary, phaseHint, phaseMeta, rowActions, text,
+  DASH, coalesce, dshSummary, fmtAgo, fmtClock, fmtDuration, isManaged, mappingSummary, phaseHint, phaseMeta,
+  rowActions, text,
 } from '../../src/web/utils.js';
 
 const PHASES = ['running', 'degraded', 'crashed', 'ready', 'starting', 'no_dsh', 'unreachable', 'unknown'];
@@ -99,4 +100,38 @@ test('时间格式化', () => {
   const now = Date.parse('2026-01-01T00:01:00.000Z');
   assert.equal(fmtAgo('2026-01-01T00:00:00.000Z', now), '1分 0秒前');
   assert.equal(fmtAgo(null), DASH);
+});
+
+test('coalesce：同一拍内多次触发只画一次，下一拍还能再画（issue #106）', () => {
+  let ran = 0;
+  const queue = [];
+  const soon = coalesce(() => { ran += 1; }, (cb) => queue.push(cb));
+
+  for (let i = 0; i < 500; i += 1) soon();
+  assert.equal(queue.length, 1, '500 次触发只该排一个帧回调');
+  assert.equal(ran, 0, '排上了但还没到帧边界');
+
+  queue.shift()();
+  assert.equal(ran, 1);
+
+  soon();
+  assert.equal(queue.length, 1, '上一拍画完了，新的触发要能再排上（否则从此不再刷新）');
+  queue.shift()();
+  assert.equal(ran, 2);
+});
+
+test('coalesce：没有 rAF 的环境退化成定时器，不至于永不重绘', async () => {
+  const saved = globalThis.requestAnimationFrame;
+  delete globalThis.requestAnimationFrame;
+  try {
+    let ran = 0;
+    const soon = coalesce(() => { ran += 1; });
+    soon();
+    soon();
+    await new Promise((r) => { setTimeout(r, 60); });
+    assert.equal(ran, 1);
+  } finally {
+    if (saved === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = saved;
+  }
 });

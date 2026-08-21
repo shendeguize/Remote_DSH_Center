@@ -151,6 +151,34 @@ export function clear(node) {
   return node;
 }
 
+/**
+ * 把同一拍内的多次重绘合成一次（issue #106）。
+ *
+ * 事件面板原先直挂 `events:changed`，每来一条就 clear + 整表重建。实测后端 15ms
+ * 发出的 1500 条事件在页面上是**一个 2278ms 的长任务**——那 2.3 秒里点不动、
+ * 打不进字。一拍里来 100 条，用户能看到的只有最后那一版，中间 99 次纯属白烧。
+ *
+ * @param {() => void} fn
+ * @param {(cb: () => void) => void} [schedule] 注入点：单测要确定的时机
+ */
+export function coalesce(fn, schedule = nextFrame) {
+  let scheduled = false;
+  return () => {
+    if (scheduled) return;
+    scheduled = true;
+    schedule(() => {
+      scheduled = false;
+      fn();
+    });
+  };
+}
+
+/** 帧边界；没有 rAF 的环境（如 DOM 垫片）退化成一个短定时器。 */
+function nextFrame(cb) {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(cb);
+  else setTimeout(cb, 16);
+}
+
 /** 状态圆点 + 文本（颜色不单独承载语义）。 */
 export function phaseBadge(phase) {
   const meta = phaseMeta(phase);

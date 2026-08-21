@@ -79,7 +79,11 @@ async function cleanSlate() {
   }
 }
 
+/** `--only S12,S4g`：只跑点名的场景（调一条判据时用；全关跑的是全量）。 */
+const ONLY = String(opt('only', '')).split(',').map((s) => s.trim()).filter(Boolean);
+
 async function check(id, title, fn) {
+  if (ONLY.length > 0 && !ONLY.includes(id)) return;
   const started = Date.now();
   await cleanSlate();
   try {
@@ -914,6 +918,67 @@ async function main() {
       assert(back.rowWritable, '恢复后行内写按钮还禁着');
       assert(back.rows >= 1, `恢复后表里只有 ${back.rows} 行，快照没回灌`);
       return '横幅消失且写操作恢复';
+    });
+
+    await check('S12', '事件风暴不冻住页面：重绘合到帧边界（issue #106）', async () => {
+      // 修复前：1500 条事件 → 14.8 万次 DOM 变更、一个 2278ms 的长任务，那 2.3 秒里
+      // 页面点不动。判据取「变更批次」这个与机器快慢无关的量，长任务只作兜底。
+      const BURST = 1500;
+      await cdp.waitFor("document.querySelector('.event-list')", '事件面板在位');
+      // 合帧靠 rAF，而 rAF 只在页面可见时才跑。跑到这里时这一页往往已经是 hidden
+      // （前面开过 iframe、换过视口），那样一帧都不会来，判据就成了空转。
+      await cdp.send('Page.bringToFront');
+      const frameAlive = await cdp.eval(`
+        return new Promise((r) => {
+          const t = setTimeout(() => r(0), 1_000);
+          requestAnimationFrame(() => { clearTimeout(t); r(1); });
+        });
+      `);
+      assert(frameAlive === 1, '页面拿不到帧（hidden），这条判据没法验合帧');
+      // 前面的场景（Tab 巡游 + 方向键）可能把主机过滤拨到了别的主机，那样这里灌的
+      // 事件会被整条滤掉，判据就成了空转。先归零，别继承上游的 UI 状态。
+      await cdp.eval(`
+        const f = document.querySelector('.event-filter');
+        f.value = '';
+        f.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      `);
+      await cdp.eval(`
+        window.__storm = { long: [], mut: 0 };
+        new PerformanceObserver((l) => {
+          for (const e of l.getEntries()) window.__storm.long.push(Math.round(e.duration));
+        }).observe({ entryTypes: ['longtask'] });
+        new MutationObserver((ms) => { window.__storm.mut += ms.length; })
+          .observe(document.querySelector('.event-list'), { childList: true });
+        return true;
+      `);
+
+      let frames = 0;
+      cdp.on('Network.eventSourceMessageReceived', (p) => { if (p.eventName === 'log-line') frames += 1; });
+      const { logEvent } = await import('../src/lib/bus.js');
+      // 这一程本来就是要把日志灌爆，别把 1500 行噪音倒进检查输出里
+      const real = { log: console.log, warn: console.warn, error: console.error };
+      Object.assign(console, { log() {}, warn() {}, error() {} });
+      try {
+        for (let i = 0; i < BURST; i += 1) {
+          logEvent('gpu-1', 'info', `风暴第 ${i} 条：远端回读 CWD=/data/work/run-${i}`);
+        }
+      } finally {
+        Object.assign(console, real);
+      }
+      await sleep(3_000);
+
+
+      const storm = await cdp.eval('return window.__storm;');
+      const rows = await cdp.eval("return document.querySelectorAll('.event-item').length;");
+      const worst = Math.max(0, ...storm.long);
+      // 先证明风暴真的打到了页面上，否则下面两条判据全是空转
+      assert(storm.mut > 0, `页面一次都没重绘（面板 ${rows} 行，收到 ${frames} 帧 log-line）——事件没到，这条判据在空转`);
+      assert(rows === 50, `事件行应被环形缓冲顶到 50，实测 ${rows}`);
+      assert(storm.mut < 2_000,
+        `${BURST} 条事件引起 ${storm.mut} 次 DOM 变更——重绘没有合帧（合上应是百位数）`);
+      assert(worst < 1_200, `最长任务 ${worst}ms，风暴期间页面已经卡住了`);
+      return `${BURST} 条 → ${storm.mut} 次 DOM 变更，最长任务 ${worst}ms`;
     });
   } finally {
     cdp.close();

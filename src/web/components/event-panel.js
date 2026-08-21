@@ -3,7 +3,7 @@
  * 面板只做渲染 + 主机过滤 + 折叠。
  */
 
-import { clear, el, fmtClock } from '../utils.js';
+import { clear, coalesce, el, fmtClock } from '../utils.js';
 
 const LEVEL_LABEL = { info: '信息', warn: '警告', error: '错误' };
 
@@ -74,12 +74,17 @@ export function createEventPanel({ store }) {
     render();
   };
 
+  // 事件是会成串来的（批量拉起、一批隧道同时重连、某台远端在刷警告），故订阅侧一律
+  // 合到帧边界再画一次；用户看到的最终画面不变（issue #106）。
+  const renderSoon = coalesce(render);
+  const rerenderAllSoon = coalesce(rerenderAll);
+
   const offs = [
-    store.on('events:changed', render),
-    store.on('hosts:reset', rerenderAll),
+    store.on('events:changed', renderSoon),
+    store.on('hosts:reset', rerenderAllSoon),
     // 单条 host-changed 也可能带来一台没见过的主机（ssh config 多出一台、向导收尾
     // 解门禁都走这条）。只认整份快照的话，下拉里就一直缺这台。
-    store.on('hosts:changed', rerenderAll),
+    store.on('hosts:changed', rerenderAllSoon),
   ];
   renderFilter();
   render();
