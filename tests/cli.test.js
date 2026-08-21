@@ -7,8 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, coerceConfigValue, createSseParser,
-  exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile, usageText,
+  COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, classifyConfigFile, coerceConfigValue,
+  createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile, usageText,
 } from '../src/cli.js';
 
 test('parseArgv 支持 --key value / --key=value / 短旗标', () => {
@@ -154,4 +154,38 @@ test('tailFile 只取尾部 N 行', (t) => {
 
   // 请求多于总行数时不报错
   assert.equal(tailFile(file, 10_000).split('\n').length, 500);
+});
+
+test('classifyConfigFile 分清「没有」「坏了」「读不了」', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-cfg-'));
+  t.after(() => { try { fs.chmodSync(path.join(dir, 'config.json'), 0o600); } catch { /* 可能没建 */ } fs.rmSync(dir, { recursive: true, force: true }); });
+  const file = path.join(dir, 'config.json');
+
+  // 1) 不存在 → 走初始化，这条是唯一允许提「dshc init」的情形
+  assert.equal(classifyConfigFile(file).kind, 'missing');
+
+  // 2) 写到一半（掉电、别的工具截断）
+  fs.writeFileSync(file, '{"configVersion":1,"manager":{"po');
+  assert.equal(classifyConfigFile(file).kind, 'damaged');
+
+  // 3) 空文件也是坏了，不是「没有」——它承载不了任何配置，但覆盖它就丢东西
+  fs.writeFileSync(file, '');
+  assert.equal(classifyConfigFile(file).kind, 'damaged');
+
+  // 4) 合法 JSON 但不是对象
+  fs.writeFileSync(file, '[]');
+  assert.equal(classifyConfigFile(file).kind, 'damaged');
+
+  // 5) 好文件
+  fs.writeFileSync(file, JSON.stringify({ configVersion: 1, setupCompleted: true, manager: { port: 7788 } }));
+  const ok = classifyConfigFile(file);
+  assert.equal(ok.kind, 'ok');
+  assert.equal(ok.config.manager.port, 7788);
+
+  // 6) 读不了（权限）——这条连 init 都救不了，得说清是权限
+  fs.chmodSync(file, 0o000);
+  const denied = classifyConfigFile(file);
+  fs.chmodSync(file, 0o600);
+  // root 跑测试时 chmod 000 照样能读，那就跳过这条判据
+  if (process.getuid?.() !== 0) assert.equal(denied.kind, 'unreadable', '权限读不了该单独成一类');
 });

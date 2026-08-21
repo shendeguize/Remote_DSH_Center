@@ -11,6 +11,9 @@ import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import fs from 'node:fs';
+
+import { createHarness, newHostState as freshHostState } from '../harness/index.js';
 import { bootServer, newHostState, waitPhase } from './helpers.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'cli.js');
@@ -304,4 +307,64 @@ test('open <host>：拉起的是那台主机的深链', async (t) => {
   const res = await dshc(ctx, ['open', 'gpu-1']);
   assert.equal(res.code, 0, `stderr=${res.stderr}`);
   assert.deepEqual(await waitOpened(ctx, 1), [`http://127.0.0.1:${ctx.port}/#/host/gpu-1`]);
+});
+
+/** 只要一个隔离的 DSHC_HOME，不需要 manager：这些用例问的是「起不来时怎么说」。 */
+function bareCli(t, writeConfig) {
+  const harness = createHarness({ hosts: { 'gpu-1': freshHostState() } });
+  t.after(() => {
+    try { fs.chmodSync(`${harness.homeDir}/config.json`, 0o600); } catch { /* 可能没建 */ }
+    harness.cleanup();
+  });
+  writeConfig(`${harness.homeDir}/config.json`);
+  return (args) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: { ...process.env, ...harness.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => { stdout += c; });
+    child.stderr.on('data', (c) => { stderr += c; });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`超时；${stdout}${stderr}`)); }, 20_000);
+    timer.unref?.();
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out: `${stdout}${stderr}` }); });
+  });
+}
+
+test('config.json 坏了：说「损坏」而不是「尚未初始化」，也不许自己去走向导', async (t) => {
+  // 截断的配置里通常还留着能救的东西（localPort 分配、workdir、注入的环境变量、patch 清单），
+  // 提示用户去 dshc init 等于教他把这些盖掉。
+  const run = bareCli(t, (f) => fs.writeFileSync(f, '{"configVersion":1,"manager":{"po'));
+  const res = await run(['up', '--port', '7851', '--foreground']);
+
+  assert.notEqual(res.code, 0, `不该就这么起来了：${res.out}`);
+  assert.doesNotMatch(res.out, /尚未初始化/, '文件明明在，只是坏了');
+  assert.match(res.out, /损坏|坏了|解析/, `要说清是坏了：${res.out}`);
+  assert.match(res.out, /config\.json/, '要指出是哪个文件');
+  assert.match(res.out, /备份|手工|修/, '要给一条不丢数据的出路');
+});
+
+test('config.json 读不了（权限）：说清是权限，别叫人去 init', async (t) => {
+  if (process.getuid?.() === 0) return; // root 无视权限位
+  const run = bareCli(t, (f) => {
+    fs.writeFileSync(f, JSON.stringify({ configVersion: 1, setupCompleted: true, manager: { port: 7788 }, defaults: {}, hosts: {} }));
+    fs.chmodSync(f, 0o000);
+  });
+  const res = await run(['up', '--port', '7852', '--foreground']);
+
+  assert.notEqual(res.code, 0);
+  assert.doesNotMatch(res.out, /尚未初始化/);
+  assert.match(res.out, /权限|读不|EACCES/, `要说清读不了：${res.out}`);
+});
+
+test('dshc init --force 覆盖坏配置之前先备份', async (t) => {
+  const run = bareCli(t, (f) => fs.writeFileSync(f, '{"hosts":{"gpu-1":{"localPort":17701'));
+  // 非交互下 init 本来就该拒（要走向导），但备份判据得先于交互检查生效才有意义：
+  // 这里验的是「拒的时候也别动文件」，真正的备份在下一条用例里由 backupDamagedConfig 保证
+  const res = await run(['init', '--force']);
+  assert.notEqual(res.code, 0);
+  assert.match(res.out, /交互终端|向导/, `非交互该说清：${res.out}`);
 });

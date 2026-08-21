@@ -192,13 +192,68 @@ class ApiError extends Error {
   }
 }
 
+/**
+ * config.json 到底怎么了。「没有」「坏了」「读不了」必须分开——把它们一律当成
+ * 「尚未初始化」，就会拿「请执行 dshc init」去回答一份只是被截断的配置，而 init
+ * 是整份替换：原文里的 localPort 分配、workdir、注入的环境变量与 patch 清单一起没了。
+ *
+ * @param {string} [file]
+ * @returns {{kind:'ok', config:any}|{kind:'missing'}|{kind:'damaged', reason:string}|{kind:'unreadable', reason:string}}
+ */
+export function classifyConfigFile(file = resolvePaths().config) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { kind: 'missing' };
+    return { kind: 'unreadable', reason: `${err.code ?? ''} ${err.message}`.trim() };
+  }
+  // 空文件不算「没有」：它承载不了配置，可覆盖它照样丢东西（比如上一次写了一半）
+  if (text.trim() === '') return { kind: 'damaged', reason: '文件是空的' };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { kind: 'damaged', reason: `JSON 解析失败：${err.message}` };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { kind: 'damaged', reason: '顶层不是 JSON 对象' };
+  }
+  return { kind: 'ok', config: parsed };
+}
+
 /** config.manager.port 是 API 的落点；--port 可临时覆盖。 */
 function readConfigFile() {
+  const v = classifyConfigFile();
+  return v.kind === 'ok' ? v.config : null;
+}
+
+/**
+ * 坏配置在被覆盖前挪到一边。用户手上那份可能还能捞出 localPort 与注入项，
+ * 这个动作是「不丢东西」的最后一道保障。
+ * @returns {string|null} 备份路径
+ */
+function backupDamagedConfig(file = resolvePaths().config) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = `${file}.bad-${stamp}`;
   try {
-    return JSON.parse(fs.readFileSync(resolvePaths().config, 'utf8'));
+    fs.copyFileSync(file, dest);
+    return dest;
   } catch {
     return null;
   }
+}
+
+/** 坏/读不了时的统一说法：说清是什么情形、在哪个文件、往哪儿走。 */
+function reportBadConfig(verdict, file = resolvePaths().config) {
+  if (verdict.kind === 'unreadable') {
+    errOut(`读不了 ${file}（${verdict.reason}）。检查文件权限后重试。`);
+    return EXIT.failed;
+  }
+  errOut(`${file} 已损坏，拒绝启动（${verdict.reason}）。`);
+  errOut('里面可能还留着能用的东西（localPort 分配、workdir、注入项）。');
+  errOut('先手工修好这份 JSON；确实不要了，就备份后执行 dshc init --force 重来。');
+  return EXIT.failed;
 }
 
 function managerPort(flags) {
@@ -423,7 +478,12 @@ async function cmdUp({ flags }) {
   }
   if (check.stale) out('清理了失效的 pidfile（上次进程已不在）。');
 
-  const cfg = readConfigFile();
+  const verdict = classifyConfigFile();
+  // 坏了/读不了都不许往下走：往下是「当作没有配置」，交互终端上还会直接进向导
+  // 覆盖掉那份可能还能救的文件（issue #52）。
+  if (verdict.kind === 'damaged' || verdict.kind === 'unreadable') return reportBadConfig(verdict);
+
+  const cfg = verdict.kind === 'ok' ? verdict.config : null;
   if (cfg?.setupCompleted !== true) {
     if (!process.stdin.isTTY) {
       errOut('尚未初始化配置，且当前不是交互终端。请先在终端执行 dshc init。');
@@ -932,7 +992,15 @@ export function buildDefaultsPatchFor(key, value) {
 // ── dshc init（ENG-18） ─────────────────────────────────────────────────
 
 async function cmdInit({ flags }) {
-  const existing = readConfigFile();
+  const verdict = classifyConfigFile();
+  if (verdict.kind === 'unreadable') return reportBadConfig(verdict);
+  if (verdict.kind === 'damaged' && !flags.force) {
+    errOut(`${resolvePaths().config} 已损坏（${verdict.reason}）。`);
+    errOut('要丢掉它重走向导请加 --force（会先备份成 config.json.bad-<时间戳>）。');
+    return EXIT.usage;
+  }
+
+  const existing = verdict.kind === 'ok' ? verdict.config : null;
   if (existing?.setupCompleted === true && !flags.force) {
     errOut('配置已初始化。要重走向导请加 --force（会预填现有值）。');
     return EXIT.usage;
@@ -940,6 +1008,10 @@ async function cmdInit({ flags }) {
   if (!process.stdin.isTTY) {
     errOut('dshc init 需要交互终端。非交互场景请用页面向导或直接写 config.json。');
     return EXIT.usage;
+  }
+  if (verdict.kind === 'damaged') {
+    const saved = backupDamagedConfig();
+    if (saved) out(`原配置已损坏，先备份到 ${saved}`);
   }
 
   const readline = await import('node:readline/promises');
