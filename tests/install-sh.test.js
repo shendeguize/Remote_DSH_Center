@@ -55,6 +55,13 @@ function runInstall(env, args = []) {
   });
 }
 
+/** 装一遍并要求成功。装不上时把两路输出都摊出来——CI 上没有第二次现场。 */
+function installOk(env, args = [], label = '安装') {
+  const res = runInstall(env, args);
+  assert.equal(res.status, 0, `${label}失败（退出码 ${res.status}）：\n${res.stdout}\n${res.stderr}`);
+  return res;
+}
+
 /**
  * 假 Releases 服务跑在**本进程**里，所以碰它的安装必须用异步 spawn：
  * spawnSync 会堵住事件循环，install.sh 里的 curl 永远等不到应答（死锁）。
@@ -120,7 +127,7 @@ test('install.sh：不指定 DSHC_REF 时装的是 release 分支', { skip }, (t
 
 test('install.sh：显式 DSHC_REF=main 时装的是 main（默认值的对照组）', { skip }, (t) => {
   const r = rig(t);
-  assert.equal(runInstall(r.env, ['--prefix', r.prefix]).status, 0);
+  installOk(r.env, ['--prefix', r.prefix]);
   assert.ok(
     fs.existsSync(path.join(r.appDir, 'MAIN_ONLY')),
     '指定 main 就该装 main——这条是上一条用例的对照组，两条一起才证明默认值真的生效',
@@ -159,7 +166,7 @@ test('install.sh：clone → 软链 dshc → 装出来的入口真能跑', { ski
  */
 test('install.mjs：stdout 被提前关掉不抛栈，且该建的软链照建', { skip }, (t) => {
   const r = rig(t);
-  assert.equal(runInstall(r.env, ['--prefix', r.prefix]).status, 0, '前置：先正常装一遍');
+  installOk(r.env, ['--prefix', r.prefix], '前置：先正常装一遍');
 
   const installer = path.join(r.appDir, 'scripts', 'install.mjs');
   const res = spawnSync('sh', ['-c', `"${process.execPath}" "${installer}" --prefix "${r.prefix}" | true`], {
@@ -186,12 +193,12 @@ test('install.sh：重跑幂等 —— 第二次走更新路径，软链照旧�
   const link = path.join(r.prefix, 'dshc');
   assert.equal(fs.realpathSync(link), fs.realpathSync(path.join(r.appDir, 'src', 'cli.js')));
   const help = spawnSync(link, ['--help'], { encoding: 'utf8', env: { ...process.env, ...r.env } });
-  assert.equal(help.status, 0, '重跑之后入口仍要可用');
+  assert.equal(help.status, 0, `重跑之后入口仍要可用：\n${help.stdout}\n${help.stderr}`);
 });
 
 test('install.sh：安装脚本自带的卸载能把软链摘干净', { skip }, (t) => {
   const r = rig(t);
-  assert.equal(runInstall(r.env, ['--prefix', r.prefix]).status, 0);
+  installOk(r.env, ['--prefix', r.prefix]);
   const link = path.join(r.prefix, 'dshc');
   assert.ok(fs.existsSync(link), '先得真装上，否则这条用例会空过');
 
