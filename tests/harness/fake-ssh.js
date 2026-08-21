@@ -400,9 +400,12 @@ const name = parsed.positional[0];
 if (!name) die('缺少目标主机');
 
 /**
- * 跳板机的 MaxStartups：额度是所有主机合起来算的，所以记在全局而非某台的 faults 里。
- * 超额的连接在**认证之前**就被掐，真 ssh 客户端给的正是下面这句。
+ * sshd 的 `MaxStartups` 只数**尚未完成认证**的连接，认证一过就从额度里摘掉。
+ * 额度是所有主机合起来算的（共用跳板机），所以记在全局而非某台的 faults 里。
+ * 超额的连接在认证之前就被掐，真 ssh 客户端给的正是下面这句。
  */
+const AUTH_WINDOW_MS = 150;
+
 function admitOrDrop() {
   const cap = Number(process.env.DSHC_HARNESS_MAX_STARTUPS ?? '') || 0;
   if (!cap) return;
@@ -411,12 +414,22 @@ function admitOrDrop() {
     s.peakInflight = Math.max(s.peakInflight ?? 0, s.inflight);
     return s.inflight;
   });
-  const release = () => mutate((s) => { s.inflight = Math.max(0, (s.inflight ?? 1) - 1); });
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    mutate((s) => { s.inflight = Math.max(0, (s.inflight ?? 1) - 1); });
+  };
   if (now > cap) {
     release();
     process.stderr.write('kex_exchange_identification: Connection closed by remote host\n');
     process.exit(255);
   }
+  // 认证窗口一过就还额度。不能挂到进程退出去还——隧道那条 `ssh -N -L` 是常驻的，
+  // 那样一条建成的隧道会把额度占一辈子，十条隧道之后谁也连不上了。真 sshd 不是这样：
+  // 建成的连接早就不在 startups 账上。（此前正是这个建模错误伪造出「6 台永不自愈」。）
+  const t = setTimeout(release, AUTH_WINDOW_MS);
+  t.unref?.();
   process.on('exit', release);
 }
 

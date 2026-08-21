@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mapPool } from '../../src/lib/pool.js';
+import { createGate, mapPool } from '../../src/lib/pool.js';
 
 // 不 unref：这些定时器就是本用例仅有的「还有事要做」，unref 掉进程会当场收摊
 const tick = (ms = 5) => new Promise((r) => { setTimeout(r, ms); });
@@ -89,4 +89,51 @@ test('同步抛出的任务也算 rejected（不许直接把 mapPool 掀了）',
   const results = await mapPool([1], () => { throw new Error('同步就炸'); }, 6);
   assert.equal(results[0].status, 'rejected');
   assert.equal(results[0].reason.message, '同步就炸');
+});
+
+// ── createGate：长期在那儿的那道闸（issue #100） ──────────────────────────
+
+test('createGate：同时进去的不超过上限', async () => {
+  const gate = createGate(3);
+  let live = 0;
+  let peak = 0;
+  await Promise.all(Array.from({ length: 20 }, () => gate.run(async () => {
+    live += 1;
+    peak = Math.max(peak, live);
+    await new Promise((r) => { setTimeout(r, 5); });
+    live -= 1;
+  })));
+  assert.equal(peak, 3);
+  assert.deepEqual(gate.stats(), { inFlight: 0, waiting: 0 }, '收场后闸里不许还挂着人');
+});
+
+test('createGate：先到先走，不许把前面的饿死', async () => {
+  const gate = createGate(1);
+  const order = [];
+  const jobs = [1, 2, 3, 4].map((i) => gate.run(async () => {
+    order.push(i);
+    await new Promise((r) => { setTimeout(r, 2); });
+  }));
+  await Promise.all(jobs);
+  assert.deepEqual(order, [1, 2, 3, 4]);
+});
+
+test('createGate：里面抛错也要把位置还回来（否则一次失败就永久少一个名额）', async () => {
+  const gate = createGate(1);
+  await assert.rejects(() => gate.run(async () => { throw new Error('boom'); }), /boom/);
+  assert.equal(gate.stats().inFlight, 0);
+  assert.equal(await gate.run(async () => 'ok'), 'ok');
+});
+
+test('createGate：limit<=0 等于不设闸', async () => {
+  const gate = createGate(0);
+  let live = 0;
+  let peak = 0;
+  await Promise.all(Array.from({ length: 8 }, () => gate.run(async () => {
+    live += 1;
+    peak = Math.max(peak, live);
+    await new Promise((r) => { setTimeout(r, 2); });
+    live -= 1;
+  })));
+  assert.equal(peak, 8);
 });

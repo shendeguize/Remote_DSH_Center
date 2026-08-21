@@ -12,6 +12,51 @@
  */
 
 /**
+ * 长期在那儿的那道闸（issue #100）。
+ *
+ * `mapPool` 管的是「一把任务一次发完」，隧道重连环不是那个形状：每台主机各有一个退避
+ * 定时器，各自到点各自敲门，谁也不知道此刻还有几台也在敲。网络整体回来的那一瞬
+ * （合盖睡醒、Wi-Fi 切换、跳板机抖一下），这些定时器会挤在同一刻——那正是跳板机
+ * 最忙的时候，而它们全都绕过了 `mapPool` 那道闸。
+ *
+ * 排队是 FIFO：先到的先走，不许后来的插队饿死前面的。
+ * @param {number} limit 同时在里面的上限；<=0 表示不限
+ */
+export function createGate(limit) {
+  let inFlight = 0;
+  /** @type {(() => void)[]} */
+  const waiting = [];
+
+  const release = () => {
+    inFlight -= 1;
+    waiting.shift()?.();
+  };
+
+  return {
+    /**
+     * @template R
+     * @param {() => Promise<R>} fn
+     * @returns {Promise<R>}
+     */
+    async run(fn) {
+      if (limit > 0) {
+        if (inFlight >= limit) await new Promise((resolve) => { waiting.push(resolve); });
+        inFlight += 1;
+      }
+      try {
+        return await fn();
+      } finally {
+        if (limit > 0) release();
+      }
+    },
+    /** 判据用。 */
+    stats() {
+      return { inFlight, waiting: waiting.length };
+    },
+  };
+}
+
+/**
  * @template T, R
  * @param {T[]} items
  * @param {(item:T, index:number)=>Promise<R>} fn

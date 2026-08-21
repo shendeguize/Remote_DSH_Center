@@ -13,8 +13,10 @@ import { spawn } from 'node:child_process';
 import { logEvent } from './lib/bus.js';
 import { DshError } from './lib/errors.js';
 import { buildVerifyScript, kvOne, parseProtoOutput } from './lib/proto.js';
+import { createGate } from './lib/pool.js';
 import { assertSafeHost } from './lib/shq.js';
 import { TUNNEL_SSH_OPTS, execFailure, hostQueue, sshBin, sshExec } from './lib/ssh.js';
+import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
 
 export const TUNNEL_TIMING = Object.freeze({
@@ -27,9 +29,22 @@ export const TUNNEL_TIMING = Object.freeze({
   stderrTailBytes: 4_096,
 });
 
-/** §5.4：1s,2s,4s,8s,16s,30s,30s…（导出纯函数，单测直测）。 */
-export function backoffDelay(attempt) {
-  return Math.min(1000 * 2 ** attempt, 30_000);
+/**
+ * §5.4 的 1s,2s,4s,8s,16s,30s,30s… 作为**上界**，实际在半程到满程之间随机取
+ * （issue #100）。
+ *
+ * 为什么必须抖：一起断的主机会一起退避、一起重试。确定值意味着它们从头到尾锁着步，
+ * 每一轮都同时撞在跳板机的 `MaxStartups` 上，被拒之后又一起进下一档——永远散不开。
+ * 实测 16 台同时断，70 秒后仍有 6 台卡在 degraded，且 attempt 完全相同。
+ *
+ * 取半程而非全程（full jitter）：全程会让「刚断一下」的常见情形偶尔等满 30s，
+ * 体感变差；半程既散得开，又保住了「退避大致翻倍」的可预期节奏。
+ * @param {number} attempt
+ * @param {() => number} [rand] 注入点：单测要确定值
+ */
+export function backoffDelay(attempt, rand = Math.random) {
+  const ceiling = Math.min(1000 * 2 ** attempt, 30_000);
+  return Math.round(ceiling * (0.5 + 0.5 * rand()));
 }
 
 const PORT_BUSY_RE = /address already in use|cannot listen to port/i;
@@ -70,6 +85,9 @@ const SUSPEND_HINT = {
 
 /** @type {Map<string, Entry>} */
 const entries = new Map();
+
+/** 重连环的扇出闸（issue #100）。与 #85 的批量扇出共用同一个额度口径。 */
+const reconnectGate = createGate(SSH_FANOUT_LIMIT);
 
 function entry(name) {
   return entries.get(name) ?? null;
@@ -419,6 +437,14 @@ function scheduleRetry(e) {
  * 远端死/指纹不符 → crashed 并退出环（02 §3.3）。
  */
 async function reconnectTick(e) {
+  if (e.closed || e.suspendedReason !== null) return;
+  // 每台主机各有一个退避定时器，网络整体回来时它们会挤在同一刻。#85 给探测/恢复/自启/
+  // 巡检都上了闸，唯独这个环没有——而它正是那一瞬最先集体触发的（issue #100）。
+  return reconnectGate.run(() => reconnectBody(e));
+}
+
+async function reconnectBody(e) {
+  // 排队期间关停可能已经过去了
   if (e.closed || e.suspendedReason !== null) return;
 
   const alive = await verifyRemoteAlive(e.host);

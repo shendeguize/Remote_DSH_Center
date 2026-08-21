@@ -7,11 +7,32 @@ import assert from 'node:assert/strict';
 
 import { TUNNEL_TIMING, backoffDelay, classifyExit, isForwardDeniedLine } from '../src/tunnel.js';
 
-test('backoffDelay：1,2,4,8,16,30,30… 秒封顶 30s', () => {
+const CEILINGS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000];
+const ATTEMPTS = [0, 1, 2, 3, 4, 5, 6, 10];
+
+test('backoffDelay：1,2,4,8,16,30,30… 秒封顶 30s（作为上界）', () => {
+  assert.deepEqual(ATTEMPTS.map((n) => backoffDelay(n, () => 1)), CEILINGS);
+});
+
+/**
+ * 抖动（issue #100）：确定值意味着一起断的主机锁着步一起重试，每轮都同时撞在
+ * 跳板机的 MaxStartups 上——实测 16 台同时断，70 秒后仍有 6 台卡着且 attempt 全等。
+ */
+test('backoffDelay 带抖动：落在半程到满程之间，且真的会变（issue #100）', () => {
   assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 6, 10].map((n) => backoffDelay(n)),
-    [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000],
+    ATTEMPTS.map((n) => backoffDelay(n, () => 0)),
+    CEILINGS.map((c) => c / 2),
+    '最短也要有半程：全 0 抖动等于没退避，断链瞬间会变成打桩',
   );
+
+  for (const n of ATTEMPTS) {
+    const seen = new Set(Array.from({ length: 200 }, () => backoffDelay(n)));
+    assert.ok(seen.size > 1, `attempt=${n} 每次都给同一个值，等于没抖`);
+    for (const v of seen) {
+      assert.ok(v >= CEILINGS[ATTEMPTS.indexOf(n)] / 2, `${v} 低于半程`);
+      assert.ok(v <= CEILINGS[ATTEMPTS.indexOf(n)], `${v} 超过了 §5.4 的上界`);
+    }
+  }
 });
 
 test('分类优先级 1：主动杀一律 expected（close/closeAll/restartChild/stop）', () => {
