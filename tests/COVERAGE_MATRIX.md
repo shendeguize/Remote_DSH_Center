@@ -328,6 +328,7 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 闸门自查用例点名：静态数顶格声明数、从 TAP 读实跑数、逐文件对账点名（防某个用例自伤后整文件被报成通过） | `tests/tooling.test.js` |
 | 浏览器侧判据的等待语义：条件后来才成立也算过、超时把判据名带进错误（防 demo 冒烟这类「此刻」判据在慢机器上偶发红） | `tests/site-tooling.test.js` |
 | `manager.log` 封顶：没到顶一个字节不动；到顶原地截断（inode 不变、留尾巴、开头说明丢了多少、切在行边界）；文件不在/读不了都不抛；真进程上起来时截断且之后还能往同一个 fd 写 | `tests/lib/logfile.test.js`、`tests/integration/daemon.test.js` |
+| 主机离开配置：reload 后它的隧道被收掉、本机端口不再有人监听；远端实例不许被自动杀、state 留着；日志里点名「远端还在跑 pid=…」；还在配置里的那台隧道一根汗毛不动 | `tests/integration/resilience.test.js` |
 | 本机端口并发分配：8 台同时首启拿到 8 个连号且回写与返回一致、同一台并发要两次只分一次也不白占号、区间不够时先到的拿满后到的报 `PORT_EXHAUSTED` | `tests/ports.test.js` |
 | 远端输出封顶：留尾不留头（超上限时切在正确位置、账本自身不随吐出量增长、恰好等于上限时一个字节不丢、cap≤0 视为不封顶）；600MB 的 stdout/stderr 都不再崩进程、收上来的量封顶、末尾那行标记还在、丢弃量有记账；截断后错误 detail 与日志正文都说明「丢了多少、这是末尾」 | `tests/lib/capture.test.js`、`tests/lib/ssh.test.js` |
 | 有改动时的 Esc：这一记摘掉原生默认动作（否则 CloseWatcher 把刚开的确认框顺手关掉，体感「按了没反应」），框开着时不再插手（否则 Esc 被焊死）；真键盘按下去要「弹框 → 再 Esc 收框 → 草稿还在」 | `tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S4g，判据必须带 `keyCode: 27`，否则只惊动 JS、判不出浏览器那半边） |

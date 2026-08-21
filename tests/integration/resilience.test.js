@@ -6,9 +6,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import {
-  bootServer, fetchText, monitor, server, tunnel, waitPhase,
+  bootServer, fetchText, monitor, server, store, tunnel, waitPhase,
 } from './helpers.js';
 import { liveChildCount } from '../../src/lib/ssh.js';
 import { SCENARIOS, setFaults } from '../harness/scenarios.js';
@@ -25,6 +27,18 @@ function tunnelChildren() {
 
 const byName = (res, name) => res.json.hosts.find((h) => h.name === name);
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
+
+/** 收敛类判据：条件后来才成立也算过，超时才红（判据名带进错误，免得只看到一句 timeout）。 */
+async function waitUntil(fn, label, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- 轮询
+    if (await fn()) return;
+    if (Date.now() > deadline) throw new Error(`等「${label}」超时 ${timeoutMs}ms`);
+    // eslint-disable-next-line no-await-in-loop -- 同上
+    await sleep(50);
+  }
+}
 
 /** 隧道子进程被外力打断（等价 IT-06 的 kill -9 隧道）。 */
 function dropTunnel(name, signal = 'SIGUSR1') {
@@ -219,4 +233,53 @@ test('manager 重启：running 主机不重拉、只重建隧道；autoStart 已
   const lost = await waitPhase(ctx, 'lost', 'crashed', { timeoutMs: 15_000 });
   assert.equal(lost.tunnel, null);
   assert.equal(lost.web.pid, lostFirst.web.pid, 'web 记录留证');
+});
+
+/**
+ * 回归（issue #96）：主机离开 config.hosts 之后，本机这半边成了没人能碰的孤儿——
+ * 隧道 ssh 还活着、本机端口还在转发，而页面上看不见它、stop/reconnect 一律 404。
+ *
+ * 两条路都走得到：手改 config.json 再 reload；重跑一次 setup（它是整份替换，
+ * 上一份有、这一份没有的主机就这么消失）。
+ */
+test('主机被从 config 删掉：本机隧道要收掉，远端不许自动杀（issue #96）', async (t) => {
+  const ctx = await bootServer(t, { hosts: { 'gpu-1': SCENARIOS.healthy(), 'gpu-2': SCENARIOS.healthy() } });
+  const sse = await ctx.sse();
+  await ctx.api('POST', '/api/hosts/gpu-1/start');
+  await ctx.api('POST', '/api/hosts/gpu-2/start');
+  const started = await waitPhase(ctx, 'gpu-1', 'running');
+  const kept = await waitPhase(ctx, 'gpu-2', 'running');
+  const localPort = started.tunnel.localPort;
+  const remotePid = started.web.pid;
+  assert.equal((await fetchText(`http://127.0.0.1:${localPort}/`)).status, 200, '前提：隧道通着');
+
+  const cfgPath = path.join(ctx.harness.homeDir, 'config.json');
+  const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  delete cfg.hosts['gpu-1'];
+  fs.writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  assert.equal((await ctx.api('POST', '/api/reload')).status, 200);
+
+  await waitUntil(() => tunnel.status('gpu-1') === null, '隧道记录被撤掉');
+  assert.equal(tunnel.isOpen('gpu-1'), false, '页面上碰不到它了，子进程就必须由 manager 自己收');
+  await waitUntil(
+    async () => (await fetchText(`http://127.0.0.1:${localPort}/`).then(() => false, () => true)),
+    `本机端口 ${localPort} 不再有人监听`,
+  );
+
+  // 「不误杀」：删一条配置不等于「把远端那个服务停掉」，没有明确指令就不动远端
+  assert.equal(ctx.harness.liveProcesses('gpu-1').length, 1, '远端实例不许被自动杀掉');
+  assert.equal(store.getHostState('gpu-1')?.web?.pid, remotePid, 'state 留着，加回来还能接管');
+
+  const said = sse.of('log-line').map((f) => f.data.msg).concat(
+    (await ctx.get('/api/hosts')).status === 200 ? [] : [],
+  );
+  assert.ok(
+    said.some((m) => /gpu-1/.test(m) && /远端|还在/.test(m)),
+    `要说清远端还在跑，否则用户以为删干净了：${said.join(' | ')}`,
+  );
+
+  // 别收过头：还在配置里的那台一根汗毛都不许动
+  assert.equal((await ctx.get('/api/hosts')).json.hosts.map((h) => h.name).join(','), 'gpu-2');
+  assert.equal(tunnel.isOpen('gpu-2'), true);
+  assert.equal((await fetchText(`http://127.0.0.1:${kept.tunnel.localPort}/`)).status, 200);
 });

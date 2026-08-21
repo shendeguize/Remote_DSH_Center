@@ -44,6 +44,10 @@ export async function tick() {
   if (running) return { skipped: true };
   running = true;
   try {
+    // 兜一道：配置里没有的主机不该还留着隧道。reload/setup 两条路已各自收过一次，
+    // 这里防的是「还有别的路会把主机从配置里拿掉」——巡检本来就是收敛现实与记录的偏差
+    // （issue #96）。
+    await tunnel.closeUnconfigured();
     const targets = store.listHostNames().filter((n) => store.getPhase(n) === 'running');
     // 有闸：合盖睡醒时所有隧道会一起断，深复核随之一起发——那正是跳板机最忙的时候（issue #85）
     const settled = await mapPool(targets, (n) => checkOne(n), SSH_FANOUT_LIMIT);

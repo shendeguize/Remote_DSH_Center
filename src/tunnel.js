@@ -304,6 +304,41 @@ export async function closeAll() {
   await Promise.all([...entries.keys()].map((n) => close(n)));
 }
 
+/**
+ * 收掉「已经不在 config 里」的那些隧道（issue #96）。
+ *
+ * 主机离开 `config.hosts` 之后（手改配置后 reload，或重跑 setup——它是整份替换），
+ * 页面上就看不见它了，`stop`/`reconnect` 一律 404。可这条隧道 ssh 还活着、本机端口
+ * 还在转发，而**没有任何入口能碰到它**——那是 manager 自己起的子进程，不收就是泄漏。
+ *
+ * 只收本机这半边。远端实例不动：删一条配置不等于「把远端那个服务停掉」，按「不误杀」
+ * 的底线，没有明确指令就不碰远端；state 记录也留着，主机加回来时还能接管它。
+ * 但要在日志里说清远端还在跑、pid 多少——否则用户以为删干净了。
+ * @returns {Promise<string[]>} 收掉的主机名
+ */
+export async function closeUnconfigured() {
+  const known = new Set(store.listHostNames());
+  const gone = [...entries.keys()].filter((n) => !known.has(n));
+  for (const name of gone) {
+    const e = entry(name);
+    const port = e?.localPort ?? null;
+    // eslint-disable-next-line no-await-in-loop -- 逐条收，数量与「刚被删掉的主机数」同阶
+    await close(name);
+    const pid = store.getHostState(name)?.web?.pid ?? null;
+    logEvent(
+      name,
+      'warn',
+      `${name} 已不在配置里，已收回它占的本机端口 ${port ?? '(未知)'}`
+        + (pid ? `；远端实例还在跑（pid=${pid}），没有动它` : ''),
+      pid
+        ? '删一条配置不等于要停掉远端那个服务，所以此处不替你杀远端进程。'
+          + '想停掉：把这台主机加回配置再关停，或者直接去远端处理。'
+        : null,
+    );
+  }
+  return gone;
+}
+
 /** monitor 专用：杀 + 重建子进程，不改 phase。 */
 export async function restartChild(name) {
   const e = entry(name);

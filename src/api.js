@@ -415,14 +415,20 @@ export function createHandler({ managerCtl }) {
       sendJson(res, 200, { defaults: cfg.defaults, manager: cfg.manager, restartRequired });
     }],
 
-    ['POST', /^\/api\/reload$/, (req, res) => {
-      sendJson(res, 200, store.reloadConfig());
+    ['POST', /^\/api\/reload$/, async (req, res) => {
+      const result = store.reloadConfig();
+      // 这一趟可能把某台主机从配置里去掉了。它的隧道此刻既看不见也停不掉，
+      // 只能由 manager 自己收（issue #96）。
+      await tunnel.closeUnconfigured();
+      sendJson(res, 200, result);
     }],
 
     ['POST', /^\/api\/setup$/, async (req, res) => {
       const body = await readJsonBody(req);
       assertValid(setupBodySchema, body, '初始化配置校验失败');
-      sendJson(res, 200, await managerCtl.applySetup(body));
+      const result = await managerCtl.applySetup(body);
+      await tunnel.closeUnconfigured(); // setup 是整份替换，同上
+      sendJson(res, 200, result);
     }],
 
     ['POST', /^\/api\/manager\/restart$/, async (req, res) => {
