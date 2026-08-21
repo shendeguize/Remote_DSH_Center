@@ -65,11 +65,17 @@ export class Cdp {
     const id = (this.seq += 1);
     this.ws.send(JSON.stringify({ id, method, params }));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
-      setTimeout(() => {
+      // 超时定时器 settle 时必须清掉（issue #112）：不清的话每发一条就多留一个 20s
+      // 的活句柄，一趟冒烟发上千条，跑完还得空等最后一批到点——实测收尾残着 25 个。
+      const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
         reject(new Error(`${method} 超时`));
       }, 20_000);
+      this.pending.set(id, {
+        method,
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
     });
   }
 
@@ -235,6 +241,12 @@ export async function launchChrome({ headful = false, noSandbox = null, env = pr
     devtoolsBase: `http://${new URL(wsUrl).host}`,
     kill() {
       proc.kill('SIGKILL');
+      // Chrome 自己会拉起旁支（chrome_crashpad_handler 之类），它们继承了这根 stderr
+      // 的写端，又不吃我们发给主进程的信号。读端不主动关，那个 PipeWrap 就把事件循环
+      // 钉住——冒烟把结论都打完了还不退，CI 上烧到 job 超时（issue #112）。
+      proc.stdout?.destroy();
+      proc.stderr?.destroy();
+      proc.unref();
       // SIGKILL 是异步的：Chrome 还在往 profile 里写盘，递归删除会撞 ENOTEMPTY
       // （macOS runner 上真的会），maxRetries 专治这个。
       try {

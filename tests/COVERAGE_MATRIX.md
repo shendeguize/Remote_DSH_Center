@@ -347,3 +347,4 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 单调钟：墙钟被换成 0 / 回拨一小时都不倒退、量的是真实流逝；`dshc down` 的宽限期遇墙钟回拨 6s 仍在 1s 上界内补 SIGKILL（此前被拖成 7.3s）；页面上后到的快照时刻不因跳变判反先后；静态闸门：后端源码里 `Date.now()` 只许留在就地标注「墙钟」的展示位 | `tests/lib/clock.test.js`、`tests/integration/daemon.test.js`、`tests/web/store.test.js`、`tests/architecture.test.js` |
 | 请求体超限：超一点点先读完再回 400（人话 + VALIDATION，值一个字节都不落盘）、灌超大体时掐链但 manager 照常服务；目录穿越的多种编码形态（`..%2f`、`%2e%2e`、`.%2e`、`....//`、后缀式）一律 403/404 且不漏内容 | `tests/integration/security.test.js`、`tests/integration/static.test.js` |
 | 标签栏方向键：落点纯函数（左右环绕、Home/End、焦点不在环上时从头算、空标签栏不算、ArrowDown/Enter 不许被抢）；挂载后左右真移焦点且不切页、Tab 落点收成一个并跟着选中标签走、没有游荡在 tablist 之外的 `role="tab"`；真浏览器里原生按键真派到焦点标签上、Enter 才切页（摘掉方向键即红） | `tests/web/tabbar.test.js`、`tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S13） |
+| 收尾兜底：到点仍有句柄就报出句柄名（同名不重复念）并带原退出码硬退、保险自身已 unref（不许拖慢干净的收场）、问不出句柄名也照样退；CDP 应答到手即清超时定时器（不清则收尾空等 20s） | `tests/tooling.test.js` |

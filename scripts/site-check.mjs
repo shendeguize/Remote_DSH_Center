@@ -22,6 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
+import { armExitGuard } from './lib/exit-guard.mjs';
 
 import { buildSite, serveStatic } from './build-site.mjs';
 import { captureScreenshot, findChrome, launchChrome, pageSession, sleep } from './lib/browser.mjs';
@@ -360,4 +361,6 @@ async function main() {
 
 if (isMainEntry(import.meta.url)) {
   await main();
+  // 这条也开浏览器，同一个坑（issue #112）
+  armExitGuard();
 }

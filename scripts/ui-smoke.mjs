@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
+import { armExitGuard } from './lib/exit-guard.mjs';
 
 import { createHarness, newHostState } from '../tests/harness/index.js';
 import { CONFIG_VERSION } from '../src/defaults.js';
@@ -1042,8 +1043,11 @@ async function main() {
 
 // 被 check.mjs / 单测 import 时只取 findChrome，不能顺带把浏览器跑起来
 if (isMainEntry(import.meta.url)) {
-  main().catch((err) => {
-    console.error(`ui-smoke 失败：${err.stack ?? err.message}`);
-    process.exit(1);
-  });
+  main()
+    .catch((err) => {
+      console.error(`ui-smoke 失败：${err.stack ?? err.message}`);
+      process.exitCode = 1;
+    })
+    // 结论打完就该收工。真浏览器这头总有拽住循环的东西（issue #112），别让 CI 挂着等。
+    .finally(() => armExitGuard());
 }

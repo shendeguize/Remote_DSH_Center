@@ -27,6 +27,8 @@ import {
 } from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import { findChrome } from '../scripts/ui-smoke.mjs';
+import { armExitGuard } from '../scripts/lib/exit-guard.mjs';
+import { Cdp } from '../scripts/lib/browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'src', 'cli.js');
@@ -564,4 +566,67 @@ test('findChrome：显式指定优先，找不到给 null', () => {
     '/usr/bin/chromium',
     '指定的路径不存在时要继续往下找，而不是直接放弃',
   );
+});
+
+/**
+ * 冒烟把结论都打完了却不退（issue #112）：Chrome 的旁支（crashpad 之类）继承着我们
+ * 那根 stderr 的写端，SIGKILL 只打主进程，读端的 PipeWrap 于是把事件循环钉住。
+ * CI 上这不是「慢一点」，是烧到 job 超时、退出码根本传不出去。
+ */
+test('收尾兜底：到点还有句柄拖着就报出句柄名并硬退，带上原本的退出码', () => {
+  let armed = null;
+  const said = [];
+  const exited = [];
+  const timer = armExitGuard({
+    graceMs: 1_234,
+    setTimer: (fn, ms) => { armed = { fn, ms }; return { unref() { this.unrefed = true; } }; },
+    resources: () => ['PipeWrap', 'Timeout', 'Timeout'],
+    log: (m) => said.push(m),
+    exit: (c) => exited.push(c),
+    code: () => 1,
+  });
+  assert.equal(armed.ms, 1_234);
+  assert.equal(timer.unrefed, true, '保险自己不许把干净的收场多拖 3 秒——必须 unref');
+
+  armed.fn();
+  assert.deepEqual(exited, [1], '硬退要带上原本的退出码，否则 CI 判不出红');
+  assert.match(said[0], /3 个句柄/);
+  assert.match(said[0], /PipeWrap/, '要报出句柄名，下次才查得下去');
+  assert.doesNotMatch(said[0], /Timeout、Timeout/, '同名句柄不必重复念');
+});
+
+test('收尾兜底：问不出句柄名也照样退，不许在兜底里自己抛', () => {
+  let armed = null;
+  const exited = [];
+  armExitGuard({
+    setTimer: (fn, ms) => { armed = { fn, ms }; return {}; },
+    resources: () => [],
+    log: () => {},
+    exit: (c) => exited.push(c),
+    code: () => 0,
+  });
+  assert.equal(armed.ms, 3_000, '默认宽限期');
+  armed.fn();
+  assert.deepEqual(exited, [0]);
+});
+
+/**
+ * 每发一条 CDP 就留一个 20s 的活句柄，一趟冒烟发上千条：收尾时实测残着 25 个
+ * Timeout，白等最后一批到点（issue #112）。
+ */
+test('CDP：应答到手就把超时定时器清掉', async () => {
+  const sent = [];
+  const ws = { send: (raw) => sent.push(JSON.parse(raw)), addEventListener() {}, close() {} };
+  const cdp = new Cdp(ws);
+  const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+
+  const p = cdp.send('Runtime.evaluate', { expression: '1' });
+  assert.equal(sent[0].method, 'Runtime.evaluate');
+  assert.equal(process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length, before + 1,
+    '在飞期间该有一个超时定时器守着');
+
+  cdp.pending.get(sent[0].id).resolve({ result: { value: 1 } });
+  await p;
+  assert.equal(process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length, before,
+    '应答到手了还留着定时器 = 收尾要空等 20s');
 });
