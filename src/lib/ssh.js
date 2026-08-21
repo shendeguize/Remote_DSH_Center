@@ -26,6 +26,42 @@ export const TUNNEL_SSH_OPTS = Object.freeze([
 const KILL_ESCALATE_MS = 2_000;
 
 /**
+ * 在飞的一次性子进程。manager 退出时要把它们一并收走：不收就是把 ssh 交给 init
+ * 当孤儿，`dshc restart` 之后新老两批命令还会同时打同一台远端（issue #73）。
+ * 隧道那条常驻 ssh 不在此列——它由 tunnel.closeAll() 自己关。
+ * @type {Set<() => void>} 每个元素就是那条进程的强杀链
+ */
+const inFlight = new Set();
+
+/** 关停闩：落下之后不许再起新的一次性 ssh。 */
+let closed = false;
+
+/**
+ * 关停用：收走在飞的一次性 ssh/scp（同一条 TERM → 2s → KILL），并且从此不再起新的。
+ *
+ * 闩是必须的：每主机队列里往往还压着后续任务（比如页面刚点过一次「全部探测」），
+ * 只杀在飞的那批，队列里下一个立刻就顶上来——退出过程会一直有新 ssh 冒出来，
+ * 最后照样留一批孤儿。
+ */
+export function shutdownSsh() {
+  closed = true;
+  for (const kill of [...inFlight]) kill();
+}
+
+/** 判据用：现在挂着几条。收场后必须归零，否则这张账本就是内存泄漏。 */
+export function liveChildCount() {
+  return inFlight.size;
+}
+
+/**
+ * 抬闩。`server.main()` 开头调一次——同一个进程里关停后又起来的场合（用例装置、
+ * 前台自我重启）不能带着上一轮的闩，否则新 manager 一条远端命令都发不出去。
+ */
+export function reopenSsh() {
+  closed = false;
+}
+
+/**
  * 解析可执行覆盖。允许带前导参数（空格分隔），如
  * DSHC_SSH_BIN="/usr/local/bin/node /path/fake-ssh.js" —— 假远端装置据此让 node 成为
  * 直接子进程，信号（TERM/KILL）才能准确落到垫片上（shebang / sh 包装会丢信号）。
@@ -64,6 +100,12 @@ export function openerBin() {
  */
 function runChild(bin, args, { timeoutMs, signal }) {
   return new Promise((resolve) => {
+    if (closed) {
+      resolve({
+        code: null, signal: null, stdout: '', stderr: 'manager 正在退出，这次远端命令没有发出', timedOut: false, aborted: true,
+      });
+      return;
+    }
     let child;
     try {
       child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -101,12 +143,14 @@ function runChild(bin, args, { timeoutMs, signal }) {
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
     }
+    inFlight.add(killChain);
 
     const finish = (code, sig) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (escalate) clearTimeout(escalate);
+      inFlight.delete(killChain);
       signal?.removeEventListener('abort', onAbort);
       resolve({ code, signal: sig, stdout, stderr, timedOut, aborted });
     };

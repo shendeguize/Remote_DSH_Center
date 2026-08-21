@@ -398,6 +398,10 @@ async function reconnectTick(e) {
     return;
   }
 
+  // 复核那一步是要等远端的，这段等待里 close/closeAll 可能已经过去了（关停、stop）。
+  // 不复查就会在关停之后再 spawn 一条隧道 ssh——没人再来收它，成孤儿（issue #74）。
+  if (e.closed || e.suspendedReason !== null) return;
+
   logEvent(e.host, 'info', `隧道重连尝试 ${e.attempt + 1}`);
   spawnChild(e);
   try {

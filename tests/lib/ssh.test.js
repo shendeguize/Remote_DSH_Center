@@ -11,6 +11,9 @@ import {
   scpTo,
   execFailure,
   hostQueue,
+  shutdownSsh,
+  reopenSsh,
+  liveChildCount,
   _resetQueues,
 } from '../../src/lib/ssh.js';
 
@@ -106,6 +109,52 @@ test('sshExec 通过 AbortSignal 中止', async (t) => {
   const res = await p;
   assert.equal(res.aborted, true);
   assert.equal(res.timedOut, false);
+});
+
+/**
+ * 回归（issue #73）：manager 退出时在飞的一次性 ssh 没人收，被交给 init 成孤儿。
+ * 真机上探测有 ConnectTimeout=6 兜着，拉起/回读那几条能挂十几秒——`dshc restart`
+ * 之后新老两批命令同时打同一台远端，看日志的人只能靠猜。
+ */
+test('shutdownSsh：关停时把在飞的一次性 ssh 一并收走', async (t) => {
+  t.after(() => { delete process.env.DSHC_SSH_BIN; reopenSsh(); });
+  process.env.DSHC_SSH_BIN = SLOW;
+
+  const inFlight = [
+    sshExec('gpu-1', 'sleep', { timeoutMs: 60_000 }),
+    sshExec('gpu-2', 'sleep', { timeoutMs: 60_000 }),
+  ];
+  await new Promise((r) => { setTimeout(r, 200); }); // 等它们真的起来
+  assert.equal(liveChildCount(), 2, '前提：两条 ssh 都在飞');
+
+  shutdownSsh();
+  const res = await Promise.all(inFlight);
+  assert.deepEqual(res.map((r) => r.stdout), ['got-term', 'got-term'], '收的是同一条 TERM→KILL 强杀链');
+  assert.equal(liveChildCount(), 0, '收完不许还挂着');
+
+  // 闩落下之后不许再起新的：每主机队列里往往还压着后续任务（页面刚点过「全部探测」），
+  // 只杀在飞的那批，队列里下一个立刻顶上来——退出过程会一直冒新 ssh，照样留孤儿。
+  const after = await sshExec('gpu-1', 'sleep', { timeoutMs: 60_000 });
+  assert.equal(after.aborted, true, '关停后还敢起新的 ssh');
+  assert.match(after.stderr, /退出/, '要说清是因为在退出，别让调用方以为远端出了问题');
+  assert.equal(liveChildCount(), 0, '压根不该 spawn');
+
+  reopenSsh();
+  const again = await sshExec('gpu-1', 'sleep', { timeoutMs: 300 });
+  assert.equal(again.timedOut, true, '抬闩之后要照常能起（同进程里关停过又起来的场合）');
+});
+
+test('在飞账本：已经收场的不再挂着（不许无限长的账本）', async (t) => {
+  t.after(() => { delete process.env.DSHC_SSH_BIN; });
+  process.env.DSHC_SSH_BIN = ARGV_DUMP;
+
+  for (let i = 0; i < 5; i += 1) {
+    // eslint-disable-next-line no-await-in-loop -- 顺序跑，验的是收场后账本归零
+    await sshExec('gpu-1', 'ls');
+  }
+  assert.equal(liveChildCount(), 0);
+  shutdownSsh(); // 空账本上调也不许抛
+  reopenSsh();
 });
 
 test('sshExec 连不上：code 255 + stderr，execFailure 归类 SSH_UNREACHABLE', async (t) => {

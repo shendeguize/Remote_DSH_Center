@@ -16,6 +16,7 @@ import { DshError, asDshError } from './lib/errors.js';
 import { isMainEntry } from './lib/entry.js';
 import { logEvent } from './lib/bus.js';
 import { checkRequestOrigin } from './lib/origin-guard.js';
+import { reopenSsh, shutdownSsh } from './lib/ssh.js';
 import * as daemon from './daemon.js';
 import * as launcher from './launcher.js';
 import * as monitor from './monitor.js';
@@ -198,6 +199,7 @@ export async function runAutoStart() {
 export async function main({ portOverride = null, skipBoot = false } = {}) {
   runtime.mode = daemon.detectMode();
   runtime.startedAt = new Date().toISOString();
+  reopenSsh(); // 同进程里关停过又起来的场合（用例装置）不能带着上一轮的关停闩
 
   await store.init();
   store.setTunnelStatusProvider(tunnel.status);
@@ -294,6 +296,10 @@ function destroySockets() {
 /** §3.4 的 2–6 步，gracefulExit 与 selfRestart 共用。 */
 async function teardown() {
   monitor.stopLoop();
+  // 在飞的一次性 ssh（探测 / 拉起 / 回读）也要收，且从此不再起新的：不收就是把它们
+  // 交给 init 当孤儿，重启后新老两批命令同时打同一台远端（issue #73）。
+  // 隧道由下面的 closeAll 管。
+  shutdownSsh();
   await tunnel.closeAll();
   store.flushStateSync();
   runtime.handler?.sseHub?.closeAll();
@@ -368,6 +374,7 @@ function installSignalHooks() {
 /** 集成测试用：拆掉服务但不退出进程。 */
 export async function _shutdownForTest() {
   monitor.stopLoop();
+  shutdownSsh(); // 与 teardown 同一条：用例进程里留下的孤儿会跨用例互相干扰
   await tunnel.closeAll();
   runtime.handler?.sseHub?.dispose();
   if (runtime.httpServer) {
