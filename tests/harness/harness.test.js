@@ -482,8 +482,14 @@ test('孤儿看护：装置拥有者进程没了，假 dsh web 自己退（打�
   // 模拟「起垫片的那次运行已经不在了」：把拥有者指向一个确定已死的 pid
   process.env.DSHC_HARNESS_OWNER_PID = String(dead);
 
-  await runLaunchSequence('gpu-1', { port: 0 });
+  // 拉起这一趟成不成不是本条的判据（issue #102）。看护每 500ms 自查一次，而 CI runner
+  // 上一趟拉起就要近 1s——看护完全可能赶在 VERIFY 之前把垫片收走，于是 captureFingerprint
+  // 抛 LAUNCH_FAILED。那恰恰说明看护在工作，此前却让本例本机绿、CI 红。
+  await runLaunchSequence('gpu-1', { port: 0 }).catch((err) => {
+    if (err.code !== 'LAUNCH_FAILED') throw err;
+  });
   const [pid] = Object.keys(h.hostState('gpu-1').processes);
+  assert.ok(pid, '前提：垫片确实被起过（没起过就谈不上「自己退」）');
 
   const gone = await waitGone(Number(pid), 6_000);
   assert.ok(gone, `拥有者 ${dead} 已死，垫片 ${pid} 应自行退出`);

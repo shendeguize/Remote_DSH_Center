@@ -338,7 +338,7 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 远端输出封顶：留尾不留头（超上限时切在正确位置、账本自身不随吐出量增长、恰好等于上限时一个字节不丢、cap≤0 视为不封顶）；600MB 的 stdout/stderr 都不再崩进程、收上来的量封顶、末尾那行标记还在、丢弃量有记账；截断后错误 detail 与日志正文都说明「丢了多少、这是末尾」 | `tests/lib/capture.test.js`、`tests/lib/ssh.test.js` |
 | 有改动时的 Esc：这一记摘掉原生默认动作（否则 CloseWatcher 把刚开的确认框顺手关掉，体感「按了没反应」），框开着时不再插手（否则 Esc 被焊死）；真键盘按下去要「弹框 → 再 Esc 收框 → 草稿还在」 | `tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S4g，判据必须带 `keyCode: 27`，否则只惊动 JS、判不出浏览器那半边） |
 | 安装器参数：不认识的旗标在 `install.sh` 与 `install.mjs` 两侧都退 3 并点名，且不留下半个安装 | `tests/install-sh.test.js` |
-| 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀 | `tests/harness/harness.test.js` |
+| 装置孤儿看护：假 dsh web 在拥有者进程消失后自行退出（运行被 Ctrl-C/SIGKILL 掐断、或收尾里断言抛错都兜住），拥有者健在期间不误杀。判据只认「垫片最后没了」，不预设拉起先成功——看护 500ms 一查，慢机上会赶在 VERIFY 前收走（issue #102） | `tests/harness/harness.test.js` |
 | 装置状态原子落盘：写者狂写时锁外读到的永远是完整状态（残缺会被 `catch` 吞成空状态，伪造出 VERIFY 的「进程已消失」）| `tests/harness/harness.test.js` |
 | 扇出闸：同时在飞不超上限、上限≥任务数/为 0/为负都退化成全并发、结果按入参序、单个抛错不牵连其余且空出的格子接着排、同步抛出也算 rejected；24 台共用跳板机（额度 10）时全量探测不许把好主机探成不可达 | `tests/lib/pool.test.js`、`tests/integration/scale.test.js` |
 | 磁盘写不进：state 落盘失败不抛（定时器里抛 = 进程死）、报一条人话且同因只报一次、内存照旧可用、恢复可写后自己补上并报一声；退出路径 flush 失败也只记不抛且不留半个文件；`dshc up` 遇 pidfile/manager.log 打不开时给人话与常见成因、不吐 Node 栈 | `tests/store.test.js`、`tests/integration/daemon.test.js` |
