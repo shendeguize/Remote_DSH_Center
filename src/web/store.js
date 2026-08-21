@@ -103,6 +103,10 @@ export function createStore(preset = {}) {
     }
     state.connection.resyncing = false;
     state.hostsLoaded = true;
+    // 重连后按快照结算在飞的写操作：它们的 operation-done 帧是在页面失联期间发出的，
+    // 永远不会再来。不结算的话，那一行的按钮要一直禁到动作超时，末了还多弹一条假的
+    // 超时提示——而快照里那台主机明明已经在运行了。
+    for (const host of state.hosts.values()) settleByPhase(host);
     emit('hosts:reset', [...state.hosts.keys()]);
     emit('connection:changed', state.connection);
   };

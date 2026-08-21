@@ -131,6 +131,25 @@ test('pending：202 结算靠 operationId，phase 到终态兜底', () => {
   assert.equal(store.isPending('start', 'a'), false);
 });
 
+test('重连的快照要结算在飞的写操作（operation-done 帧已经错过了）', () => {
+  const store = createStore();
+  store.applySnapshot({ revision: 1, hosts: [hostView('a', { phase: 'ready' })], logs: [] });
+
+  store.beginPending({ action: 'start', host: 'a' });
+  store.acceptPending(pendingKey('start', 'a'), 'op-1');
+  assert.equal(store.hostBusy('a'), true, '前提：那一行正忙');
+
+  // 失联期间动作在后端完成了：operation-done 发过、页面没收到，重连只剩这份快照
+  store.applySnapshot({ revision: 9, hosts: [hostView('a', { phase: 'running' })], logs: [] });
+  assert.equal(store.isPending('start', 'a'), false, '快照说已经在运行了，按钮不该继续禁着');
+  assert.equal(store.hostBusy('a'), false);
+
+  // 真还在半路的（starting）不许提前解锁
+  store.beginPending({ action: 'start', host: 'a' });
+  store.applySnapshot({ revision: 10, hosts: [hostView('a', { phase: 'starting' })], logs: [] });
+  assert.equal(store.isPending('start', 'a'), true, 'starting 是中间态，动作可能真还在飞');
+});
+
 test('pending 超时只解 loading，不改 phase', async () => {
   const store = createStore();
   store.applySnapshot({ revision: 1, hosts: [hostView('a', { phase: 'ready' })], logs: [] });

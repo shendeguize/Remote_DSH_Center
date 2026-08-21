@@ -196,6 +196,7 @@
 | 事件面板：按主机筛选、折叠（`hidden` + `aria-expanded`）、清空、以及单条 `host-changed` 带来的新主机要进筛选下拉（此前只订 `hosts:reset`，缺这台） | `tests/web/mount.test.js` |
 | 向导换步带住焦点：前进/后退都落在新步骤标题，同一步内输入时不被标题夺走，收尾后落在管理台标题（真机四跳全部复验过） | `tests/web/setup-mount.test.js` |
 | 菜单方向键真的换项（首项 → ArrowDown → End → Home），选完一项还焦到标签；外加静态闸门禁止前端把 `querySelectorAll` 结果当数组使——这类差异被垫片永久掩盖，单测判不出来 | S6、`tests/web/a11y.test.js`、`tests/architecture.test.js` |
+| 重连的快照结算在飞写操作：已 running 的快照解锁按钮，`starting` 的快照不解锁；恢复本身（横幅消失、写操作解禁、快照回灌）另有真浏览器场景 | `tests/web/store.test.js`、S9b |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

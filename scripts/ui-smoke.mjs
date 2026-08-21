@@ -154,6 +154,10 @@ async function bootManager(hostNames) {
     async shutdown() {
       await server._shutdownForTest();
     },
+    /** 原端口把 manager 拉回来——断线恢复那半边只有这样才验得到。 */
+    async reboot() {
+      await server.main({ portOverride: booted.port });
+    },
     cleanup() {
       harness.cleanup();
       restoreEnv();
@@ -693,6 +697,14 @@ async function main() {
 
     await check('S9', 'manager 掉线：横幅出现且写按钮禁用；期间不堆连接', async () => {
       const before = responses.filter((r) => r.url.endsWith('/api/events')).length;
+      // 掐线前先按下一次写操作，让断线发生在「有动作在飞」的真实时刻，
+      // 而不是页面闲着的时候（判据不靠它，见 S9b 的说明）。
+      await cdp.eval(`
+        const tr = document.querySelector('.host-table tbody tr');
+        [...tr.querySelectorAll('button')].find((b) => b.dataset.act === 'start')?.click();
+        return true;
+      `);
+      await sleep(300);
       await rig.shutdown();
       await cdp.waitFor("!document.querySelector('.disconnect-banner').hidden", '断线横幅出现', { timeoutMs: 20_000 });
       const state = await cdp.eval(`
@@ -711,6 +723,28 @@ async function main() {
       assert(after - before <= 4, `3s 内 /api/events 新增 ${after - before} 次，疑似自建重连风暴`);
       await screenshot(cdp, 'offline-banner');
       return `「${state.banner}」`;
+    });
+
+    await check('S9b', 'manager 回来：横幅消失、写操作解禁、快照回灌', async () => {
+      // 这条只守「恢复」这条路本身通不通（此前从没在真浏览器里跑过）。
+      // 「重连后按快照结算在飞的写操作」由 tests/web/store.test.js 守：那半边在这里
+      // 判不出来——重连后紧跟着的 host-changed 帧同样会把 pending 结算掉，
+      // 摘掉修复它也绿。判不出来的东西就别在标题里认领。
+      await rig.reboot();
+      await cdp.waitFor("document.querySelector('.disconnect-banner').hidden", '横幅消失', { timeoutMs: 30_000 });
+      await sleep(500);
+      const back = await cdp.eval(`
+        const row = document.querySelector('.host-table tbody tr');
+        return {
+          headerWritable: [...document.querySelectorAll('.header-actions .btn')].some((b) => !b.disabled),
+          rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
+          rows: document.querySelectorAll('.host-table tbody tr').length,
+        };
+      `);
+      assert(back.headerWritable, '恢复后 header 写按钮还禁着');
+      assert(back.rowWritable, '恢复后行内写按钮还禁着');
+      assert(back.rows >= 1, `恢复后表里只有 ${back.rows} 行，快照没回灌`);
+      return '横幅消失且写操作恢复';
     });
   } finally {
     cdp.close();
