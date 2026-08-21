@@ -18,7 +18,7 @@ import { parseVersion } from '../src/lib/semver.js';
 import { PACK_RULES, selectStages, summarize, verifyPackFiles } from '../scripts/check.mjs';
 import {
   NODE_RUNTIME_VERSION, makeBundleInfo, nodeDistUrl, nodeShasumsUrl, nodeTarballName,
-  packFileList, shimScript,
+  packFileList, resolveBuildVersion, shimScript,
 } from '../scripts/build-bundle.mjs';
 import { linkPlan, linkTarget, pathHint, prefixInPath } from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
@@ -360,6 +360,26 @@ test('evaluateGuards：预发布不要求打在 release HEAD 上，但仍要求�
   // 反面：同样的 sha 错位，正式版必须红——别把豁免误伤到正式版上
   const asFinal = evaluateGuards({ ...rc, tag: 'v0.2.0', pkgVersion: '0.2.0', changelog: '## [0.2.0]\n\n- 正式\n' });
   assert.match(asFinal.problems.join(''), /正式版 tag 只许打在 release HEAD 上/);
+});
+
+/**
+ * 回归（先红后绿）：rc.2 的验收里拿 `--version 0.1.9` 造旧包（package.json 当时是
+ * 0.2.0-rc.2），装上后 `dshc version` 一行说 0.2.0-rc.2、一行说 v0.1.9——包里两处
+ * 版本源对不上，拿到包的人无从判断自己装的是什么。
+ */
+test('resolveBuildVersion：版本只有一个源，点名不同的版本要拦住', () => {
+  assert.equal(resolveBuildVersion({ requested: null, pkgVersion: '0.2.0-rc.2' }), '0.2.0-rc.2');
+  assert.equal(
+    resolveBuildVersion({ requested: '0.2.0-rc.2', pkgVersion: '0.2.0-rc.2' }), '0.2.0-rc.2',
+    '复述同一个版本号是允许的（当核对用）',
+  );
+  assert.throws(
+    () => resolveBuildVersion({ requested: '0.1.9', pkgVersion: '0.2.0-rc.2' }),
+    /与 package\.json 的 0\.2\.0-rc\.2 不一致/,
+    '这正是造出自相矛盾的包的那条路',
+  );
+  assert.throws(() => resolveBuildVersion({ requested: 'v0.1', pkgVersion: '0.2.0' }), /形状不对/);
+  assert.throws(() => resolveBuildVersion({ requested: null, pkgVersion: 'nope' }), /package\.json 的版本号形状不对/);
 });
 
 /**

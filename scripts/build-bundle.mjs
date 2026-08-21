@@ -23,6 +23,7 @@
  *   node scripts/build-bundle.mjs                        # 双架构，产物进 dist/
  *   node scripts/build-bundle.mjs --arch arm64
  *   node scripts/build-bundle.mjs --out /tmp/x --node-cache ~/.cache/dshc-node
+ *   node scripts/build-bundle.mjs --version 0.2.0        # 只作核对：必须与 package.json 相同
  */
 
 import fs from 'node:fs';
@@ -230,6 +231,33 @@ async function buildOne({
   return [asset, sha256(bytes)];
 }
 
+/**
+ * 要打的版本号。
+ *
+ * 包里有两处版本：`BUNDLE_INFO.json`（构建时写）与 `app/package.json`（照原样拷）。
+ * 它们必须是同一个数——`dshc version` 的「版本」读前者、「安装通道」读后者，
+ * 对不上的话输出自相矛盾（实测过：一个说 0.2.0-rc.2，另一个说 v0.1.9），
+ * 而拿到这种包的人无从判断自己装的到底是什么。所以 `--version` 只许**复述**
+ * package.json 的值（当核对用），要打别的版本就去改 package.json。
+ *
+ * @param {{requested:string|null, pkgVersion:string}} input
+ * @returns {string}
+ * @throws {Error} 形状不对，或点名了与 package.json 不同的版本
+ */
+export function resolveBuildVersion({ requested, pkgVersion }) {
+  if (!parseVersion(pkgVersion)) throw new Error(`package.json 的版本号形状不对：${pkgVersion}`);
+  if (requested === null || requested === undefined) return pkgVersion;
+  if (!parseVersion(requested)) throw new Error(`版本号形状不对：${requested}`);
+  if (requested !== pkgVersion) {
+    throw new Error(
+      `点名的 ${requested} 与 package.json 的 ${pkgVersion} 不一致。\n`
+      + '  发布包里的版本只有一个源（package.json）：BUNDLE_INFO.json 与 app/package.json\n'
+      + '  对不上时 dshc version 会自相矛盾。要打别的版本，改 package.json。',
+    );
+  }
+  return requested;
+}
+
 function arg(argv, name, fallback = null) {
   const i = argv.indexOf(`--${name}`);
   return i === -1 ? fallback : argv[i + 1];
@@ -238,8 +266,7 @@ function arg(argv, name, fallback = null) {
 async function main() {
   const argv = process.argv.slice(2);
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
-  const version = arg(argv, 'version', pkg.version);
-  if (!parseVersion(version)) throw new Error(`版本号形状不对：${version}`);
+  const version = resolveBuildVersion({ requested: arg(argv, 'version'), pkgVersion: pkg.version });
 
   const arches = (arg(argv, 'arch') ?? SUPPORTED_ARCHES.join(',')).split(',').map((a) => a.trim()).filter(Boolean);
   const bad = arches.filter((a) => !SUPPORTED_ARCHES.includes(a));
