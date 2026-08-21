@@ -9,6 +9,8 @@ import {
   emitConfigChanged,
   emitOperationDone,
   LOG_BUFFER_CAPACITY,
+  LOG_DETAIL_MAX_CHARS,
+  LOG_LINE_MAX_CHARS,
   _resetForTest,
 } from '../../src/lib/bus.js';
 
@@ -113,4 +115,37 @@ test('日志级别决定 console 通道（进 manager.log）', (t) => {
   assert.equal(spyW.mock.callCount(), 1);
   assert.equal(spyE.mock.callCount(), 1);
   assert.match(spyE.mock.calls[0].arguments[0], /ERROR \[h\] e/);
+});
+
+test('单条巨行按字节截断，msg 与 detail 都不许原样留着', (t) => {
+  t.mock.method(console, 'log', () => {});
+  // 远端打一条 8MB 的行（base64 blob、一整坨 JSON、带 traceback 的堆栈都长这样）。
+  // 环形缓冲只按条数限长（200 条），不看字节数——200 × 8MB 在账面上完全合规。
+  const huge = 'y'.repeat(8 * 1024 * 1024);
+  const entry = logEvent('gpu-1', 'info', huge, huge);
+
+  assert.ok(entry.msg.length <= LOG_LINE_MAX_CHARS + 64, `msg 没截断（${entry.msg.length} 字符）`);
+  assert.match(entry.msg, /截断/, '截断处要留个说明，否则读的人不知道后面还有');
+  assert.match(entry.msg, /8[.,\d]*\s*MB|8388608/, '说明里要交代原本多长');
+  assert.ok(entry.detail.length <= LOG_DETAIL_MAX_CHARS + 64, `detail 没截断（${entry.detail.length} 字符）`);
+  assert.equal(entry.msg.startsWith('yyy'), true, '截断要保留开头，不能整条丢掉');
+});
+
+test('正常长度的行一个字都不动', (t) => {
+  t.mock.method(console, 'log', () => {});
+  const msg = '已启动 pid=12345 远端端口=8899 本机端口=17701';
+  const detail = 'ssh: 一段几百字的 stderr\n第二行\n第三行';
+  const entry = logEvent('gpu-1', 'info', msg, detail);
+  assert.equal(entry.msg, msg);
+  assert.equal(entry.detail, detail);
+});
+
+test('20 条巨行不许把内存顶上去（截断的真实效果）', (t) => {
+  t.mock.method(console, 'log', () => {});
+  const before = process.memoryUsage().heapUsed;
+  const huge = 'y'.repeat(8 * 1024 * 1024);
+  for (let i = 0; i < 20; i += 1) logEvent('gpu-1', 'info', huge, huge);
+  const grew = (process.memoryUsage().heapUsed - before) / 1e6;
+  // 截断前实测：20 条 8MB（共 160MB）让堆从 9MB 涨到 176MB
+  assert.ok(grew < 20, `缓冲里留下了 ${Math.round(grew)}MB，说明巨行原样存着`);
 });

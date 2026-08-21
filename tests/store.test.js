@@ -144,6 +144,50 @@ test('updateConfig 校验失败 → 放弃写入，内存与磁盘均不变', as
   assert.equal(JSON.parse(fs.readFileSync(paths.config, 'utf8')).manager.port, 7788);
 });
 
+test('updateConfig 写盘失败 → 内存也不许动，且给人话（校验过了但盘写不进去）', async (t) => {
+  const { paths, dir } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  // 目录只读：原子写的 open(tmp) 必失败。磁盘满、卷被卸载是同一类。
+  fs.chmodSync(dir, 0o500);
+
+  assert.throws(
+    () => store.updateConfig((d) => { d.defaults.remoteWebPort = 9001; }),
+    (e) => {
+      assert.equal(e.code, 'CONFIG_WRITE_FAILED', `code 该是 CONFIG_WRITE_FAILED，实得 ${e.code}`);
+      assert.doesNotMatch(e.message, /EACCES|ENOSPC/, 'message 是给人看的，别把 fs 的原始错误当 message');
+      assert.doesNotMatch(e.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'message 里别带内部绝对路径');
+      assert.match(e.detail ?? '', /EACCES/, '原始错误该留在 detail 里');
+      return true;
+    },
+  );
+
+  // 关键：写盘没成功，内存就不许换。否则跑着的 manager 用新值、重启后静默回退旧值。
+  fs.chmodSync(dir, 0o700);
+  assert.equal(store.getConfig().defaults.remoteWebPort, 8899, '写盘失败了，内存却已经换成新值');
+  assert.equal(JSON.parse(fs.readFileSync(paths.config, 'utf8')).defaults.remoteWebPort, 8899);
+
+  // 权限恢复后照常能写
+  store.updateConfig((d) => { d.defaults.remoteWebPort = 9002; });
+  assert.equal(store.getConfig().defaults.remoteWebPort, 9002);
+  assert.equal(JSON.parse(fs.readFileSync(paths.config, 'utf8')).defaults.remoteWebPort, 9002);
+});
+
+test('写盘失败不发事件（没生效的东西不许通知出去）', async (t) => {
+  const { paths, dir } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+
+  const seen = [];
+  const on = (e) => seen.push(e);
+  bus.on('config-changed', on);
+  t.after(() => bus.off('config-changed', on));
+
+  fs.chmodSync(dir, 0o500);
+  assert.throws(() => store.updateConfig((d) => { d.defaults.remoteWebPort = 9001; }));
+  fs.chmodSync(dir, 0o700); // 早点还回来，免得 fixture 清理目录时被自己锁在外面
+  assert.deepEqual(seen, [], '写都没写进去，却已经广播「配置变了」');
+});
+
 test('getConfig 返回深冻结快照', async (t) => {
   const { paths } = fixture(t, { config: fullConfig() });
   await store.init({ pathsOverride: paths });

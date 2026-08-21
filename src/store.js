@@ -87,8 +87,23 @@ export function flushStateSync() {
   atomicWrite(paths.state, serializeState());
 }
 
+/**
+ * 把一份配置落盘。失败一律翻译成 DshError——fs 的原始错误（`EACCES: permission denied,
+ * open '/Users/.../config.json.tmp.123'`）当 message 端给用户既看不懂，又把内部路径抖出去。
+ */
+function writeConfig(next) {
+  try {
+    atomicWrite(paths.config, `${JSON.stringify(next, null, 2)}\n`);
+  } catch (err) {
+    throw new DshError('CONFIG_WRITE_FAILED', '配置没能写入磁盘，本次修改已放弃', {
+      detail: `${err.code ?? ''} ${err.message}`.trim(),
+      cause: err,
+    });
+  }
+}
+
 function writeConfigNow() {
-  atomicWrite(paths.config, `${JSON.stringify(config, null, 2)}\n`);
+  writeConfig(config);
 }
 
 // ── configVersion 迁移器（§4.4） ─────────────────────────────────────────
@@ -277,8 +292,11 @@ export function updateConfig(mutator) {
     throw new DshError('VALIDATION', '配置修改后校验失败，已放弃本次写入', { detail: errors.join('\n') });
   }
 
+  // 先落盘、成了才换内存。反过来写的后果是：盘写失败（目录只读、磁盘满、卷被卸载）时
+  // 请求报 500、用户以为没生效，可跑着的 manager 已经在用新值，重启后又从盘上读回旧值
+  // 静默回退——同一时刻三种说法。
+  writeConfig(draft);
   config = draft;
-  writeConfigNow();
 
   const changed = diffPaths(before, draft);
   const touchedHosts = new Set();

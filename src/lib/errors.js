@@ -22,6 +22,8 @@ export const ERROR_HTTP_STATUS = Object.freeze({
   TUNNEL_FORWARD_DISABLED: 500,
   TUNNEL_PORT_BUSY: 500,
   STATE_ILLEGAL_TRANSITION: 500,
+  // 配置落盘失败（目录只读 / 磁盘满 / 卷被卸载）：改动整份放弃，内存不动
+  CONFIG_WRITE_FAILED: 500,
   INTERNAL: 500,
 });
 

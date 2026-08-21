@@ -11,6 +11,31 @@ bus.setMaxListeners(50);
 
 const LOG_BUFFER_CAPACITY = 200;
 
+/**
+ * 单条日志的字数上限。环形缓冲只按条数限长，不看字节数——「200 条」这个额度对
+ * 「每条 8MB」毫无约束：远端打几条巨行（base64 blob、一整坨 JSON、带 traceback 的堆栈）
+ * 就能把常驻的 manager 顶上去，实测 20 条 8MB 让堆从 9MB 涨到 176MB。SSE 那边还要
+ * 把每条原样推给每个页面、页面再塞进 DOM。
+ *
+ * msg 本来就只是单行摘要，detail 是排障现场——都不需要无限长。
+ */
+const LOG_LINE_MAX_CHARS = 2_000;
+const LOG_DETAIL_MAX_CHARS = 16_384;
+
+/** 给截断标记用的人话长度。 */
+function humanLen(chars) {
+  if (chars >= 1_048_576) return `${(chars / 1_048_576).toFixed(1)}MB`;
+  if (chars >= 1_024) return `${(chars / 1_024).toFixed(1)}KB`;
+  return `${chars} 字`;
+}
+
+/** 超长就切开头，并说清原本多长——读的人得知道后面还有东西。 */
+function clip(text, max) {
+  const s = String(text);
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}…（已截断，原文 ${humanLen(s.length)}）`;
+}
+
 /** @type {{host:string|null, level:'info'|'warn'|'error', msg:string, ts:string, detail:string|null}[]} */
 const logBuffer = [];
 
@@ -34,12 +59,13 @@ export function emitHostChanged(name) {
  * 同时 console 输出一份进 manager.log。
  */
 export function logEvent(host, level, msg, detail = null) {
+  // 先截断再折行：对一条 8MB 的串跑正则本身就是笔开销，而结果反正只留开头
   const entry = {
     host: host ?? null,
     level,
-    msg: String(msg).replace(/\s*\n\s*/g, ' ').trim(),
+    msg: clip(msg, LOG_LINE_MAX_CHARS).replace(/\s*\n\s*/g, ' ').trim(),
     ts: new Date().toISOString(),
-    detail: detail ?? null,
+    detail: detail === null || detail === undefined ? null : clip(detail, LOG_DETAIL_MAX_CHARS),
   };
   logBuffer.push(entry);
   if (logBuffer.length > LOG_BUFFER_CAPACITY) logBuffer.shift();
@@ -80,4 +106,4 @@ export function _resetForTest() {
   bus.removeAllListeners();
 }
 
-export { LOG_BUFFER_CAPACITY };
+export { LOG_BUFFER_CAPACITY, LOG_DETAIL_MAX_CHARS, LOG_LINE_MAX_CHARS };
