@@ -313,3 +313,49 @@ test('目录写不进时 dshc up 给人话不给栈（issue #87）', async (t) =
   assert.match(all, /写不进|不可写|没法启动/, `要说清是写不进去：${all}`);
   assert.match(all, /磁盘满|只读|属主/, '要给出常见成因，否则用户无从下手');
 });
+
+test('关停宽限期用单调钟：墙钟往回拨也不让 dshc down 挂住（issue #104）', async (t) => {
+  const { harness } = await isolate(t);
+  const port = await freePort();
+
+  // 一个赖着不走的 manager：应 /api/manager/info（aliveCheck 要双验证），吞掉 SIGTERM
+  const stubborn = spawn(process.execPath, ['-e', `
+    const http = require('node:http');
+    process.on('SIGTERM', () => {});
+    http.createServer((q, s) => {
+      s.writeHead(200, { 'content-type': 'application/json' });
+      s.end(JSON.stringify({ pid: process.pid, port: ${port} }));
+    }).listen(${port}, '127.0.0.1');
+  `], { env: { ...process.env, ...harness.env }, stdio: 'ignore' });
+  t.after(() => { try { process.kill(stubborn.pid, 'SIGKILL'); } catch { /* 已退 */ } });
+
+  daemon.writePidfile({
+    pid: stubborn.pid, port, mode: 'background', startedAt: new Date().toISOString(),
+  });
+  // 等它把监听建起来，否则 aliveCheck 判 stale 直接短路掉宽限期
+  for (let i = 0; i < 50 && !(await daemon.aliveCheck()).alive; i += 1) {
+    await new Promise((r) => { setTimeout(r, 100); });
+  }
+  assert.equal((await daemon.aliveCheck()).alive, true, '前提：赖着的 manager 已可判活');
+
+  const GRACE_MS = 1_000;
+  const JUMP_BACK_MS = 6_000;
+  const real = Date.now;
+  const jump = setTimeout(() => {
+    t.mock.method(Date, 'now', () => real.call(Date) - JUMP_BACK_MS);
+  }, 200);
+  jump.unref?.();
+
+  const t0 = performance.now();
+  const res = await daemon.stopDaemon({ graceMs: GRACE_MS });
+  const took = performance.now() - t0;
+  clearTimeout(jump);
+
+  assert.equal(res.stopped, true);
+  assert.equal(res.forced, true, 'SIGTERM 无效就该补 SIGKILL');
+  assert.equal(alive(stubborn.pid), false, '补刀之后进程必须没了');
+  assert.ok(
+    took < GRACE_MS + 1_500,
+    `宽限期 ${GRACE_MS}ms 却等了 ${Math.round(took)}ms——墙钟回拨 ${JUMP_BACK_MS}ms 把上界一起拖走了`,
+  );
+});

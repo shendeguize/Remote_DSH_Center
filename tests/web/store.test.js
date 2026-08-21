@@ -70,7 +70,7 @@ test('host-changed 丢弃旧 revision，接受新 revision', () => {
 
 test('mergeFetchedHosts 不覆盖请求发出后到达的 SSE 版本（10 §4.4 第 3 点）', () => {
   const store = createStore();
-  const startedAt = Date.now() - 1_000;
+  const startedAt = performance.now() - 1_000; // 与 __receivedAt 同一把尺（单调钟，#104）
 
   // SSE 先到（接收时刻晚于 GET 发出时刻）
   store.applyHostChanged({ revision: 1, host: hostView('a', { phase: 'running' }) });
@@ -79,6 +79,22 @@ test('mergeFetchedHosts 不覆盖请求发出后到达的 SSE 版本（10 §4.4 
 
   assert.equal(store.getHost('a').phase, 'running', 'SSE 版本更新，不能被旧 GET 覆盖');
   assert.equal(store.getHost('b').phase, 'unknown', '未知主机照常补入');
+});
+
+test('接收时刻跨墙钟跳变仍可比先后（issue #104）', (t) => {
+  // mergeFetchedHosts 靠 __receivedAt 与请求发出时刻比大小来决定「谁更新」。这把尺
+  // 一旦是墙钟，请求在途期间的一次校时（休眠唤醒后的 NTP 步进）就能把先后判反，
+  // 让陈旧的 GET 盖掉刚到的 SSE 快照。
+  const store = createStore();
+  store.applyHostChanged({ revision: 1, host: hostView('a', { phase: 'ready' }) });
+
+  const real = Date.now;
+  t.mock.method(Date, 'now', () => real.call(Date) - 3_600_000); // 墙钟往回拨一小时
+  store.applyHostChanged({ revision: 2, host: hostView('b', { phase: 'running' }) });
+
+  const first = store.getHost('a').__receivedAt;
+  const second = store.getHost('b').__receivedAt;
+  assert.ok(second >= first, `后到的快照时刻不该更早：${first} → ${second}`);
 });
 
 test('事件缓冲为环形，上限 50', () => {

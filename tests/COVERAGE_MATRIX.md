@@ -342,4 +342,5 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 装置状态原子落盘：写者狂写时锁外读到的永远是完整状态（残缺会被 `catch` 吞成空状态，伪造出 VERIFY 的「进程已消失」）| `tests/harness/harness.test.js` |
 | 扇出闸：同时在飞不超上限、上限≥任务数/为 0/为负都退化成全并发、结果按入参序、单个抛错不牵连其余且空出的格子接着排、同步抛出也算 rejected；24 台共用跳板机（额度 10）时全量探测不许把好主机探成不可达 | `tests/lib/pool.test.js`、`tests/integration/scale.test.js` |
 | 磁盘写不进：state 落盘失败不抛（定时器里抛 = 进程死）、报一条人话且同因只报一次、内存照旧可用、恢复可写后自己补上并报一声；退出路径 flush 失败也只记不抛且不留半个文件；`dshc up` 遇 pidfile/manager.log 打不开时给人话与常见成因、不吐 Node 栈 | `tests/store.test.js`、`tests/integration/daemon.test.js` |
+| 单调钟：墙钟被换成 0 / 回拨一小时都不倒退、量的是真实流逝；`dshc down` 的宽限期遇墙钟回拨 6s 仍在 1s 上界内补 SIGKILL（此前被拖成 7.3s）；页面上后到的快照时刻不因跳变判反先后；静态闸门：后端源码里 `Date.now()` 只许留在就地标注「墙钟」的展示位 | `tests/lib/clock.test.js`、`tests/integration/daemon.test.js`、`tests/web/store.test.js`、`tests/architecture.test.js` |
 | 请求体超限：超一点点先读完再回 400（人话 + VALIDATION，值一个字节都不落盘）、灌超大体时掐链但 manager 照常服务；目录穿越的多种编码形态（`..%2f`、`%2e%2e`、`.%2e`、`....//`、后缀式）一律 403/404 且不漏内容 | `tests/integration/security.test.js`、`tests/integration/static.test.js` |

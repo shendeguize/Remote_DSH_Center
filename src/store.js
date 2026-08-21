@@ -266,7 +266,7 @@ function loadStateFile() {
   try {
     raw = JSON.parse(text);
   } catch {
-    const backup = `${paths.state}.corrupt.${Date.now()}`;
+    const backup = `${paths.state}.corrupt.${Date.now()}`; // 墙钟：备份文件名要给人看
     try {
       fs.renameSync(paths.state, backup);
     } catch {

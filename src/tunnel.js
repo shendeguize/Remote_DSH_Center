@@ -16,6 +16,7 @@ import { buildVerifyScript, kvOne, parseProtoOutput } from './lib/proto.js';
 import { createGate } from './lib/pool.js';
 import { assertSafeHost } from './lib/shq.js';
 import { TUNNEL_SSH_OPTS, execFailure, hostQueue, sshBin, sshExec } from './lib/ssh.js';
+import { monotonicMs } from './lib/clock.js';
 import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
 
@@ -147,7 +148,7 @@ function spawnChild(e) {
 /** 运行中 stderr：既累积尾部供退出分类，又按 §5.3 修正统计转发被拒次数。 */
 function onStderr(e, chunk) {
   e.stderrTail = (e.stderrTail + chunk).slice(-TUNNEL_TIMING.stderrTailBytes);
-  const now = Date.now();
+  const now = monotonicMs(); // 窗口是「过了多久」，不能用墙钟（issue #104）
   for (const line of String(chunk).split('\n')) {
     if (line.trim() === '' || !isForwardDeniedLine(line)) continue;
     e.denyStamps.push(now);
@@ -216,7 +217,7 @@ export function probeForward(port, timeoutMs = TUNNEL_TIMING.connectProbeMs) {
  */
 async function waitReady(e) {
   e.readyPending = true;
-  const deadline = Date.now() + TUNNEL_TIMING.readyTimeoutMs;
+  const deadline = monotonicMs() + TUNNEL_TIMING.readyTimeoutMs;
   try {
     for (;;) {
       if (e.child === null) {
@@ -228,7 +229,7 @@ async function waitReady(e) {
         e.connected = true;
         return;
       }
-      if (Date.now() >= deadline) {
+      if (monotonicMs() >= deadline) {
         e.killedByUs = true;
         killChild(e);
         throw new DshError('INTERNAL', `隧道 ${TUNNEL_TIMING.readyTimeoutMs}ms 内未就绪（${e.host}）`, {

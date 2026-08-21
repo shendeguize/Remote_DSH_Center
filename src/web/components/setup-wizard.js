@@ -222,7 +222,7 @@ export function createSetupWizard({
     ui.discovered = true;
     try {
       const res = await api.hosts();
-      store.mergeFetchedHosts(res.hosts, res.revision, Date.now());
+      store.mergeFetchedHosts(res.hosts, res.revision, performance.now());
       ui.selection = syncSelectionWithHosts(ui.selection, store.listHosts());
       render();
     } catch (err) {
@@ -576,8 +576,8 @@ export function createSetupWizard({
   async function pollMigration(target) {
     ui.migration = { target, stopped: false };
     render();
-    const startedAt = Date.now();
-    for (let i = 0; Date.now() - startedAt < MIGRATION_BUDGET_MS; i += 1) {
+    const startedAt = performance.now(); // 单调钟：预算是「过了多久」（#104）
+    for (let i = 0; performance.now() - startedAt < MIGRATION_BUDGET_MS; i += 1) {
       // eslint-disable-next-line no-await-in-loop -- 递增间隔的顺序探测
       await sleep(MIGRATION_DELAYS[Math.min(i, MIGRATION_DELAYS.length - 1)]);
       // eslint-disable-next-line no-await-in-loop -- 同上

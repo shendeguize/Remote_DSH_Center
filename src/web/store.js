@@ -79,7 +79,11 @@ export function createStore(preset = {}) {
 
   // ── hosts ─────────────────────────────────────────────────────────────
 
-  /** GET /api/hosts 的兜底路径：不覆盖发出请求后到达的更新（10 §4.4 第 3 点）。 */
+  /**
+   * GET /api/hosts 的兜底路径：不覆盖发出请求后到达的更新（10 §4.4 第 3 点）。
+   * @param {number} requestStartedAt 必须是 `performance.now()` 的值——这里要跟
+   *   `__receivedAt` 比先后，两边得是同一把尺，且不能被墙钟跳变搅乱（issue #104）
+   */
   const mergeFetchedHosts = (hosts, revision, requestStartedAt) => {
     for (const host of hosts) {
       const known = state.hosts.get(host.name);
@@ -304,7 +308,7 @@ export function createStore(preset = {}) {
 
 /** 记录本地接收时刻：GET 兜底与 SSE 竞速时用它判新旧（10 §4.4）。 */
 function stamp(host) {
-  return { ...host, __receivedAt: Date.now() };
+  return { ...host, __receivedAt: performance.now() }; // 单调钟：只与 requestStartedAt 比先后（#104）
 }
 
 let eventSeq = 0;

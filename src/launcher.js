@@ -135,7 +135,7 @@ export async function tailRemoteLog(host, { logName, lines = 200 }, { signal } =
 
 /** 降级拉起的日志名 token：与 pid 同等唯一，且重定向目标必须在拿到 PID 之前确定。 */
 export function launchToken() {
-  return Date.now().toString(36);
+  return Date.now().toString(36); // 墙钟：当唯一 token 用，不参与任何流逝判断
 }
 
 export function fixedLogName(port) {

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { LAUNCHD_LABEL, resolvePaths } from './defaults.js';
 import { DshError } from './lib/errors.js';
+import { monotonicMs } from './lib/clock.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const SERVER_ENTRY = path.join(HERE, 'server.js');
@@ -168,10 +169,10 @@ export async function launchDetached({
   child.unref();
   fs.closeSync(fd);
 
-  const deadline = Date.now() + waitMs;
+  const deadline = monotonicMs() + waitMs;
   let confirmed = false;
   let seenPort = port;
-  while (Date.now() < deadline) {
+  while (monotonicMs() < deadline) {
     // eslint-disable-next-line no-await-in-loop -- 就绪轮询
     await sleep(200);
     const info = readPidfile();
@@ -199,8 +200,8 @@ async function reap(pid, { graceMs = 1_000 } = {}) {
   } catch {
     return false; // 竞态：刚好退了
   }
-  const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && processAlive(pid)) {
+  const deadline = monotonicMs() + graceMs;
+  while (monotonicMs() < deadline && processAlive(pid)) {
     // eslint-disable-next-line no-await-in-loop -- 等它落幕
     await sleep(50);
   }
@@ -245,8 +246,8 @@ export async function stopDaemon({ graceMs = 3_000 } = {}) {
     // 竞态：刚好退出
   }
 
-  const deadline = Date.now() + graceMs;
-  while (Date.now() < deadline && processAlive(pid)) {
+  const deadline = monotonicMs() + graceMs;
+  while (monotonicMs() < deadline && processAlive(pid)) {
     // eslint-disable-next-line no-await-in-loop -- 等待退出
     await sleep(100);
   }

@@ -123,6 +123,25 @@ test('零 npm 依赖：不引任何裸包名', () => {
   }
 });
 
+test('后端不拿墙钟算流逝：Date.now() 只许留在标注了「墙钟」的展示位（issue #104）', () => {
+  // 墙钟会跳（NTP 步进校时、休眠唤醒、改时间、双启动写坏 RTC），拿它算上界等于没有上界：
+  // 一次 60s 回拨就能把「8s 未就绪」拖成 68s。凡是「过了多久 / 还剩多久」都得用
+  // src/lib/clock.js 的单调钟；剩下的展示位（时间戳、文件名、token）必须就地标注，
+  // 否则下一个 `deadline = Date.now() + x` 会悄悄溜回来。
+  const offenders = [];
+  for (const file of files) {
+    const r = rel(file);
+    if (r.startsWith('src/web/') || r === 'src/lib/clock.js') continue;
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (!line.includes('Date.now()')) return;
+      if (line.includes('墙钟')) return;
+      offenders.push(`${r}:${i + 1} ${line.trim()}`);
+    });
+  }
+  assert.deepEqual(offenders, [], `拿墙钟算流逝，或忘了标注为展示位：\n${offenders.join('\n')}`);
+});
+
 test('defaults.js 保持零依赖：lib 引它才成立', () => {
   assert.deepEqual(importsOf(path.join(SRC, 'defaults.js')).filter((s) => s.startsWith('.')), []);
 });

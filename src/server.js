@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { FACTORY_DEFAULTS, SSH_FANOUT_LIMIT, resolvePaths } from './defaults.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { isMainEntry } from './lib/entry.js';
+import { monotonicMs } from './lib/clock.js';
 import { logEvent } from './lib/bus.js';
 import { trimLogFile } from './lib/logfile.js';
 import { checkRequestOrigin } from './lib/origin-guard.js';
@@ -62,6 +63,8 @@ export const runtime = {
   mode: 'foreground',
   port: null,
   startedAt: null,
+  /** 单调钟基准：uptime 是流逝量，墙钟一跳就会算出负数（#104） */
+  startedAtMono: null,
   setupGate: false,
   shuttingDown: false,
   /** @type {NodeJS.Timeout|null} */
@@ -102,7 +105,7 @@ function buildManagerCtl() {
         port: runtime.port,
         mode: runtime.mode,
         startedAt: runtime.startedAt,
-        uptimeMs: runtime.startedAt ? Date.now() - Date.parse(runtime.startedAt) : 0,
+        uptimeMs: runtime.startedAtMono === null ? 0 : Math.round(monotonicMs() - runtime.startedAtMono),
         setupCompleted: store.isSetupCompleted(),
         setupGateActive: runtime.setupGate,
         hostCounts: store.hostCounts(),
@@ -204,6 +207,7 @@ export async function runAutoStart() {
 export async function main({ portOverride = null, skipBoot = false } = {}) {
   runtime.mode = daemon.detectMode();
   runtime.startedAt = new Date().toISOString();
+  runtime.startedAtMono = monotonicMs();
   reopenSsh(); // 同进程里关停过又起来的场合（用例装置）不能带着上一轮的关停闩
 
   await store.init();

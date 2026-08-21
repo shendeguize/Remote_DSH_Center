@@ -223,7 +223,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
       return;
     }
 
-    const startedAt = Date.now();
+    const startedAt = performance.now(); // 单调钟：与 __receivedAt 比先后，墙钟会跳（#104）
     try {
       const [hosts, config] = await Promise.all([api.hosts(), api.config()]);
       store.mergeFetchedHosts(hosts.hosts, hosts.revision, startedAt);
