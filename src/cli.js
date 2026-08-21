@@ -5,7 +5,7 @@
  * 纪律：主机操作一律走 manager 的 REST API，CLI 不直连 ssh、不读写 state；
  * 唯一例外是 `dshc init` 第 3 步的 probeOnce（此时 server 还不存在，11 §1.3 例外条款）。
  *
- * 退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误。
+ * 退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误｜130 等待被 Ctrl-C 打断（操作仍在继续）。
  */
 
 import fs from 'node:fs';
@@ -26,7 +26,9 @@ import {
   SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, previewJson, setByPath,
 } from './web/setup-schema.js';
 
-export const EXIT = { ok: 0, failed: 1, comm: 2, usage: 3 };
+// interrupted=130 是 shell 惯例（128+SIGINT）：脚本里要能把「我自己按了 Ctrl-C」
+// 和「这事真失败了」分开（issue #108）
+export const EXIT = { ok: 0, failed: 1, comm: 2, usage: 3, interrupted: 130 };
 
 // ── argv 解析（ENG-16） ──────────────────────────────────────────────────
 
@@ -328,7 +330,7 @@ function apiRequest(port, method, p, body) {
 
 /**
  * 先订阅后动作（11 §6.2）：SSE 开着再发 POST，避免事件竞速。
- * @returns {Promise<{status:'ok'|'failed'|'timeout', phase:string|null, lastError:string|null}>}
+ * @returns {Promise<{status:'ok'|'failed'|'timeout'|'interrupted', phase:string|null, lastError:string|null}>}
  */
 function waitTerminal(port, host, action, { timeoutMs = 120_000, onLog = null, trigger }) {
   const spec = TERMINAL[action];
@@ -342,9 +344,18 @@ function waitTerminal(port, host, action, { timeoutMs = 120_000, onLog = null, t
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
       req.destroy();
       resolve(result);
     };
+
+    // Ctrl-C 只是「不等了」，不是「取消」：远端那趟拉起在 manager 那边照常跑完。
+    // 接住信号是为了能说出这句实话——默认行为会把 CLI 直接掐掉，一个字都留不下。
+    // 不去尝试中止操作：中途掐断远端命令正是孤儿的来源。
+    const onSignal = () => finish({ status: 'interrupted', phase: null, lastError });
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
 
     const timer = setTimeout(() => finish({ status: 'timeout', phase: null, lastError }), timeoutMs);
 
@@ -900,6 +911,10 @@ async function runAction(port, name, action, parsed) {
     out(`${name} ${action} 成功${res.phase ? `（${PHASE_LABEL[res.phase] ?? res.phase}）` : ''}`);
     return EXIT.ok;
   }
+  if (res.status === 'interrupted') {
+    errOut(`不等了（Ctrl-C）。${name} ${action} 仍在 manager 那边继续，dshc ls 看它落到哪。`);
+    return EXIT.interrupted;
+  }
   if (res.status === 'timeout') {
     errOut(`${name} ${action} 等待超时；manager 可能仍在执行，dshc ls 查看当前状态。`);
     return EXIT.comm;
@@ -1257,7 +1272,7 @@ export function usageText() {
   for (const key of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service', 'version', 'update']) lines.push(`  ${COMMANDS[key].usage}`);
   lines.push('', '主机操作：');
   for (const key of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log', 'open', 'config']) lines.push(`  ${COMMANDS[key].usage}`);
-  lines.push('', '退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误');
+  lines.push('', '退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误｜130 等待被 Ctrl-C 打断（操作仍在继续）');
   return lines.join('\n');
 }
 

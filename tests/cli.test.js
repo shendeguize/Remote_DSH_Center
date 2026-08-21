@@ -211,3 +211,9 @@ test('classifyConfigFile 分清「没有」「坏了」「读不了」', (t) => 
     assert.doesNotMatch(denied.reason, /EACCES\s+EACCES/, denied.reason);
   }
 });
+
+test('EXIT.interrupted 是 130：脚本要能把「我按了 Ctrl-C」和「真失败」分开（issue #108）', () => {
+  assert.equal(EXIT.interrupted, 130, 'shell 惯例：128 + SIGINT(2)');
+  const codes = Object.values(EXIT);
+  assert.equal(new Set(codes).size, codes.length, '退出码不许撞号');
+});

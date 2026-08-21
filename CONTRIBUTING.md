@@ -134,7 +134,7 @@ Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell �
 | RV-6 | 新代码路径有用例、修复类先红后绿、`tests/COVERAGE_MATRIX.md` 已回写、三档覆盖率达标 |
 | RV-7 | 外部可观察变更进了 CHANGELOG `[Unreleased]`；README 与设计文档回写完成 |
 | RV-8 | 提交卫生：一 PR 一意图、标题合约定、无 `.local` 与密钥泄漏 |
-| RV-9 | 退出码语义（0 成功 / 1 操作失败 / 2 超时或通信失败 / 3 用法错误）与错误文案「说人话」标准未破 |
+| RV-9 | 退出码语义（0 成功 / 1 操作失败 / 2 超时或通信失败 / 3 用法错误 / 130 等待被 Ctrl-C 打断）与错误文案「说人话」标准未破 |
 
 ## GitHub 侧配置（settings-as-code）
 

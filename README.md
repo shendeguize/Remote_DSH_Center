@@ -189,7 +189,7 @@ dshc config set hosts.gpu-1.workdir '~/projects/foo'   # 空串或 null 清空�
 生命周期：dshc init / up / down / restart / status / logs / service install|uninstall|status
 自身管理：dshc version / update      # version --json；update --pre / --ref <分支|tag> / --restart
 主机操作：dshc ls / probe / start / stop / reconnect / log / open / config
-退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误
+退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误｜130 等待被 Ctrl-C 打断（操作仍在继续）
 ```
 
 `dshc --help` 有完整用法。主机清单来自 `~/.ssh/config`（可用 `DSHC_SSH_CONFIG` 指定别的文件）。

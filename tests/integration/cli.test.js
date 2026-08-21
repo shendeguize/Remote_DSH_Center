@@ -438,3 +438,38 @@ test('dshc init --force 覆盖坏配置之前先备份', async (t) => {
   assert.notEqual(res.code, 0);
   assert.match(res.out, /交互终端|向导/, `非交互该说清：${res.out}`);
 });
+
+
+test('等待中 Ctrl-C：留一句「还在继续」并退 130，不装作取消了（issue #108）', async (t) => {
+  // bind-busy-once 让拉起多走一轮，starting 窗口宽一些（实测 ~700ms）
+  const ctx = await bootServer(t, {
+    hosts: { 'gpu-1': newHostState({ faults: { bindBusyTimes: 1 } }) },
+  });
+
+  const child = spawn(process.execPath, [CLI, 'start', 'gpu-1', '--port', String(ctx.port)], {
+    env: { ...process.env, ...ctx.harness.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  // 监听要在信号之前挂好：早退的话这里能立刻看出来，而不是挂死等一个已经发生过的事件
+  const closed = new Promise((r) => child.on('close', (code, signal) => r({ code, signal })));
+  let out = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (c) => { out += c; });
+  child.stderr.on('data', (c) => { out += c; });
+
+  // 按状态而不是按时长下手：phase 到 starting 就说明 CLI 已经在等终态了
+  await waitPhase(ctx, 'gpu-1', ['starting'], { timeoutMs: 10_000 });
+  child.kill('SIGINT');
+
+  const { code, signal } = await closed;
+  assert.equal(signal, null, `不该被默认信号行为直接掐掉，要自己收尾（out=${out}）`);
+  assert.equal(code, 130, `Ctrl-C 的退出码按 shell 惯例是 128+SIGINT（out=${out}）`);
+  assert.match(out, /不等了|停止等待/, '要说清是「不等了」');
+  assert.match(out, /仍在|还在|继续/, '要说清那件事没被取消');
+  assert.match(out, /dshc ls|dshc status/, '要指一条查结果的路');
+
+  // 而且它确实还在继续：远端照样起来了——这正是必须说实话的原因
+  const running = await waitPhase(ctx, 'gpu-1', ['running'], { timeoutMs: 20_000 });
+  assert.equal(running.phase, 'running');
+});

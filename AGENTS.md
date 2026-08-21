@@ -44,7 +44,8 @@ src/defaults.js   第 0 层：零依赖出厂常量表
 
 - 抛错统一用 `src/lib/errors.js` 的 `DshError`（`code` + 一句话人话 message +
   可选 `detail` 放长文本）。文案面向用户，**说人话**，别把 stack 当 message。
-- CLI 退出码：`0` 成功 / `1` 操作失败 / `2` 超时或通信失败 / `3` 用法错误。
+- CLI 退出码：`0` 成功 / `1` 操作失败 / `2` 超时或通信失败 / `3` 用法错误 /
+  `130` 等待被 Ctrl-C 打断（操作仍在 manager 那边继续）。
 
 ## 改完必做
 

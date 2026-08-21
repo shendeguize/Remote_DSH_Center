@@ -212,7 +212,7 @@ saving never disturbs a running instance (the UI shows a "restart to apply" badg
 Lifecycle: dshc init / up / down / restart / status / logs / service install|uninstall|status
 Itself:    dshc version / update    # version --json; update --pre / --ref <branch|tag> / --restart
 Hosts:     dshc ls / probe / start / stop / reconnect / log / open / config
-Exit codes: 0 success | 1 operation failed | 2 timeout/communication failure | 3 usage error
+Exit codes: 0 success | 1 operation failed | 2 timeout/communication failure | 3 usage error | 130 wait interrupted by Ctrl-C (the operation keeps going)
 ```
 
 `dshc --help` prints the full usage. The host list comes from `~/.ssh/config`
