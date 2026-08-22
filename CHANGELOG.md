@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.0-rc.7] - 2026-08-23
+
 ### 修复
 
 - 管理页页头新增清楚可见的「返回主页面」按钮，点击会直接回到 Hub，不再只能依赖不明显的
@@ -432,7 +434,8 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.7...HEAD
+[0.2.0-rc.7]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...v0.2.0-rc.7
 [0.2.0-rc.6]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.5...v0.2.0-rc.6
 [0.2.0-rc.5]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.4...v0.2.0-rc.5
 [0.2.0-rc.4]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.3...v0.2.0-rc.4
