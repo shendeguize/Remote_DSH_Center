@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.0-rc.6] - 2026-08-23
+
 ### 变更
 
 - 主界面改为以 `#/hub` 为默认起始页：可用主机常驻顶栏标签，`ready` 主机点一次就会拉起并
@@ -425,7 +427,10 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.3...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...HEAD
+[0.2.0-rc.6]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.5...v0.2.0-rc.6
+[0.2.0-rc.5]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.4...v0.2.0-rc.5
+[0.2.0-rc.4]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.3...v0.2.0-rc.4
 [0.2.0-rc.3]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.3
 [0.2.0-rc.2]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.2.0-rc.2
 [0.1.0]: https://github.com/shendeguize/Remote_DSH_Center/releases/tag/v0.1.0
