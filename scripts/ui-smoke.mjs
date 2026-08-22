@@ -1152,7 +1152,7 @@ async function main() {
       return `${normal} → none`;
     });
 
-    await check('S9', 'manager 掉线：横幅出现且写按钮禁用；期间不堆连接', async () => {
+    await check('S9', 'manager 掉线：返回导航仍可用，写按钮禁用；期间不堆连接', async () => {
       await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '断线前显式进入管理台');
       const before = responses.filter((r) => r.url.endsWith('/api/events')).length;
@@ -1168,14 +1168,19 @@ async function main() {
       await cdp.waitFor("!document.querySelector('.disconnect-banner').hidden", '断线横幅出现', { timeoutMs: 20_000 });
       const state = await cdp.eval(`
         const row = document.querySelector('.host-table tbody tr');
+        const manageBack = document.querySelector('.manage-back');
         return {
           banner: document.querySelector('.disconnect-banner').textContent.trim(),
-          writable: [...document.querySelectorAll('.manage-header .btn')].some((b) => !b.disabled),
+          navigationEnabled: Boolean(manageBack && !manageBack.disabled),
+          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config')]
+            .map((button) => [button.textContent.trim(), button.disabled]),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
         };
       `);
       assert(/失联/.test(state.banner), `横幅文案不含「失联」：${state.banner}`);
-      assert(!state.writable, '断线后 manage toolbar 写按钮仍可点');
+      assert(state.navigationEnabled, '断线后「返回主页面」导航被禁用或缺失');
+      assert(state.toolbarWrites.length === 2 && state.toolbarWrites.every(([, disabled]) => disabled),
+        `断线后 manage 页头写按钮未全部禁用：${JSON.stringify(state.toolbarWrites)}`);
       assert(!state.rowWritable, '断线后行内写按钮仍可点');
       await sleep(3_000);
       const after = responses.filter((r) => r.url.endsWith('/api/events')).length;
@@ -1184,23 +1189,34 @@ async function main() {
       return `「${state.banner}」`;
     });
 
-    await check('S9b', 'manager 回来：横幅消失、写操作解禁、快照回灌', async () => {
+    await check('S9b', 'manager 回来：返回导航仍可用、横幅消失、写操作解禁、快照回灌', async () => {
       // 这条只守「恢复」这条路本身通不通（此前从没在真浏览器里跑过）。
       // 「重连后按快照结算在飞的写操作」由 tests/web/store.test.js 守：那半边在这里
       // 判不出来——重连后紧跟着的 host-changed 帧同样会把 pending 结算掉，
       // 摘掉修复它也绿。判不出来的东西就别在标题里认领。
       await rig.reboot();
       await cdp.waitFor("document.querySelector('.disconnect-banner').hidden", '横幅消失', { timeoutMs: 30_000 });
-      await sleep(500);
+      await cdp.waitFor(`
+        (() => {
+          const row = document.querySelector('.host-table tbody tr');
+          return Boolean(row && [...row.querySelectorAll('.row-actions .btn')]
+            .some((button) => !button.disabled && button.textContent !== '打开'));
+        })()
+      `, '恢复后行内写按钮解禁', { timeoutMs: 30_000 });
       const back = await cdp.eval(`
         const row = document.querySelector('.host-table tbody tr');
+        const manageBack = document.querySelector('.manage-back');
         return {
-          toolbarWritable: [...document.querySelectorAll('.manage-header .btn')].some((b) => !b.disabled),
+          navigationEnabled: Boolean(manageBack && !manageBack.disabled),
+          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config')]
+            .map((button) => [button.textContent.trim(), button.disabled]),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
           rows: document.querySelectorAll('.host-table tbody tr').length,
         };
       `);
-      assert(back.toolbarWritable, '恢复后 manage toolbar 写按钮还禁着');
+      assert(back.navigationEnabled, '恢复后「返回主页面」导航被禁用或缺失');
+      assert(back.toolbarWrites.length === 2 && back.toolbarWrites.every(([, disabled]) => !disabled),
+        `恢复后 manage 页头写按钮未全部解禁：${JSON.stringify(back.toolbarWrites)}`);
       assert(back.rowWritable, '恢复后行内写按钮还禁着');
       assert(back.rows >= 1, `恢复后表里只有 ${back.rows} 行，快照没回灌`);
       return '横幅消失且写操作恢复';

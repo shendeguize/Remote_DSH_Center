@@ -190,7 +190,7 @@
 | 路由反转：`#/hub` 默认起始页、`#/manage` 次级管理页、非法路由回 Hub；根入口只在 lastHost 仍可开且启用时恢复，品牌链接始终直达 Hub | `tests/web/router.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S1/S10 |
 | Hub：五种可开态卡片、不可用/禁用折叠、空态添加本机；ready 卡片复用统一动作，一步提交 start 并进入标签，不乐观改 phase | `tests/web/hub.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S4h |
 | 常驻标签与收纳：enabled 的 ready/starting/running/degraded/crashed 常驻；其余进入 `+N`，可探测或去管理；ready 标签一步拉起 | `tests/web/tabbar.test.js`、`tests/web/mount.test.js`、`tests/web/ui-live.test.js` |
-| 管理次级入口：顶栏 `⌂ 管理`、Hub 链接、标签菜单「在管理台查看」并展开抽屉；全量探测/重载只在 manage 页头 | `tests/web/mount.test.js`、`tests/web/ui-live.test.js` |
+| 管理次级入口：顶栏 `⌂ 管理`、Hub 链接、标签菜单「在管理台查看」并展开抽屉；manage 页头有原生按钮直达 Hub，断线时导航仍可用而全量探测/重载禁用 | `tests/web/mount.test.js`、`tests/web/ui-live.test.js`、`tests/integration/ui-live.test.js`、`scripts/ui-smoke.mjs` S9/S9b |
 | 标签菜单「在新窗口打开」只消费后端 `mappedUrl`，切断 opener；本机显示徽标且不暴露 SSH/orphan/reconnect 文案 | `tests/web/mount.test.js`、`tests/web/tabbar.test.js` |
 | iframe 首载：本机/远端 loading 在 `load` 后隐藏，切页 keep-alive 不重置；recreate/reload 重现 loading，后端 phase 遮罩优先且 starting 无 URL 时有可访问占位 | `tests/web/panes.test.js`、`tests/web/a11y.test.js`、`tests/web/ui-live.test.js`、`scripts/ui-smoke.mjs` S4h/S7b |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |

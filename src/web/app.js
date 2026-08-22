@@ -66,8 +66,13 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   });
 
   // ── header 操作区 ────────────────────────────────────────────────────
+  const manageBackBtn = button('返回主页面', {
+    compact: false,
+    onClick: () => actions.navigate('#/hub'),
+  });
   const probeAllBtn = button('全部探测', { variant: 'primary', compact: false, onClick: () => actions.probeAll() });
   const reloadBtn = button('重载配置', { compact: false, onClick: () => actions.reload() });
+  manageBackBtn.classList.add('manage-back');
   probeAllBtn.classList.add('probe-all');
   reloadBtn.classList.add('reload-config');
   const connDot = el('span.conn-indicator', {
@@ -85,7 +90,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   dashboard.append(
     el('div.card-header.manage-header', {}, [
       el('h2', { text: '管理' }),
-      el('div.row-actions', {}, [probeAllBtn, reloadBtn]),
+      el('div.row-actions', {}, [manageBackBtn, probeAllBtn, reloadBtn]),
     ]),
     hostTable.root,
     el('div.side-by-side', {}, [managerCard.root, defaultsCard.root]),

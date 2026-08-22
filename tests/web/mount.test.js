@@ -423,6 +423,27 @@ test('hub 与 manage 互斥，header/tabbar 在两页与主机页都可见', asy
   assert.deepEqual([hub.hidden, manage.hidden, header.hidden, tabbar.hidden], [true, true, false, false]);
 });
 
+test('管理页有显式返回主页面按钮，直达 hub 并保留页头运维动作', async (t) => {
+  const { dom } = await mount(t, { hash: '#/manage', hosts: [running('gpu-1')] });
+  const hub = dom.app.querySelector('.view-hub');
+  const manage = dom.app.querySelector('.view-dashboard');
+  const pageHead = manage.querySelector('.manage-header');
+  const back = pageHead.querySelector('.manage-back');
+
+  assert.ok(back, '管理页页头应有清楚可见的返回主页面按钮');
+  assert.match(back.textContent, /返回主页面/);
+  assert.equal(back.classList.contains('btn'), true, '返回入口应复用项目统一按钮样式');
+  assert.equal(back.getAttribute('type'), 'button');
+  assert.notEqual(back.getAttribute('role'), 'tab', '返回入口必须是原生按钮，不得混入标签角色');
+  assert.ok(pageHead.querySelector('.probe-all'), '全部探测按钮必须保留');
+  assert.ok(pageHead.querySelector('.reload-config'), '重载配置按钮必须保留');
+
+  back.click();
+  assert.equal(dom.window.location.hash, '#/hub');
+  assert.equal(hub.hidden, false, '点击后应显示 Hub');
+  assert.equal(manage.hidden, true, '点击后应隐藏管理页');
+});
+
 test('管理入口次级化：无固定管理台首标签，激活态与页头全局动作正确', async (t) => {
   const { dom } = await mount(t, { hosts: [hostView('gpu-1')] });
   assert.equal(dom.app.querySelector('.tab-dashboard'), null, '固定「管理台」首标签应移除');

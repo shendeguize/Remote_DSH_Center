@@ -219,7 +219,7 @@ test('未初始化：真后端门禁把页面按到 #/setup，且只发白名单
   assert.equal(denied.json.code, 'SETUP_REQUIRED');
 });
 
-test('manager 掉线：横幅出现且写按钮全禁用', async (t) => {
+test('manager 掉线：返回导航仍可用，写按钮全部禁用', async (t) => {
   const ctx = await bootServer(t);
   const { app, dom, sources } = await mountLive(t, ctx);
   await waitFor(() => app.store.listHosts().length === 1, 'snapshot 到达');
@@ -238,7 +238,7 @@ test('manager 掉线：横幅出现且写按钮全禁用', async (t) => {
   const manageActions = dom.app.querySelectorAll('.manage-header .btn');
   assert.deepEqual(
     manageActions.map((button) => [button.textContent, button.disabled]),
-    [['全部探测', true], ['重载配置', true]],
-    '全局动作只在 manage 页头，且断线时全部禁用',
+    [['返回主页面', false], ['全部探测', true], ['重载配置', true]],
+    '断线不应禁用返回导航，但 manage 页头的写操作必须全部禁用',
   );
 });
