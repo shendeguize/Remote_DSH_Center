@@ -104,6 +104,28 @@ const assert = (cond, msg) => {
   if (!cond) throw new Error(msg);
 };
 
+export function evaluateS12({
+  BURST, mut, rows, frames, worstMs,
+}) {
+  if (mut <= 0) {
+    return {
+      ok: false,
+      note: `页面一次都没重绘（面板 ${rows} 行，收到 ${frames} 帧 log-line）——事件没到，这条判据在空转`,
+    };
+  }
+  if (rows !== 50) return { ok: false, note: `事件行应被环形缓冲顶到 50，实测 ${rows}` };
+  if (mut >= 2_000) {
+    return {
+      ok: false,
+      note: `${BURST} 条事件引起 ${mut} 次 DOM 变更——重绘没有合帧（合上应是百位数）`,
+    };
+  }
+  return {
+    ok: true,
+    note: `${BURST} 条 → ${mut} 次 DOM 变更，最长任务 ${worstMs}ms（仅诊断 / diagnostic）`,
+  };
+}
+
 const TAB_PHASES = new Set(['ready', 'starting', 'running', 'degraded', 'crashed']);
 
 async function fixtureTabNames(rig) {
@@ -1243,7 +1265,8 @@ async function main() {
 
     await check('S12', '事件风暴不冻住页面：重绘合到帧边界（issue #106）', async () => {
       // 修复前：1500 条事件 → 14.8 万次 DOM 变更、一个 2278ms 的长任务，那 2.3 秒里
-      // 页面点不动。判据取「变更批次」这个与机器快慢无关的量，长任务只作兜底。
+      // 页面点不动。issue #116 证明共享 runner 的 Long Task 会受机器负载影响；判据只取
+      // 事件到达、行数与「变更批次」这些主信号，Long Task 仅作诊断。
       const BURST = 1500;
       await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '事件风暴前显式进入管理台');
@@ -1295,13 +1318,11 @@ async function main() {
       const storm = await cdp.eval('return window.__storm;');
       const rows = await cdp.eval("return document.querySelectorAll('.event-item').length;");
       const worst = Math.max(0, ...storm.long);
-      // 先证明风暴真的打到了页面上，否则下面两条判据全是空转
-      assert(storm.mut > 0, `页面一次都没重绘（面板 ${rows} 行，收到 ${frames} 帧 log-line）——事件没到，这条判据在空转`);
-      assert(rows === 50, `事件行应被环形缓冲顶到 50，实测 ${rows}`);
-      assert(storm.mut < 2_000,
-        `${BURST} 条事件引起 ${storm.mut} 次 DOM 变更——重绘没有合帧（合上应是百位数）`);
-      assert(worst < 1_200, `最长任务 ${worst}ms，风暴期间页面已经卡住了`);
-      return `${BURST} 条 → ${storm.mut} 次 DOM 变更，最长任务 ${worst}ms`;
+      const verdict = evaluateS12({
+        BURST, mut: storm.mut, rows, frames, worstMs: worst,
+      });
+      assert(verdict.ok, verdict.note);
+      return verdict.note;
     });
   } finally {
     cdp.close();

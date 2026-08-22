@@ -26,7 +26,7 @@ import {
   isBrokenPipe, linkPlan, linkTarget, pathHint, prefixInPath, silenceBrokenPipe,
 } from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
-import { findChrome } from '../scripts/ui-smoke.mjs';
+import { evaluateS12, findChrome } from '../scripts/ui-smoke.mjs';
 import { armExitGuard } from '../scripts/lib/exit-guard.mjs';
 import { Cdp } from '../scripts/lib/browser.mjs';
 
@@ -250,6 +250,36 @@ test('summarize 三种状态各有记号', () => {
   assert.match(text, /· 乙.*没装 Chrome/);
   assert.match(text, /✘ 丙.*炸了/);
   assert.match(text, /1\.2s/);
+});
+
+/**
+ * 回归（issue #116）：共享 runner 上 S12 的主判据全过，但 Long Task 因机器负载达到
+ * 2304/2564ms，被固定墙钟阈值单独判红。Long Task 只能留作诊断；issue #106 的
+ * 148631 次 DOM 变更仍必须由与机器快慢无关的 mut 判据拦住。
+ */
+test('S12 判据：Long Task 只诊断，事件到达 / 行数 / DOM 变更仍严格判定', () => {
+  const slowRunner = evaluateS12({
+    BURST: 1_500, mut: 400, rows: 50, frames: 1_500, worstMs: 2_564,
+  });
+  assert.equal(slowRunner.ok, true, slowRunner.note);
+  assert.match(slowRunner.note, /2564ms/);
+  assert.match(slowRunner.note, /诊断|diagnostic/i, '成功说明必须明说 Long Task 仅供诊断');
+
+  assert.equal(evaluateS12({
+    BURST: 1_500, mut: 0, rows: 50, frames: 0, worstMs: 0,
+  }).ok, false, '事件没到不能让后续判据空转');
+  assert.equal(evaluateS12({
+    BURST: 1_500, mut: 400, rows: 50, frames: 0, worstMs: 0,
+  }).ok, true, 'frames 只供诊断；mut 已证明事件到达时不能扩大失败面');
+  assert.equal(evaluateS12({
+    BURST: 1_500, mut: 400, rows: 49, frames: 1_500, worstMs: 0,
+  }).ok, false, '环形缓冲不是 50 行仍须判红');
+  assert.equal(evaluateS12({
+    BURST: 1_500, mut: 2_000, rows: 50, frames: 1_500, worstMs: 0,
+  }).ok, false, 'mut 上界仍是严格小于 2000');
+  assert.equal(evaluateS12({
+    BURST: 1_500, mut: 148_631, rows: 50, frames: 1_500, worstMs: 2_278,
+  }).ok, false, 'issue #106 的原始 DOM 风暴必须继续判红');
 });
 
 /**
