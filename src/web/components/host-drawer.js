@@ -55,6 +55,30 @@ export function reconcile(draft, prevConfig, nextConfig) {
   return isDirty(draft, prevConfig) ? 'conflict' : 'follow';
 }
 
+/** 详情抽屉里随运输类型变化的标题与只读字段名。 */
+export function drawerCopy(host) {
+  if (host?.local === true) {
+    return {
+      portLabel: '本机 web 端口',
+      probeTitle: '本机探测详情',
+      logTitle: '本机日志',
+      effectivePortLabel: '生效本机端口',
+      processLabel: '本机进程',
+      workdirLabel: '本机实际工作目录',
+      configChanged: '本机配置已变化',
+    };
+  }
+  return {
+    portLabel: '远端 web 端口',
+    probeTitle: '探测详情',
+    logTitle: '远端日志',
+    effectivePortLabel: '生效远端端口',
+    processLabel: '进程',
+    workdirLabel: '实际工作目录',
+    configChanged: '远端配置已变化',
+  };
+}
+
 export function createHostDrawer({ store, actions, confirm, setBackgroundInert = () => {} }) {
   const title = el('h2', { id: 'drawer-title' });
   const badge = el('div.drawer-badge');
@@ -79,8 +103,10 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const cancelBtn = button('放弃修改', { compact: false, onClick: () => resetDraft() });
 
   const probeDl = el('dl.kv');
+  const probeTitle = el('h3', { text: '探测详情' });
   const logPre = el('pre.remote-log-body', { text: '（未加载）' });
   const logBtn = button('拉取最近 200 行', { compact: false, onClick: () => loadLog() });
+  const logTitle = el('h3', { text: '远端日志' });
 
   // 有校验器的字段（键名对齐 buildHostPatch 的 errors）
   const validated = {
@@ -144,9 +170,9 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     el('header.drawer-header', {}, [el('div', {}, [title, badge]), closeBtn]),
     conflict,
     form,
-    el('section.probe-detail', {}, [el('h3', { text: '探测详情' }), probeDl]),
+    el('section.probe-detail', {}, [probeTitle, probeDl]),
     el('section.remote-log', {}, [
-      el('h3', { text: '远端日志' }),
+      logTitle,
       logPre,
       el('div.log-actions', {}, [logBtn]),
     ]),
@@ -298,9 +324,13 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   // ── 只读区 ───────────────────────────────────────────────────────────
 
   function renderReadonly(host) {
+    const copy = drawerCopy(host);
     title.textContent = host.name;
     clear(badge).append(phaseBadge(host.phase));
     workdirBadge.hidden = !workdirPending(host);
+    remotePort.root.querySelector('label').textContent = copy.portLabel;
+    probeTitle.textContent = copy.probeTitle;
+    logTitle.textContent = copy.logTitle;
 
     const probe = host.probe;
     clear(probeDl);
@@ -310,11 +340,11 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       ['web profile', probe ? String(probe.profileWeb) : DASH],
       ['DSH_HOME', text(probe?.dshHome)],
       ['最近探测', probe?.at ? fmtAgo(probe.at) : DASH],
-      ['生效远端端口', text(host.effectiveRemotePort)],
+      [copy.effectivePortLabel, text(host.effectiveRemotePort)],
       ['本机映射', host.mappedUrl ?? DASH],
-      ['进程', host.web ? `PID ${host.web.pid}（${host.web.startedByUs ? '本工具拉起' : '手动'}）` : DASH],
+      [copy.processLabel, host.web ? `PID ${host.web.pid}（${host.web.startedByUs ? '本工具拉起' : '手动'}）` : DASH],
       // 实测工作目录：远端 /proc 不可读时为 null，此处退回「—」而不是编一个值
-      ['实际工作目录', host.web ? (host.web.cwd ?? DASH) : DASH],
+      [copy.workdirLabel, host.web ? (host.web.cwd ?? DASH) : DASH],
     ];
     if (probe?.errorSummary) rows.push(['探测错误', probe.errorSummary]);
     for (const [k, v] of rows) probeDl.append(el('dt', { text: k }), el('dd', { text: v }));
@@ -386,7 +416,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
         writeForm(current.draft);
       } else if (verdict === 'conflict') {
         conflict.hidden = false;
-        conflict.textContent = '远端配置已变化（可能来自另一个标签页）；你的草稿已保留，「放弃修改」可载入最新值。';
+        conflict.textContent = `${drawerCopy(host).configChanged}（可能来自另一个标签页）；你的草稿已保留，「放弃修改」可载入最新值。`;
         current.config = host.config; // 冲突基准跟进，保存时按最新值 diff
       }
       syncDirty();

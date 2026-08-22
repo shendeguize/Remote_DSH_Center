@@ -56,6 +56,38 @@ test('configSchema 接受出厂 config 与完整 config', () => {
   assert.equal(validate(configSchema, withHost).ok, true);
 });
 
+test('configSchema：local 缺省兼容旧配置，true/false 均接受且类型严格', () => {
+  const legacy = goodConfig();
+  assert.equal('local' in legacy.hosts['gpu-1'], false);
+  assert.equal(validate(configSchema, legacy).ok, true);
+  assert.equal(newHostConfig().local, false);
+
+  for (const local of [false, true]) {
+    const config = goodConfig();
+    config.hosts['gpu-1'].local = local;
+    config.hosts['gpu-1'].localPort = null;
+    assert.equal(validate(configSchema, config).ok, true, `应接受 local:${local}`);
+  }
+
+  const invalid = goodConfig();
+  invalid.hosts['gpu-1'].local = 'true';
+  assert.match(validate(configSchema, invalid).errors.join(), /expected boolean/);
+});
+
+test('configSchema/setupBodySchema：本机最多一个且 localPort 必须为 null', () => {
+  const badPort = goodConfig();
+  badPort.hosts['gpu-1'].local = true;
+  assert.match(validate(configSchema, badPort).errors.join(), /localPort.*null/);
+  assert.match(validate(setupBodySchema, badPort).errors.join(), /localPort.*null/);
+
+  const duplicate = goodConfig();
+  duplicate.hosts['gpu-1'].local = true;
+  duplicate.hosts['gpu-1'].localPort = null;
+  duplicate.hosts.localhost = { ...newHostConfig(), local: true };
+  assert.match(validate(configSchema, duplicate).errors.join(), /最多.*一个.*local:true/);
+  assert.match(validate(setupBodySchema, duplicate).errors.join(), /最多.*一个.*local:true/);
+});
+
 test('configSchema：localPortRange 必须 lo<=hi 且在 1024..65535', () => {
   const c = goodConfig();
   c.defaults.localPortRange = [17799, 17701];
@@ -140,9 +172,12 @@ test('setupBodySchema：configVersion/setupCompleted 可缺省', () => {
   assert.equal(validate(setupBodySchema, body).ok, true);
 });
 
-test('hostConfigPatchSchema：全部键可选，localPort 明令拒收', () => {
+test('hostConfigPatchSchema：local 只校验类型，localPort 明令拒收', () => {
   assert.equal(validate(hostConfigPatchSchema, {}).ok, true);
   assert.equal(validate(hostConfigPatchSchema, { autoStart: true }).ok, true);
+  assert.equal(validate(hostConfigPatchSchema, { local: true }).ok, true);
+  assert.equal(validate(hostConfigPatchSchema, { local: false }).ok, true);
+  assert.match(validate(hostConfigPatchSchema, { local: 1 }).errors.join(), /expected boolean/);
   assert.match(validate(hostConfigPatchSchema, { localPort: 17701 }).errors.join(), /unknown key/);
   assert.equal(validate(hostConfigPatchSchema, { workdir: '~/proj' }).ok, true);
   assert.equal(validate(hostConfigPatchSchema, { workdir: null }).ok, true);

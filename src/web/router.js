@@ -5,13 +5,15 @@
 
 /**
  * @param {string} hash
- * @returns {{kind:'dashboard'|'host'|'setup', host:string|null, raw:string}}
+ * @returns {{kind:'root'|'hub'|'manage'|'host'|'setup'|'invalid', host:string|null, raw:string}}
  */
 export function parseRoute(hash) {
   const raw = typeof hash === 'string' && hash !== '' ? hash : '#/';
   const path = raw.replace(/^#/, '');
 
-  if (path === '' || path === '/') return { kind: 'dashboard', host: null, raw: '#/' };
+  if (path === '' || path === '/') return { kind: 'root', host: null, raw: '#/' };
+  if (path === '/hub') return { kind: 'hub', host: null, raw: '#/hub' };
+  if (path === '/manage') return { kind: 'manage', host: null, raw: '#/manage' };
   if (path === '/setup') return { kind: 'setup', host: null, raw: '#/setup' };
 
   const m = /^\/host\/([^/]+)$/.exec(path);
@@ -20,22 +22,59 @@ export function parseRoute(hash) {
     try {
       host = decodeURIComponent(m[1]);
     } catch {
-      return { kind: 'dashboard', host: null, raw: '#/' }; // 坏编码按非法路由处理
+      return { kind: 'invalid', host: null, raw };
     }
-    if (host === '') return { kind: 'dashboard', host: null, raw: '#/' };
+    if (host === '') return { kind: 'invalid', host: null, raw };
     return { kind: 'host', host, raw: `#/host/${m[1]}` };
   }
 
-  return { kind: 'dashboard', host: null, raw: '#/' };
+  return { kind: 'invalid', host: null, raw };
 }
 
 export function hostRoute(name) {
   return `#/host/${encodeURIComponent(name)}`;
 }
 
+export const LAST_HOST_KEY = 'dshc.lastHost';
+
+/** localStorage 可能被禁用或由隐私策略拒绝，浏览器偏好失败不能阻断路由。 */
+export function readLastHost(storage) {
+  try {
+    const target = storage === undefined ? globalThis.localStorage : storage;
+    const value = target?.getItem(LAST_HOST_KEY);
+    return typeof value === 'string' && value !== '' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberLastHost(name, storage) {
+  if (typeof name !== 'string' || name === '') return false;
+  try {
+    const target = storage === undefined ? globalThis.localStorage : storage;
+    if (!target?.setItem) return false;
+    target.setItem(LAST_HOST_KEY, name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** manager 与主机清单就绪后，为动态根路由选取最终落点。 */
+export function rootRouteTarget(hosts, storage) {
+  const lastHost = readLastHost(storage);
+  if (lastHost) {
+    for (const host of hosts) {
+      const enabled = host?.enabled ?? host?.config?.enabled;
+      if (host?.name === lastHost && enabled === true && canOpenHost(host)) return hostRoute(lastHost);
+    }
+  }
+  return '#/hub';
+}
+
 /**
  * setup 守卫（10 §5.2）：未初始化时任何路由都改写到 #/setup；
- * setupCompleted 未知时先渲染骨架，避免管理台闪现。
+ * setupCompleted 未知时先渲染骨架，避免主界面闪现。非法路由统一归到 hub。
  * @returns {{route:object, redirectTo:string|null, blocked:boolean}}
  */
 export function applyGuard(route, { setupCompleted }) {
@@ -45,13 +84,16 @@ export function applyGuard(route, { setupCompleted }) {
   if (setupCompleted === false && route.kind !== 'setup') {
     return { route: { kind: 'setup', host: null, raw: '#/setup' }, redirectTo: '#/setup', blocked: false };
   }
+  if (route.kind === 'invalid') {
+    return { route: { kind: 'hub', host: null, raw: '#/hub' }, redirectTo: '#/hub', blocked: false };
+  }
   return { route, redirectTo: null, blocked: false };
 }
 
-/** 主机路由是否可落地：只有隧道可用（有 mappedUrl）或 crashed 的已开主机才有 iframe。 */
+/** 主机路由是否可落地：starting 先落占位遮罩，其余三态承载已有/可建 iframe。 */
 export function canOpenHost(host) {
   if (!host) return false;
-  return ['running', 'degraded', 'crashed'].includes(host.phase);
+  return ['starting', 'running', 'degraded', 'crashed'].includes(host.phase);
 }
 
 /**

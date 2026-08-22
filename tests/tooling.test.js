@@ -541,19 +541,66 @@ test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO'
  */
 test('launchChrome 失败：错误里带上 Chrome 自己的输出', async (t) => {
   const { launchChrome } = await import('../scripts/lib/browser.mjs');
-  const fake = path.join(tmpdir(t), 'fake-chrome');
+  const scratch = tmpdir(t);
+  const fake = path.join(scratch, 'fake-chrome');
   fs.writeFileSync(fake, '#!/bin/sh\necho "libnss3.so: cannot open shared object file" >&2\nexit 127\n');
   fs.chmodSync(fake, 0o755);
 
-  await assert.rejects(
-    () => launchChrome({ env: { DSHC_CHROME: fake } }),
-    (err) => {
-      assert.match(err.message, /Chrome 退出（code 127）/, '该说清是退出了、退了几号');
-      assert.match(err.message, /Chrome 说：/, '没把 Chrome 的自述带出来');
-      assert.match(err.message, /libnss3/, '丢了真正有诊断价值的那一行');
-      return true;
-    },
-  );
+  const oldTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scratch;
+  try {
+    await assert.rejects(
+      () => launchChrome({ env: { DSHC_CHROME: fake } }),
+      (err) => {
+        assert.match(err.message, /Chrome 退出（code 127）/, '该说清是退出了、退了几号');
+        assert.match(err.message, /Chrome 说：/, '没把 Chrome 的自述带出来');
+        assert.match(err.message, /libnss3/, '丢了真正有诊断价值的那一行');
+        return true;
+      },
+    );
+    assert.deepEqual(
+      fs.readdirSync(scratch).filter((name) => name.startsWith('dshc-chrome-')),
+      [],
+      '启动失败也要回收刚建的临时 profile',
+    );
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
+  }
+});
+
+test('launchChrome 收尾：等进程退出再删 profile，重复调用也安全', async (t) => {
+  const { launchChrome } = await import('../scripts/lib/browser.mjs');
+  const scratch = tmpdir(t);
+  const fake = path.join(scratch, 'fake-chrome');
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+process.stderr.write('DevTools listening on ws://127.0.0.1:65535/devtools/browser/fake\\n');
+setInterval(() => {}, 1_000);
+`);
+  fs.chmodSync(fake, 0o755);
+
+  const oldTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scratch;
+  let chrome = null;
+  try {
+    chrome = await launchChrome({ env: { DSHC_CHROME: fake } });
+    assert.equal(
+      fs.readdirSync(scratch).filter((name) => name.startsWith('dshc-chrome-')).length,
+      1,
+      'Chrome 活着时 profile 必须存在',
+    );
+    await chrome.kill();
+    await chrome.kill();
+    assert.deepEqual(
+      fs.readdirSync(scratch).filter((name) => name.startsWith('dshc-chrome-')),
+      [],
+      'Chrome 退出后不该留下空 profile',
+    );
+  } finally {
+    await chrome?.kill();
+    if (oldTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = oldTmp;
+  }
 });
 
 test('findChrome：显式指定优先，找不到给 null', () => {

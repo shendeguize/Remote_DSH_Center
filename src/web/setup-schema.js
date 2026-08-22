@@ -137,28 +137,43 @@ export function canAutoStart(probe) {
 }
 
 /**
- * answers + ssh 主机清单 + 探测结果 → 完整 config（setupCompleted 由落盘侧强制置 true）。
+ * 候选入口兼容旧 string[]；Node/页面只需注入名字与运输类型，纯模块不猜本机身份。
+ * @param {Array<string|{name:string,local?:boolean}>} candidates
+ * @returns {{name:string,local:boolean}[]}
+ */
+export function normalizeHostCandidates(candidates = []) {
+  return candidates.map((candidate) => (
+    typeof candidate === 'string'
+      ? { name: candidate, local: false }
+      : { name: candidate.name, local: candidate.local === true }
+  ));
+}
+
+/**
+ * answers + 主机候选 + 探测结果 → 完整 config（setupCompleted 由落盘侧强制置 true）。
  *
  * @param {object} answers 形如 { manager:{port}, defaults:{remoteWebPort, localPortRange} }
- * @param {string[]} sshHosts ssh config 里的候选主机名
+ * @param {Array<string|{name:string,local?:boolean}>} candidates 主机候选；string 视为远端
  * @param {Record<string, {phase?:string}>} probeResults 主机名 → 探测结果（可缺）
  * @param {object} factoryDefaults 出厂默认（提供 hostDefaults 形状）
  * @param {{selection?:Record<string,{enabled?:boolean, autoStart?:boolean}>}} [opts]
  */
-export function buildConfigFromAnswers(answers, sshHosts, probeResults, factoryDefaults, opts = {}) {
+export function buildConfigFromAnswers(answers, candidates, probeResults, factoryDefaults, opts = {}) {
   const selection = opts.selection ?? {};
   const hostDefaults = factoryDefaults.hostDefaults;
 
   const hosts = {};
-  for (const name of sshHosts) {
+  for (const candidate of normalizeHostCandidates(candidates)) {
+    const { name, local } = candidate;
     const pick = selection[name] ?? {};
     const enabled = pick.enabled ?? true;
     // 未探测/非 ready 的主机永远不自启：避免开机就撞一串失败
     const autoStart = Boolean(enabled && pick.autoStart && canAutoStart(probeResults?.[name]));
     hosts[name] = {
+      local,
       enabled,
       autoStart,
-      localPort: hostDefaults.localPort,
+      localPort: local ? null : hostDefaults.localPort,
       remoteWebPort: hostDefaults.remoteWebPort,
       workdir: hostDefaults.workdir ?? null,
       inject: { env: {}, extraArgs: [], patches: [] },

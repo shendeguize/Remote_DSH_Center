@@ -16,7 +16,7 @@ import {
   parseProtoOutput,
 } from './lib/proto.js';
 import {
-  execFailure, hostQueue, noteTruncation, sshExec,
+  execFailure, hostQueue, localExec, noteTruncation, sshExec,
 } from './lib/ssh.js';
 import { ensureLocalPort } from './ports.js';
 import { syncPatches } from './patchsync.js';
@@ -29,6 +29,25 @@ const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 let waitFn = sleep;
 export function _setWait(fn) {
   waitFn = typeof fn === 'function' ? fn : sleep;
+}
+
+/** 注入点：STOP timeout 回归用例缩短本机命令预算，生产默认值不变。 */
+let stopTimeoutMs = PROTO_TIMING.onceTimeoutMs;
+export function _setStopTimeout(ms) {
+  stopTimeoutMs = Number.isFinite(ms) && ms > 0 ? ms : PROTO_TIMING.onceTimeoutMs;
+}
+
+/** 显式参数优先；未传时只认当前 HostView.local，绝不按主机名猜运输类型。 */
+function isLocalHost(host, local) {
+  if (typeof local === 'boolean') return local;
+  return store.getHostView(host)?.local === true;
+}
+
+/** 同一份协议脚本只在运输执行器处二选一。 */
+function execHost(host, command, { local, signal, timeoutMs }) {
+  return local
+    ? localExec(command, { signal, timeoutMs })
+    : sshExec(host, command, { signal, timeoutMs });
 }
 
 // ── RMT-05 复核与停止 ────────────────────────────────────────────────────
@@ -45,8 +64,9 @@ export function _setWait(fn) {
  * @param {{pid:number, port:number, fingerprint?:string|null}} p
  * @returns {Promise<VerifyResult>}
  */
-export async function verifyRemote(host, { pid, port, fingerprint = null }, { signal } = {}) {
-  const res = await sshExec(host, buildVerifyScript({ pid, port }), { signal });
+export async function verifyRemote(host, { pid, port, fingerprint = null }, { signal, local } = {}) {
+  const useLocal = isLocalHost(host, local);
+  const res = await execHost(host, buildVerifyScript({ pid, port }), { local: useLocal, signal });
   const err = execFailure(host, '远端复核', res);
   if (err) throw err;
 
@@ -73,8 +93,8 @@ export async function verifyRemote(host, { pid, port, fingerprint = null }, { si
  * 顺带回带 cwd（同一次 VERIFY 往返，不多花一趟 ssh）——纯展示用。
  * @returns {Promise<{fingerprint:string, cwd:string|null}>}
  */
-export async function captureFingerprint(host, { pid, port }, { signal } = {}) {
-  const v = await verifyRemote(host, { pid, port }, { signal });
+export async function captureFingerprint(host, { pid, port }, { signal, local } = {}) {
+  const v = await verifyRemote(host, { pid, port }, { signal, local });
   if (!v.alive || !v.argsRaw) {
     throw new DshError('LAUNCH_FAILED', `拉起后复核发现进程已消失（pid=${pid}）`, { host });
   }
@@ -90,8 +110,13 @@ export async function captureFingerprint(host, { pid, port }, { signal } = {}) {
  * 附双方指纹供人工裁决**（03 §4.2 原则）。
  * @returns {Promise<StopResult>}
  */
-export async function stopRemote(host, { pid, fingerprint }, { signal } = {}) {
-  const res = await sshExec(host, buildStopScript({ pid, fingerprint }), { signal });
+export async function stopRemote(host, { pid, fingerprint }, { signal, local, timeoutMs } = {}) {
+  const useLocal = isLocalHost(host, local);
+  const res = await execHost(
+    host,
+    buildStopScript({ pid, fingerprint }),
+    { local: useLocal, signal, timeoutMs },
+  );
   const err = execFailure(host, '远端停止', res);
   if (err) throw err;
 
@@ -108,13 +133,14 @@ export async function stopRemote(host, { pid, fingerprint }, { signal } = {}) {
 }
 
 /** 指纹不符时的统一拒杀错误（含双方指纹）。 */
-export function killRefused(host, { pid, expected, actual }) {
+export function killRefused(host, { pid, expected, actual }, { local } = {}) {
+  const subject = isLocalHost(host, local) ? '本机' : '远端';
   return new DshError(
     'KILL_REFUSED',
-    `拒绝关停 pid=${pid}：远端命令行与记录指纹不符（可能已被 PID 复用或为手动实例）`,
+    `拒绝关停 pid=${pid}：${subject}命令行与记录指纹不符（可能已被 PID 复用或为手动实例）`,
     {
       host,
-      detail: `记录指纹：\n${expected}\n\n远端实测：\n${actual ?? '(空)'}`,
+      detail: `记录指纹：\n${expected}\n\n${subject}实测：\n${actual ?? '(空)'}`,
     },
   );
 }
@@ -122,13 +148,14 @@ export function killRefused(host, { pid, expected, actual }) {
 // ── RMT-08 日志获取 ──────────────────────────────────────────────────────
 
 /** logName 取自 state.web.log（manager 自造名，仍过 [name] 校验兜底）。 */
-export async function tailRemoteLog(host, { logName, lines = 200 }, { signal } = {}) {
-  const res = await sshExec(host, buildLogTailScript({ logName, lines }), { signal });
+export async function tailRemoteLog(host, { logName, lines = 200 }, { signal, local } = {}) {
+  const useLocal = isLocalHost(host, local);
+  const res = await execHost(host, buildLogTailScript({ logName, lines }), { local: useLocal, signal });
   const err = execFailure(host, '取远端日志', res);
   if (err) throw err;
   // 行数在远端限了（tail -n），字节数没限：一条带 \r 的进度条就是超长的单行，
   // 撞上封顶只能收到末尾那截。得说一声，否则看的人以为日志本来就长这样（issue #92）。
-  return noteTruncation(res.stdout, res.stdoutDropped) ?? '';
+  return noteTruncation(res.stdout, res.stdoutDropped, useLocal ? '本机' : '远端') ?? '';
 }
 
 // ── RMT-06 拉起协议状态机（12 §3 的 S0–S5） ─────────────────────────────
@@ -152,27 +179,28 @@ export function autoLogName(token = launchToken()) {
  * 用正则而非 parseProtoOutput：此时 stdout 可能只有半截，解析器不该在这里抛。
  * @returns {DshError|null}
  */
-function preludeFailure(host, stdout) {
+function preludeFailure(host, stdout, { local = false } = {}) {
   const marker = /^ERR=(mkdir|workdir)$/m.exec(stdout ?? '');
   if (!marker) return null;
+  const subject = local ? '本机' : '远端';
   // message 不带主机名：调用方 failure() 会包成「拉起失败（host）：<message>」
   if (marker[1] === 'workdir') {
     const wd = /^WD=(.*)$/m.exec(stdout)?.[1] ?? '(未回显)';
-    return new DshError('LAUNCH_FAILED', '远端工作目录不存在或不可进入', {
+    return new DshError('LAUNCH_FAILED', `${subject}工作目录不存在或不可进入`, {
       host,
-      detail: `目标目录：${wd}\n改主机详情里的「启动目录」，或先在远端建好该目录。`,
+      detail: `目标目录：${wd}\n改主机详情里的「启动目录」，或先在${subject}建好该目录。`,
     });
   }
-  return new DshError('LAUNCH_FAILED', '远端无法创建落地目录 .dsh_center_remote', {
+  return new DshError('LAUNCH_FAILED', `${subject}无法创建落地目录 .dsh_center_remote`, {
     host,
     detail: stdout,
   });
 }
 
 /** S1 LAUNCH：拿 PID。 */
-async function launchOnce(host, spec, { signal }) {
-  const res = await sshExec(host, buildLaunchScript(spec), { signal });
-  const prelude = preludeFailure(host, res.stdout);
+async function launchOnce(host, spec, { signal, local }) {
+  const res = await execHost(host, buildLaunchScript(spec), { local, signal });
+  const prelude = preludeFailure(host, res.stdout, { local });
   if (prelude) throw prelude;
   const err = execFailure(host, '远端拉起', res);
   if (err) throw err;
@@ -190,12 +218,16 @@ async function launchOnce(host, spec, { signal }) {
  * S2 POLL 环：首拍 T+1s，此后每 2s 一拍，最多 5 拍。
  * @returns {Promise<{outcome:'url'|'bind-err'|'dead'|'timeout', actualPort?:number}>}
  */
-async function pollLaunch(host, { logName, pid }, { signal }) {
+async function pollLaunch(host, { logName, pid }, { signal, local }) {
   await waitFn(PROTO_TIMING.pollFirstDelayMs);
   for (let attempt = 0; attempt < PROTO_TIMING.pollMaxAttempts; attempt += 1) {
     if (attempt > 0) await waitFn(PROTO_TIMING.pollIntervalMs);
 
-    const res = await sshExec(host, buildLaunchPollScript({ logName, pid }), { signal });
+    const res = await execHost(
+      host,
+      buildLaunchPollScript({ logName, pid }),
+      { local, signal },
+    );
     const err = execFailure(host, '拉起轮询', res);
     if (err) throw err;
     const out = parseProtoOutput(res.stdout, { requireDone: 'POLL_DONE' });
@@ -215,9 +247,13 @@ async function pollLaunch(host, { logName, pid }, { signal }) {
   return { outcome: 'timeout' };
 }
 
-async function tailQuiet(host, logName, signal) {
+async function tailQuiet(host, logName, signal, local) {
   try {
-    return await tailRemoteLog(host, { logName, lines: PROTO_TIMING.logTailLines }, { signal });
+    return await tailRemoteLog(
+      host,
+      { logName, lines: PROTO_TIMING.logTailLines },
+      { local, signal },
+    );
   } catch (err) {
     return `(取日志失败：${err.message})`;
   }
@@ -232,10 +268,11 @@ async function tailQuiet(host, logName, signal) {
  * @returns {Promise<{pid:number, actualPort:number, logName:string, fingerprint:string, cwd:string|null}>}
  * @throws {DshError} LAUNCH_FAILED（detail 含一到两份日志尾）
  */
-export async function runLaunchSequence(host, spec, { signal } = {}) {
+export async function runLaunchSequence(host, spec, { signal, local } = {}) {
   const {
     port, env = {}, extraArgs = [], patchRemoteNames = [], workdir = null,
   } = spec;
+  const useLocal = isLocalHost(host, local);
   const attempts = [];
   let usePort = port;
   let logName = fixedLogName(port);
@@ -248,25 +285,37 @@ export async function runLaunchSequence(host, spec, { signal } = {}) {
     // S1
     let pid;
     try {
-      pid = await launchOnce(host, launchSpec, { signal });
+      pid = await launchOnce(host, launchSpec, { local: useLocal, signal });
     } catch (err) {
-      attempts.push({ logName, note: err.message, log: await tailQuiet(host, logName, signal) });
+      attempts.push({
+        logName,
+        note: err.message,
+        log: await tailQuiet(host, logName, signal, useLocal),
+      });
       throw failure(host, attempts, err);
     }
 
     // S2
     let poll;
     try {
-      poll = await pollLaunch(host, { logName, pid }, { signal });
+      poll = await pollLaunch(host, { logName, pid }, { local: useLocal, signal });
     } catch (err) {
-      await orphanCleanup(host, pid, signal);
-      attempts.push({ logName, note: err.message, log: await tailQuiet(host, logName, signal) });
+      await orphanCleanup(host, pid, signal, useLocal);
+      attempts.push({
+        logName,
+        note: err.message,
+        log: await tailQuiet(host, logName, signal, useLocal),
+      });
       throw failure(host, attempts, err);
     }
 
     // S3
     if (poll.outcome === 'url') {
-      const { fingerprint, cwd } = await captureFingerprint(host, { pid, port: poll.actualPort }, { signal });
+      const { fingerprint, cwd } = await captureFingerprint(
+        host,
+        { pid, port: poll.actualPort },
+        { local: useLocal, signal },
+      );
       return {
         pid, actualPort: poll.actualPort, logName, fingerprint, cwd,
       };
@@ -276,8 +325,12 @@ export async function runLaunchSequence(host, spec, { signal } = {}) {
     if (poll.outcome === 'bind-err' && !fallbackUsed) {
       // 旧 pid 若仍活着：指纹尚未捕获，以「本次 LAUNCH 拼装的命令行」作临时指纹做全等；
       // 不匹配就放着不杀（12 §5.1 R6：宁可留一个可见的孤儿）
-      await orphanCleanup(host, pid, signal);
-      attempts.push({ logName, note: `端口 ${usePort} 被占，降级 --port 0 重拉`, log: await tailQuiet(host, logName, signal) });
+      await orphanCleanup(host, pid, signal, useLocal);
+      attempts.push({
+        logName,
+        note: `端口 ${usePort} 被占，降级 --port 0 重拉`,
+        log: await tailQuiet(host, logName, signal, useLocal),
+      });
       fallbackUsed = true;
       usePort = '0';
       logName = autoLogName();
@@ -285,23 +338,27 @@ export async function runLaunchSequence(host, spec, { signal } = {}) {
     }
 
     // S5 FAIL 收尾
-    await orphanCleanup(host, pid, signal);
+    await orphanCleanup(host, pid, signal, useLocal);
     const note = {
       'bind-err': '端口被占且降级重拉后仍被占',
       dead: '远端进程启动后立即退出',
       timeout: `启动超时（${PROTO_TIMING.pollMaxAttempts} 拍内未见监听 URL）`,
     }[poll.outcome];
-    attempts.push({ logName, note, log: await tailQuiet(host, logName, signal) });
+    attempts.push({
+      logName,
+      note,
+      log: await tailQuiet(host, logName, signal, useLocal),
+    });
     throw failure(host, attempts, null);
   }
 }
 
 /** S5b：失败但进程残留时尽力清理（指纹未知，只能按 pid 存活与否决定要不要出手）。 */
-async function orphanCleanup(host, pid, signal) {
+async function orphanCleanup(host, pid, signal, local) {
   try {
-    const v = await verifyRemote(host, { pid, port: 1 }, { signal });
+    const v = await verifyRemote(host, { pid, port: 1 }, { local, signal });
     if (!v.alive || !v.argsRaw) return;
-    await stopRemote(host, { pid, fingerprint: v.argsRaw }, { signal });
+    await stopRemote(host, { pid, fingerprint: v.argsRaw }, { local, signal });
   } catch {
     // 清理是 best-effort：失败只会留下一个下轮探测可见的孤儿（12 §5.1 R6/R7）
   }
@@ -348,16 +405,22 @@ export function start(name) {
       throw new DshError('NOT_ALLOWED', `主机 ${name} 已在配置中停用`, { host: name });
     }
     recheckPhase(name, START_PHASES, '启动');
+    const local = view.local === true;
 
     store.setPhase(name, 'starting', 'launcher.start');
 
     /** @type {{pid:number, actualPort:number, logName:string, fingerprint:string, cwd:string|null}|null} */
     let launched = null;
     try {
-      const localPort = await ensureLocalPort(name);
+      const allocatedPort = local ? null : await ensureLocalPort(name);
       const remotePort = store.effectiveRemotePort(name);
 
-      const sync = await syncPatches(name, view.config.inject.patches, view.patchSync, { signal });
+      const sync = await syncPatches(
+        name,
+        view.config.inject.patches,
+        view.patchSync,
+        { local, signal },
+      );
       if (sync.uploaded > 0 || sync.skipped > 0) {
         store.mutateHostState(name, (st) => { st.patchSync = sync.patchSync; });
         logEvent(name, 'info', `patch 同步完成：上载 ${sync.uploaded}、跳过 ${sync.skipped}`);
@@ -372,7 +435,7 @@ export function start(name) {
         extraArgs: view.config.inject.extraArgs,
         patchRemoteNames: sync.remoteNames,
         workdir,
-      }, { signal });
+      }, { local, signal });
 
       store.mutateHostState(name, (st) => {
         st.web = {
@@ -389,13 +452,24 @@ export function start(name) {
         };
       });
 
-      await tunnel.open(name, { localPort, remotePort: launched.actualPort });
+      const localPort = local ? launched.actualPort : allocatedPort;
+      await tunnel.open(name, {
+        localPort,
+        remotePort: launched.actualPort,
+        direct: local,
+      });
 
       store.setPhase(name, 'running', 'launcher.start');
-      logEvent(name, 'info', `已启动 pid=${launched.pid} 远端端口=${launched.actualPort} 本机端口=${localPort}`);
+      logEvent(
+        name,
+        'info',
+        local
+          ? `已启动 pid=${launched.pid} web 端口=${launched.actualPort}（本机直连）`
+          : `已启动 pid=${launched.pid} 远端端口=${launched.actualPort} 本机端口=${localPort}`,
+      );
       return { pid: launched.pid, actualPort: launched.actualPort, localPort };
     } catch (err) {
-      await rollbackStart(name, launched, signal);
+      await rollbackStart(name, launched, signal, local);
       const e = err instanceof DshError ? err : new DshError('INTERNAL', err.message, { host: name, cause: err });
       logEvent(name, 'error', `启动失败：${e.message}`, e.detail ?? null);
       throw e;
@@ -404,7 +478,7 @@ export function start(name) {
 }
 
 /** 回滚（12 §3.6）：远端已拉起就按指纹停掉，state 清空，phase 回 ready。 */
-async function rollbackStart(name, launched, signal) {
+async function rollbackStart(name, launched, signal, local) {
   try {
     await tunnel.close(name);
   } catch {
@@ -412,12 +486,20 @@ async function rollbackStart(name, launched, signal) {
   }
   if (launched) {
     try {
-      const res = await stopRemote(name, { pid: launched.pid, fingerprint: launched.fingerprint }, { signal });
+      const res = await stopRemote(
+        name,
+        { pid: launched.pid, fingerprint: launched.fingerprint },
+        { local, signal },
+      );
       if (res.killed === 'no') {
-        logEvent(name, 'warn', `回滚时拒杀 pid=${launched.pid}（指纹不符），远端可能留下孤儿实例`);
+        logEvent(
+          name,
+          'warn',
+          `回滚时拒杀 pid=${launched.pid}（指纹不符），${local ? '本机' : '远端'}可能留下孤儿实例`,
+        );
       }
     } catch (err) {
-      logEvent(name, 'warn', `回滚清理远端失败：${err.message}`);
+      logEvent(name, 'warn', `回滚清理${local ? '本机' : '远端'}失败：${err.message}`);
     }
   }
   store.mutateHostState(name, (st) => {
@@ -428,28 +510,42 @@ async function rollbackStart(name, launched, signal) {
 }
 
 /**
- * stop（02 §3.5）：隧道先关 → 停止协议（指纹全等）→ 清 state.web → ready。
+ * stop（02 §3.5）：远端隧道仍先关；本机 direct 只在 STOP 明确成功后清。
+ * 随后清 state.web → ready。
  * KILLED=no → 抛 KILL_REFUSED 且 state 不动（人工裁决，README 不误杀契约）。
  */
 export function stop(name) {
   return hostQueue(name).run('stop', async (signal) => {
     const st = store.getHostState(name);
-    if (!store.getHostView(name)) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
+    const view = store.getHostView(name);
+    if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
     if (!st?.web?.startedByUs) {
       throw new DshError('NOT_ALLOWED', `主机 ${name} 上没有由本 manager 拉起的实例，拒绝关停`, { host: name });
     }
     recheckPhase(name, STOP_PHASES, '关停');
 
     const { pid, cmdFingerprint } = st.web;
-    await tunnel.close(name);
+    const local = view.local === true;
+    // 远端须先断开转发，维持既有关闭时序；本机 direct 是 mappedUrl/巡检的事实记录，
+    // STOP 拒杀、超时或失败时仍应保留，不能先删成 running + no-tunnel。
+    if (!local) await tunnel.close(name);
 
-    const res = await stopRemote(name, { pid, fingerprint: cmdFingerprint }, { signal });
+    const res = await stopRemote(
+      name,
+      { pid, fingerprint: cmdFingerprint },
+      { local, signal, timeoutMs: stopTimeoutMs },
+    );
     if (res.killed === 'no') {
-      const err = killRefused(name, { pid, expected: cmdFingerprint, actual: res.actualArgs });
+      const err = killRefused(
+        name,
+        { pid, expected: cmdFingerprint, actual: res.actualArgs },
+        { local },
+      );
       logEvent(name, 'error', err.message, err.detail);
       throw err;
     }
 
+    if (local) await tunnel.close(name);
     store.mutateHostState(name, (entry) => {
       entry.web = null;
       entry.tunnel = null;
@@ -473,6 +569,8 @@ export async function restart(name) {
  */
 export async function recoverOne(name) {
   return hostQueue(name).run('recover', async (signal) => {
+    const view = store.getHostView(name);
+    const local = view?.local === true;
     const st = store.getHostState(name);
     // 上一代 manager 的隧道子进程随其退出而死：state 里的隧道记录一律作废（契约疑议 3 口径）
     if (st?.tunnel) store.mutateHostState(name, (e) => { e.tunnel = null; });
@@ -485,7 +583,11 @@ export async function recoverOne(name) {
 
     let v;
     try {
-      v = await verifyRemote(name, { pid: web.pid, port: web.port ?? 1, fingerprint: web.cmdFingerprint }, { signal });
+      v = await verifyRemote(
+        name,
+        { pid: web.pid, port: web.port ?? 1, fingerprint: web.cmdFingerprint },
+        { local, signal },
+      );
     } catch (err) {
       logEvent(name, 'warn', `恢复复核失败（${err.message}），标记 crashed`, err.detail ?? null);
       return toCrashed(name);
@@ -501,15 +603,19 @@ export async function recoverOne(name) {
     store.mutateHostState(name, (e) => { e.web = { ...e.web, cwd: v.cwd }; });
 
     try {
-      const localPort = await ensureLocalPort(name);
-      await tunnel.open(name, { localPort, remotePort: web.port });
+      const localPort = local ? web.port : await ensureLocalPort(name);
+      await tunnel.open(name, {
+        localPort,
+        remotePort: web.port,
+        direct: local,
+      });
     } catch (err) {
       logEvent(name, 'error', `恢复隧道失败：${err.message}`, err.detail ?? null);
       return toCrashed(name);
     }
 
     store.setPhase(name, 'running', 'launcher.recoverOne');
-    logEvent(name, 'info', `恢复接管 pid=${web.pid}，隧道已重建`);
+    logEvent(name, 'info', local ? `恢复接管 pid=${web.pid}，本机直连已登记` : `恢复接管 pid=${web.pid}，隧道已重建`);
     return 'running';
   }, { timeoutMs: PROTO_TIMING.startBudgetMs });
 }

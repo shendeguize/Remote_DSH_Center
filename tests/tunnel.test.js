@@ -4,11 +4,135 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 
-import { TUNNEL_TIMING, backoffDelay, classifyExit, isForwardDeniedLine } from '../src/tunnel.js';
+import { newFactoryConfig, newHostConfig, resolvePaths } from '../src/defaults.js';
+import { reopenSsh } from '../src/lib/ssh.js';
+import * as launcher from '../src/launcher.js';
+import * as monitor from '../src/monitor.js';
+import * as store from '../src/store.js';
+import * as tunnel from '../src/tunnel.js';
+
+const {
+  TUNNEL_TIMING, backoffDelay, classifyExit, isForwardDeniedLine,
+} = tunnel;
 
 const CEILINGS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000];
 const ATTEMPTS = [0, 1, 2, 3, 4, 5, 6, 10];
+const LOCAL_NAME = 'local-host';
+const FINGERPRINT = 'dsh web --no-open --host 127.0.0.1 --port 19001';
+
+async function closeServer(server) {
+  if (!server.listening) return;
+  await new Promise((resolve) => server.close(resolve));
+}
+
+async function listenHttp() {
+  const server = net.createServer((socket) => {
+    socket.once('data', () => {
+      socket.end('HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n');
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    server,
+    port: /** @type {import('node:net').AddressInfo} */ (server.address()).port,
+  };
+}
+
+async function unusedPort() {
+  const { server, port } = await listenHttp();
+  await closeServer(server);
+  return port;
+}
+
+/**
+ * 给 recover/monitor 建一份本机 HostView 与可记录运输调用的本地 shell 垫片。
+ * @param {import('node:test').TestContext} t
+ * @param {{port:number, alive?:boolean}} p
+ */
+async function localRuntime(t, { port, alive = true }) {
+  await tunnel.closeAll();
+  tunnel._reset();
+  store._reset();
+  reopenSsh();
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-tunnel-direct-'));
+  const callsFile = path.join(dir, 'calls.ndjson');
+  const runner = path.join(dir, 'transport.mjs');
+  fs.writeFileSync(runner, [
+    "import fs from 'node:fs';",
+    'const [kind, mark] = process.argv.slice(2);',
+    "fs.appendFileSync(mark, `${JSON.stringify({ kind, args: process.argv.slice(4) })}\\n`);",
+    "if (kind === 'ssh') { process.stderr.write('ssh must not run\\n'); process.exit(70); }",
+    alive
+      ? `process.stdout.write(${JSON.stringify(`ALIVE=yes\nARGS<<EOF\n${FINGERPRINT}\nEOF\nLISTEN=yes\nCWD=/tmp/local\nVERIFY_DONE=yes\n`)});`
+      : "process.stdout.write('ALIVE=no\\nLISTEN=no\\nCWD=unknown\\nVERIFY_DONE=yes\\n');",
+  ].join('\n'));
+
+  const saved = {
+    DSHC_LOCAL_SH_BIN: process.env.DSHC_LOCAL_SH_BIN,
+    DSHC_SSH_BIN: process.env.DSHC_SSH_BIN,
+  };
+  process.env.DSHC_LOCAL_SH_BIN = `${process.execPath} ${runner} local ${callsFile}`;
+  process.env.DSHC_SSH_BIN = `${process.execPath} ${runner} ssh ${callsFile}`;
+
+  const config = newFactoryConfig();
+  config.setupCompleted = true;
+  config.hosts[LOCAL_NAME] = {
+    ...newHostConfig(),
+    local: true,
+    localPort: null,
+  };
+  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  fs.writeFileSync(path.join(dir, 'state.json'), `${JSON.stringify({
+    hosts: {
+      [LOCAL_NAME]: {
+        phase: 'running',
+        probe: null,
+        web: {
+          pid: 43210,
+          port,
+          startedByUs: true,
+          cmdFingerprint: FINGERPRINT,
+          log: 'web-19001.log',
+          startedAt: new Date(0).toISOString(),
+        },
+        // 模拟上一代 manager 留下的可丢弃线索；recover 必须以 web.port 重建 direct。
+        tunnel: { localPort: 17701, remotePort: port, openedAt: new Date(0).toISOString() },
+        patchSync: { files: {} },
+        manualInstances: [],
+      },
+    },
+  }, null, 2)}\n`);
+
+  await store.init({ pathsOverride: resolvePaths({ DSHC_HOME: dir }, os.homedir()) });
+  store.setTunnelStatusProvider(tunnel.status);
+
+  t.after(async () => {
+    await tunnel.closeAll();
+    tunnel._reset();
+    store._reset();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  return {
+    calls() {
+      if (!fs.existsSync(callsFile)) return [];
+      return fs.readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+    },
+  };
+}
 
 test('backoffDelay：1,2,4,8,16,30,30… 秒封顶 30s（作为上界）', () => {
   assert.deepEqual(ATTEMPTS.map((n) => backoffDelay(n, () => 1)), CEILINGS);
@@ -90,4 +214,150 @@ test('时间常量符合 §5.2/§5.3 约定', () => {
   assert.equal(TUNNEL_TIMING.readyPollMs, 250);
   assert.equal(TUNNEL_TIMING.denyThreshold, 3);
   assert.equal(TUNNEL_TIMING.denyWindowMs, 60_000);
+});
+
+test('direct open：恒等端口、无 ssh child、状态可序列化，close/closeAll 只清账', async () => {
+  tunnel._reset();
+  store._reset();
+
+  const { server, port } = await listenHttp();
+  try {
+    const opened = await tunnel.open('-无需经过-ssh-host-校验', {
+      localPort: port,
+      remotePort: port,
+      direct: true,
+    });
+    assert.deepEqual(opened, {
+      localPort: port,
+      connected: true,
+      reconnectAttempt: 0,
+      suspendedReason: null,
+      direct: true,
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(opened)), opened, 'direct 标识必须可序列化');
+    assert.equal(tunnel.isOpen('-无需经过-ssh-host-校验'), true);
+    assert.deepEqual(tunnel.listOpen(), ['-无需经过-ssh-host-校验']);
+    assert.equal(tunnel._childPid('-无需经过-ssh-host-校验'), null, '直连不得伪装成 ssh child');
+    assert.equal(store.getHostState('-无需经过-ssh-host-校验').tunnel.direct, true);
+
+    await tunnel.close('-无需经过-ssh-host-校验');
+    assert.equal(tunnel.status('-无需经过-ssh-host-校验'), null);
+    assert.equal(await tunnel.probeForward(port, 500), true, '清直连账不能顺带关停 dsh web');
+
+    await tunnel.open('local-a', { localPort: port, remotePort: port, direct: true });
+    await tunnel.open('local-b', { localPort: port, remotePort: port, direct: true });
+    await tunnel.closeAll();
+    assert.deepEqual(tunnel.listOpen(), []);
+  } finally {
+    await closeServer(server);
+    tunnel._reset();
+    store._reset();
+  }
+});
+
+test('direct open 拒绝非恒等或非法端口，且不破坏已有条目', async () => {
+  tunnel._reset();
+  store._reset();
+  await tunnel.open('local', { localPort: 19001, remotePort: 19001, direct: true });
+
+  await assert.rejects(
+    () => tunnel.open('local', { localPort: 19001, remotePort: 19002, direct: true }),
+    (err) => err?.code === 'VALIDATION' && /端口.*一致/.test(err.message),
+  );
+  assert.equal(tunnel.status('local').localPort, 19001);
+
+  await assert.rejects(
+    () => tunnel.open('bad', { localPort: 0, remotePort: 0, direct: true }),
+    (err) => err?.code === 'VALIDATION',
+  );
+  assert.equal(tunnel.status('bad'), null);
+  await tunnel.closeAll();
+  tunnel._reset();
+  store._reset();
+});
+
+test('direct reconnect/restartChild 稳定拒绝且不改变运行条目', async () => {
+  tunnel._reset();
+  store._reset();
+  await tunnel.open('local', { localPort: 19001, remotePort: 19001, direct: true });
+
+  await assert.rejects(
+    () => tunnel.requestReconnect('local'),
+    (err) => err?.code === 'NOT_ALLOWED' && err.message === '本机主机使用直连，没有隧道可重连',
+  );
+  await assert.rejects(
+    () => tunnel.restartChild('local'),
+    (err) => err?.code === 'NOT_ALLOWED' && /没有隧道子进程可重建/.test(err.message),
+  );
+  assert.deepEqual(tunnel.status('local'), {
+    localPort: 19001,
+    connected: true,
+    reconnectAttempt: 0,
+    suspendedReason: null,
+    direct: true,
+  });
+  await tunnel.closeAll();
+  tunnel._reset();
+  store._reset();
+});
+
+test('recoverOne：本机 VERIFY 成功后按 web.port 重建 direct，不分配映射端口', async (t) => {
+  const port = await unusedPort();
+  const fixture = await localRuntime(t, { port });
+
+  assert.equal(await launcher.recoverOne(LOCAL_NAME), 'running');
+  assert.deepEqual(tunnel.status(LOCAL_NAME), {
+    localPort: port,
+    connected: true,
+    reconnectAttempt: 0,
+    suspendedReason: null,
+    direct: true,
+  });
+  assert.equal(tunnel._childPid(LOCAL_NAME), null);
+  assert.equal(store.getConfig().hosts[LOCAL_NAME].localPort, null, '本机恢复不得写映射端口');
+  assert.equal(store.getHostState(LOCAL_NAME).tunnel.direct, true);
+  assert.deepEqual(fixture.calls().map((call) => call.kind), ['local'], '恢复只允许本机 VERIFY');
+});
+
+test('direct 巡检：HTTP 成功不做 VERIFY，close 后 web 仍运行', async (t) => {
+  const { server, port } = await listenHttp();
+  t.after(() => closeServer(server));
+  const fixture = await localRuntime(t, { port });
+  await tunnel.open(LOCAL_NAME, { localPort: port, remotePort: port, direct: true });
+
+  assert.deepEqual(await monitor.checkOne(LOCAL_NAME), { host: LOCAL_NAME, outcome: 'ok' });
+  assert.deepEqual(fixture.calls(), [], '最小 HTTP probe 成功后不应再执行 VERIFY');
+  assert.equal(store.getHostView(LOCAL_NAME).mappedUrl, `http://127.0.0.1:${port}/`);
+
+  await tunnel.close(LOCAL_NAME);
+  assert.equal(await tunnel.probeForward(port, 500), true, '关闭 direct 不能杀本机 web');
+});
+
+test('direct 巡检：HTTP 失败且 VERIFY 判死时直接 crashed，无 degraded/重连', async (t) => {
+  const port = await unusedPort();
+  const fixture = await localRuntime(t, { port, alive: false });
+  await tunnel.open(LOCAL_NAME, { localPort: port, remotePort: port, direct: true });
+
+  assert.deepEqual(await monitor.checkOne(LOCAL_NAME), { host: LOCAL_NAME, outcome: 'crashed' });
+  assert.equal(store.getPhase(LOCAL_NAME), 'crashed');
+  assert.equal(tunnel.status(LOCAL_NAME), null);
+  assert.deepEqual(fixture.calls().map((call) => call.kind), ['local'], '失败后 VERIFY 也不得走 ssh');
+});
+
+test('direct 巡检：HTTP 失败但进程指纹仍匹配时保持 running，不造 degraded/退避', async (t) => {
+  const port = await unusedPort();
+  const fixture = await localRuntime(t, { port, alive: true });
+  await tunnel.open(LOCAL_NAME, { localPort: port, remotePort: port, direct: true });
+
+  assert.deepEqual(await monitor.checkOne(LOCAL_NAME), { host: LOCAL_NAME, outcome: 'unresponsive' });
+  assert.equal(store.getPhase(LOCAL_NAME), 'running');
+  assert.deepEqual(tunnel.status(LOCAL_NAME), {
+    localPort: port,
+    connected: true,
+    reconnectAttempt: 0,
+    suspendedReason: null,
+    direct: true,
+  });
+  assert.equal(tunnel._childPid(LOCAL_NAME), null);
+  assert.deepEqual(fixture.calls().map((call) => call.kind), ['local']);
 });

@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -131,15 +132,22 @@ function buildManagerCtl() {
 // ── setup（ENG-19 的服务侧） ─────────────────────────────────────────────
 
 async function applySetup(incoming) {
+  const sshHosts = loadHosts();
+  store.assertSetupLocalIdentities(
+    incoming,
+    os.hostname(),
+    sshHosts.map((host) => host.name),
+  );
   const before = runtime.port;
   const saved = store.saveConfigFromSetup(incoming);
+  store.clearSetupLocalCandidate();
   const portChanged = saved.manager.port !== before;
 
   if (!portChanged) {
     // 端口未变：撤门禁 + 热切换，继续走启动序列 6–9 步
     runtime.setupGate = false;
     logEvent(null, 'info', '初始化配置已保存，门禁解除');
-    store.mergeSshHosts(loadHosts());
+    store.mergeSshHosts(sshHosts);
     void postSetupBoot();
     return { ok: true, port: saved.manager.port, portChanged: false, restartRequired: false, restarting: false };
   }
@@ -212,10 +220,11 @@ export async function main({ portOverride = null, skipBoot = false } = {}) {
 
   await store.init();
   store.setTunnelStatusProvider(tunnel.status);
+  runtime.setupGate = !store.isSetupCompleted();
   // setup 模式也要有主机清单：向导第 3 步要勾选主机（13 §4 允许 GET /api/hosts）
   store.mergeSshHosts(loadHosts());
+  if (runtime.setupGate) store.ensureSetupLocalCandidate(os.hostname());
 
-  runtime.setupGate = !store.isSetupCompleted();
   const cfg = store.getConfig();
   const port = portOverride ?? (runtime.setupGate ? FACTORY_DEFAULTS.manager.port : cfg.manager.port);
 

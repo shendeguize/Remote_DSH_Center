@@ -10,6 +10,7 @@
 
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -20,10 +21,12 @@ import { isMainEntry } from './lib/entry.js';
 import {
   RELEASE_REPO, SUMS_FILE, assetUrl, releasesUrl,
 } from './lib/bundle.js';
+import { DshError } from './lib/errors.js';
 import { openerBin } from './lib/ssh.js';
 import { BINDABLE_PORT_RANGE, isBindablePort } from './lib/validate.js';
+import { canonicalSetupLocalName } from './store.js';
 import {
-  SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, previewJson, setByPath,
+  SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, normalizeHostCandidates, previewJson, setByPath,
 } from './web/setup-schema.js';
 
 // interrupted=130 是 shell 惯例（128+SIGINT）：脚本里要能把「我自己按了 Ctrl-C」
@@ -444,10 +447,10 @@ export function formatTable(headers, rows) {
 }
 
 /**
- * 「没能跟对方说上话」的错误码——退出码 2 的判据。
- * 其余（校验不过、相位冲突、拒杀、端口用尽、拉起失败）都是动作被受理后失败，算 1。
+ * 超时或「没能跟对方说上话」的错误码——退出码 2 的判据。
+ * 其余（校验不过、相位冲突、拒杀、端口用尽、本机执行/复制失败）都是操作失败，算 1。
  */
-const COMM_CODES = new Set(['SSH_TIMEOUT', 'SSH_UNREACHABLE']);
+const COMM_CODES = new Set(['SSH_TIMEOUT', 'SSH_UNREACHABLE', 'LOCAL_TIMEOUT']);
 
 /** @returns {0|1|2|3} */
 export function exitCodeFor({ status, code }) {
@@ -1040,6 +1043,25 @@ export function buildDefaultsPatchFor(key, value) {
 
 // ── dshc init（ENG-18） ─────────────────────────────────────────────────
 
+/**
+ * 给候选清单稳定地补一台本机。强制重配时复用已有 local；名字冲突才追加 `-local[-N]`。
+ * @param {Array<string|{name:string,local?:boolean}>} candidates
+ * @param {string} hostname
+ * @param {object|null} current
+ */
+export function withLocalCandidate(candidates, hostname, current = null) {
+  const normalized = normalizeHostCandidates(candidates);
+  const localName = canonicalSetupLocalName(hostname, {
+    hosts: current?.hosts,
+    sshNames: normalized.filter((candidate) => !candidate.local).map((candidate) => candidate.name),
+  });
+
+  return [
+    ...normalized.filter((candidate) => !candidate.local && candidate.name !== localName),
+    { name: localName, local: true },
+  ];
+}
+
 async function cmdInit({ flags }) {
   const verdict = classifyConfigFile();
   if (verdict.kind === 'unreadable') return reportBadConfig(verdict);
@@ -1068,18 +1090,29 @@ async function cmdInit({ flags }) {
   try {
     const { loadHosts } = await import('./ssh-config.js');
     const { probeOnce } = await import('./prober.js');
+    const preferredLocalName = os.hostname();
+    const sshNames = loadHosts().map((host) => host.name);
+    const candidates = withLocalCandidate(
+      sshNames,
+      preferredLocalName,
+      existing,
+    );
 
     const result = await runSetupWizard({
       ask: (prompt) => rl.question(prompt),
       current: existing?.setupCompleted ? existing : newFactoryConfig(),
-      sshHosts: loadHosts().map((h) => h.name),
-      probeHost: (name) => probeOnce(name, { timeoutMs: 20_000 }),
+      sshHosts: candidates,
+      probeHost: (name, candidate) => probeOnce(name, { local: candidate.local, timeoutMs: 20_000 }),
     });
     if (!result) {
       out('已取消，未写入任何内容。');
       return EXIT.ok;
     }
-    return persistSetup(result.config, flags);
+    return persistSetup(result.config, flags, {
+      current: existing,
+      sshNames,
+      preferredLocalName,
+    });
   } finally {
     rl.close();
   }
@@ -1093,8 +1126,8 @@ async function cmdInit({ flags }) {
  *   ask: (prompt: string) => Promise<string>,
  *   print?: (line?: string) => void,
  *   current: object,
- *   sshHosts?: string[],
- *   probeHost?: ((name: string) => Promise<{phase:string}>) | null,
+ *   sshHosts?: Array<string|{name:string,local?:boolean}>,
+ *   probeHost?: ((name: string, candidate:{name:string,local:boolean}) => Promise<{phase:string}>) | null,
  *   probeDeadlineMs?: number,
  * }} io
  * @returns {Promise<{config:object, answers:object, selection:object, probeResults:object}|null>}
@@ -1104,6 +1137,7 @@ export async function runSetupWizard({
   ask, print = out, current, sshHosts = [], probeHost = null, probeDeadlineMs = 25_000,
 }) {
   const answers = defaultAnswers(current);
+  const candidates = normalizeHostCandidates(sshHosts);
 
   print('');
   print('DSH Center 初始化向导（回车即取方括号内的默认值）');
@@ -1122,32 +1156,38 @@ export async function runSetupWizard({
   const probeResults = {};
   print('');
   print('— 主机纳管与开启 —');
-  if (sshHosts.length === 0) {
+  if (candidates.length === 0) {
     print('~/.ssh/config 里没有可用主机，可稍后补充后重跑 dshc init --force。');
   } else if (probeHost) {
-    print(`发现 ${sshHosts.length} 台候选主机，正在并行探测…`);
-    const probing = Promise.all(sshHosts.map(async (name) => {
+    print(`发现 ${candidates.length} 台候选主机，正在并行探测…`);
+    const probing = Promise.all(candidates.map(async (candidate) => {
+      const { name } = candidate;
       try {
-        const r = await probeHost(name);
+        const r = await probeHost(name, candidate);
         probeResults[name] = r;
-        print(`  ${r.phase === 'ready' ? '✔' : '✘'} ${name}：${PHASE_LABEL[r.phase] ?? r.phase}`);
+        print(`  ${r.phase === 'ready' ? '✔' : '✘'} ${name}${candidate.local ? '（本机）' : ''}：${PHASE_LABEL[r.phase] ?? r.phase}`);
       } catch (err) {
         probeResults[name] = { phase: 'unreachable' };
-        print(`  ✘ ${name}：探测失败（${err.message}）`);
+        print(`  ✘ ${name}${candidate.local ? '（本机）' : ''}：探测失败（${err.message}）`);
       }
     }));
     // 探测慢的主机不该卡住向导：给它一个上限，超时的按未完成处理
     await raceWithDeadline(probing, probeDeadlineMs);
   }
 
-  const selection = await askSelection({ ask, print }, sshHosts, probeResults);
+  const selection = await askSelection({ ask, print }, candidates, probeResults);
 
   // 步骤 4：预览 + 确认
-  const config = buildConfigFromAnswers(answers, sshHosts, probeResults, FACTORY_DEFAULTS, { selection });
+  // 本机身份不是普通的 disabled SSH 条目：用户明确“不纳管”就不提交 local:true，
+  // 因而最终确认后也不会为了一个未选择的候选去提前创建本机身份。
+  const selectedCandidates = candidates.filter(
+    (candidate) => !candidate.local || selection[candidate.name]?.enabled !== false,
+  );
+  const config = buildConfigFromAnswers(answers, selectedCandidates, probeResults, FACTORY_DEFAULTS, { selection });
   print('');
   print('— 确认 —');
   print(previewJson(config));
-  const pending = sshHosts.filter((n) => !probeResults[n]).length;
+  const pending = candidates.filter(({ name }) => !probeResults[name]).length;
   if (pending > 0) print(`仍有 ${pending} 台探测未完成：它们按当前纳管选择保存，自启一律关闭。`);
   const yes = await ask('写入配置？[Y/n] > ');
   if (/^n/i.test(yes.trim())) return null;
@@ -1180,21 +1220,23 @@ async function askField({ ask, print }, field, answers) {
 }
 
 /** 默认全部纳管；开启链接默认勾选全部 ready（其余不允许勾）。 */
-async function askSelection({ ask, print }, sshHosts, probeResults) {
+async function askSelection({ ask, print }, candidates, probeResults) {
   const selection = {};
-  for (const name of sshHosts) selection[name] = { enabled: true, autoStart: probeResults[name]?.phase === 'ready' };
-  if (sshHosts.length === 0) return selection;
+  for (const { name } of candidates) selection[name] = { enabled: true, autoStart: probeResults[name]?.phase === 'ready' };
+  if (candidates.length === 0) return selection;
 
-  const listed = sshHosts.map((n, i) => `${i + 1}) ${n}`).join('  ');
+  const listed = candidates.map((candidate, i) => `${i + 1}) ${candidate.name}${candidate.local ? '（本机）' : ''}`).join('  ');
   print(`  ${listed}`);
   const skip = await ask('不纳管哪些？输入序号，逗号分隔（回车＝全部纳管） > ');
   for (const token of skip.split(/[\s,]+/).filter(Boolean)) {
     const idx = Number(token) - 1;
-    const name = sshHosts[idx];
+    const name = candidates[idx]?.name;
     if (name) selection[name] = { enabled: false, autoStart: false };
   }
 
-  const readyHosts = sshHosts.filter((n) => selection[n].enabled && probeResults[n]?.phase === 'ready');
+  const readyHosts = candidates
+    .map((candidate) => candidate.name)
+    .filter((name) => selection[name].enabled && probeResults[name]?.phase === 'ready');
   if (readyHosts.length > 0) {
     print(`  可随 manager 自启（仅 ready）：${readyHosts.map((n, i) => `${i + 1}) ${n}`).join('  ')}`);
     const off = await ask('不自启哪些？输入序号（回车＝全部自启） > ');
@@ -1206,12 +1248,57 @@ async function askSelection({ ask, print }, sshHosts, probeResults) {
   return selection;
 }
 
-/** server 在跑 → 走 POST /api/setup 让它热切换；没在跑 → 直接原子写盘。 */
-async function persistSetup(config, flags) {
+/**
+ * CLI 侧与 server.assertSetupLocalIdentities 等价的可信来源判定。
+ * 只认现有 local 或共享纯算法算出的 canonical local；SSH 名即使同名也优先拒绝。
+ */
+export function assertCliSetupLocalIdentities(config, {
+  current = null, preferredLocalName, sshNames = [],
+} = {}) {
+  const currentHosts = current?.hosts ?? {};
+  const ssh = new Set(sshNames);
+  const canonicalLocal = canonicalSetupLocalName(preferredLocalName, {
+    hosts: currentHosts,
+    sshNames,
+  });
+  for (const [name, host] of Object.entries(config?.hosts ?? {})) {
+    const existingLocal = currentHosts[name]?.local === true;
+    const requestedLocal = host?.local === true;
+    const existingRemote = (Object.hasOwn(currentHosts, name) && !existingLocal) || ssh.has(name);
+    const trustedCandidate = name === canonicalLocal;
+
+    if (requestedLocal && (existingRemote || (!existingLocal && !trustedCandidate))) {
+      const message = existingRemote
+        ? `初始化配置不能把 SSH 主机 ${name} 改成本机`
+        : `初始化配置不能把未经 CLI 认可的主机 ${name} 声明为本机`;
+      throw new DshError('NOT_ALLOWED', message, { host: name });
+    }
+    if (!requestedLocal && existingLocal) {
+      throw new DshError('NOT_ALLOWED', `初始化配置不能把本机主机 ${name} 改成 SSH 主机`, {
+        host: name,
+      });
+    }
+  }
+  return config;
+}
+
+/** server 在跑 → 单次 POST /api/setup；没在跑 → 本进程做等价身份校验后原子写盘。 */
+export async function persistSetup(config, flags = {}, {
+  current = null,
+  sshNames = [],
+  preferredLocalName = os.hostname(),
+} = {}) {
+  try {
+    assertCliSetupLocalIdentities(config, { current, preferredLocalName, sshNames });
+  } catch (err) {
+    return reportApiError(err, flags);
+  }
+
   const check = await daemon.aliveCheck();
   if (check.alive) {
     try {
-      const res = await apiRequest(check.info.port, 'POST', '/api/setup', config);
+      const port = check.info.port;
+      const res = await apiRequest(port, 'POST', '/api/setup', config);
       out('配置已提交给运行中的 manager。');
       if (res.json?.portChanged) out(`端口已改为 ${res.json.port}，${res.json.restarting ? 'manager 正在自我重启' : '需要 dshc restart 生效'}。`);
       return EXIT.ok;
@@ -1223,6 +1310,7 @@ async function persistSetup(config, flags) {
   const store = await import('./store.js');
   await store.init();
   try {
+    store.assertSetupLocalIdentities(config, preferredLocalName, sshNames);
     store.saveConfigFromSetup(config);
   } catch (err) {
     errOut(`错误：${err.message}`);

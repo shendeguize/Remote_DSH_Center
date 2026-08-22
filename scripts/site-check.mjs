@@ -229,26 +229,41 @@ async function checkDemo(outDir) {
 
   const notes = [];
   try {
-    // ① 首屏：snapshot 落表
+    // ① 首屏：根路由落到 hub，ready 主机已经是常驻标签与一步拉起入口
     await cdp.send('Page.navigate', { url: `${srv.origin}/demo/?fast` });
-    await cdp.waitFor("document.querySelectorAll('.host-table tbody tr').length === 4", 'demo 首屏渲染出四台主机');
-    notes.push('首屏 4 台');
+    await cdp.waitFor(
+      `window.location.hash === '#/hub'
+        && document.querySelector('.view-hub:not([hidden])')
+        && window.__demo.manager.hosts().hosts.length === 4`,
+      'demo 首屏进入 hub 并同步四台主机',
+    );
+    await cdp.waitFor(
+      `window.__demo.manager.getHost('gpu-4090-daily').phase === 'ready'
+        && document.querySelector('.hub-host-card[data-host="gpu-4090-daily"][data-phase="ready"]')
+        && document.querySelector('.host-tabs .tab[data-host="gpu-4090-daily"]')`,
+      'ready 主机同时出现在 hub 与常驻标签',
+    );
+    notes.push('hub 首屏 4 台、ready 标签常驻');
 
     // ② 控制栏在位
     await cdp.waitFor("document.querySelectorAll('.demo-bar .demo-btn').length >= 5", 'demo 控制栏渲染');
 
-    // ③ 拉起：ready → running
-    await cdp.click('tr[data-host="gpu-4090-daily"] .row-actions .btn');
+    // ③ 从 hub 点 ready 卡片：一步完成「拉起 + 进入」，且不能跳过 starting
+    await cdp.click('.hub-host-card[data-host="gpu-4090-daily"]');
     await cdp.waitFor(
-      `document.querySelector('tr[data-host="gpu-4090-daily"] .phase-badge').textContent.includes('运行中')`,
-      '拉起后进入运行中',
-      { timeoutMs: 8_000 },
+      `window.location.hash === '#/host/gpu-4090-daily'
+        && window.__demo.manager.getHost('gpu-4090-daily').phase === 'starting'
+        && !document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] .iframe-overlay').hidden`,
+      'ready 卡片进入 starting 主机页',
     );
-    notes.push('拉起成功');
+    await cdp.waitFor(
+      `window.__demo.manager.getHost('gpu-4090-daily').phase === 'running'
+        && document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe')`,
+      'starting 后进入 running 并创建 iframe',
+    );
+    notes.push('ready 一步拉起经过 starting → running');
 
     // ④ 标签页与 iframe：src 必须是后端下发的 mappedUrl
-    await cdp.eval("window.location.hash = '#/host/gpu-4090-daily'; return true;");
-    await cdp.waitFor(`document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe')`, 'iframe 建出来');
     const iframeOk = await cdp.eval(`
       const frame = document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe');
       const host = window.__demo.manager.getHost('gpu-4090-daily');
@@ -260,9 +275,45 @@ async function checkDemo(outDir) {
       () => responses.some((r) => r.url.includes('mock-dsh-web') && r.status === 200),
       'mock dsh web 页被 iframe 加载（应有 200 响应）',
     );
-    notes.push('iframe 载入 mock 页');
+    await cdp.waitFor(
+      `document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe')
+        .contentDocument?.documentElement.hasAttribute('data-mock-dsh-web')`,
+      'iframe 内载入标明 Mock 的 dsh web 轮廓',
+    );
 
-    // ⑤ 注入断联：遮罩出现
+    // ⑤ mock 表单是 keep-alive 探针：去管理页再回来，iframe 不得重建或清空输入
+    const keepaliveValue = 'site-check keepalive';
+    const filled = await cdp.eval(`
+      const frame = document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe');
+      const input = frame.contentDocument?.querySelector('#draft');
+      if (!input) return false;
+      input.value = ${JSON.stringify(keepaliveValue)};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return input.value === ${JSON.stringify(keepaliveValue)};
+    `);
+    if (!filled) throw new Error('mock dsh web 的 keep-alive 输入框不可用');
+
+    await cdp.click('.tab-manage');
+    await cdp.waitFor(
+      `window.location.hash === '#/manage'
+        && document.querySelector('.view-dashboard:not([hidden])')
+        && document.querySelectorAll('.host-table tbody tr').length === 4`,
+      '从标签栏进入 manage 并看到四台主机',
+    );
+    await cdp.click('.host-tabs .tab[data-host="gpu-4090-daily"]');
+    await cdp.waitFor(
+      `window.location.hash === '#/host/gpu-4090-daily'
+        && !document.querySelector('.iframe-pane[data-host="gpu-4090-daily"]').hidden`,
+      '从 manage 返回运行中主机',
+    );
+    const kept = await cdp.eval(`
+      const frame = document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] iframe');
+      return frame.contentDocument?.querySelector('#draft')?.value === ${JSON.stringify(keepaliveValue)};
+    `);
+    if (!kept) throw new Error('切到 manage 再返回后 mock 输入被清空，iframe keep-alive 失效');
+    notes.push('manage 入口可达、mock 输入保活');
+
+    // ⑥ 注入断联：遮罩出现
     await cdp.eval("window.__demo.manager.injectTunnelDrop('gpu-4090-daily'); return true;");
     await cdp.waitFor(
       `!document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] .iframe-overlay').hidden`,
@@ -270,7 +321,7 @@ async function checkDemo(outDir) {
     );
     notes.push('断联出遮罩');
 
-    // ⑥ 退避重连：遮罩消失且回到运行中
+    // ⑦ 退避重连：遮罩消失且回到运行中
     await cdp.waitFor(
       `document.querySelector('.iframe-pane[data-host="gpu-4090-daily"] .iframe-overlay').hidden`,
       '重连后遮罩消失',
@@ -278,14 +329,14 @@ async function checkDemo(outDir) {
     );
     notes.push('重连自愈');
 
-    // ⑦ 首启引导：?setup 能走到向导
+    // ⑧ 首启引导：?setup 能走到向导
     await cdp.send('Page.navigate', { url: `${srv.origin}/demo/?setup&fast` });
     await cdp.waitFor("document.querySelector('.setup-wizard') && !document.querySelector('.setup-wizard').hidden", '首启引导可达');
     notes.push('首启引导可达');
 
     await captureScreenshot(cdp, OUT_DIR, 'demo-setup');
 
-    // ⑧ 无控制台错误、无失败资源
+    // ⑨ 无控制台错误、无失败资源
     const bad = responses.filter((r) => r.status >= 400 && r.url.startsWith(srv.origin));
     if (bad.length > 0) throw new Error(`有失败请求：${bad.map((b) => `${b.status} ${b.url}`).join(', ')}`);
     if (consoleErrors.length > 0) throw new Error(`控制台有错误：${consoleErrors.join(' | ')}`);

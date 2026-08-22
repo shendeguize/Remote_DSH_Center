@@ -7,41 +7,59 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { clampMenuPosition, menuItems, nextTabIndex, visibleTabs } from '../../src/web/components/tabbar.js';
+import {
+  clampMenuPosition, hostFallbackPanelId, menuItems, nextTabIndex, overflowHosts, visibleTabs,
+} from '../../src/web/components/tabbar.js';
+import { hostPanelId } from '../../src/web/components/iframe-pane.js';
 
 const host = (name, phase, patch = {}) => ({
-  name, phase, mappedUrl: null, web: { pid: 1, startedByUs: true }, ...patch,
+  name, phase, enabled: true, local: false, mappedUrl: null, web: { pid: 1, startedByUs: true }, ...patch,
 });
 
-test('running/degraded 自动出现，ready/no_dsh 不出现', () => {
+test('主标签：enabled 的 ready/starting/running/degraded/crashed 全部常驻', () => {
   const tabs = visibleTabs([
-    host('b', 'running'),
-    host('a', 'degraded'),
-    host('c', 'ready'),
-    host('d', 'no_dsh'),
-    host('e', 'unreachable'),
+    host('e', 'crashed'),
+    host('d', 'degraded'),
+    host('c', 'running'),
+    host('b', 'starting'),
+    host('a', 'ready'),
   ]);
-  assert.deepEqual(tabs.map((h) => h.name), ['a', 'b']);
+  assert.deepEqual(tabs.map((h) => h.name), ['a', 'b', 'c', 'd', 'e']);
 });
 
-test('crashed / starting 只保留已打开或当前停留的主机', () => {
-  const hosts = [host('x', 'crashed'), host('y', 'starting')];
-
-  assert.deepEqual(visibleTabs(hosts).map((h) => h.name), [], '没打开过就不该冒出来');
-  assert.deepEqual(visibleTabs(hosts, { opened: new Set(['x']) }).map((h) => h.name), ['x']);
-  assert.deepEqual(visibleTabs(hosts, { currentHost: 'y' }).map((h) => h.name), ['y']);
+test('主标签之外统一收纳：unreachable/no_dsh/unknown/disabled 都可找到', () => {
+  const hosts = [
+    host('ready', 'ready'),
+    host('offline', 'unreachable'),
+    host('missing', 'no_dsh'),
+    host('waiting', 'unknown'),
+    host('disabled-running', 'running', { enabled: false }),
+  ];
+  assert.deepEqual(visibleTabs(hosts).map((h) => h.name), ['ready']);
+  assert.deepEqual(
+    overflowHosts(hosts).map((h) => h.name),
+    ['disabled-running', 'missing', 'offline', 'waiting'],
+  );
 });
 
-test('关停回 ready 后标签消失', () => {
-  const opened = new Set(['x']);
-  assert.deepEqual(visibleTabs([host('x', 'ready')], { opened, currentHost: 'x' }).map((h) => h.name), []);
+test('ready fallback panel id 对任意主机名稳定编码，且不占用 iframe panel id', () => {
+  const name = 'gpu a/1';
+  assert.equal(hostFallbackPanelId(name), 'host-fallback-panel-gpu%20a%2F1');
+  assert.notEqual(hostFallbackPanelId(name), hostPanelId(name));
 });
 
 test('菜单项：受管 running 可重启/关停，重连禁用', () => {
   const items = menuItems(host('a', 'running', { mappedUrl: 'http://127.0.0.1:1/' }));
   const by = Object.fromEntries(items.map((i) => [i.action, i.enabled]));
-  assert.deepEqual(by, { restart: true, stop: true, reconnect: false, 'copy-address': true });
-  assert.equal(items.length, 4, '无效项禁用而非隐藏，位置要稳定');
+  assert.deepEqual(by, {
+    restart: true,
+    stop: true,
+    reconnect: false,
+    'copy-address': true,
+    'view-manage': true,
+    'open-new-window': true,
+  });
+  assert.equal(items.length, 6, '无效项禁用而非隐藏，位置要稳定');
 });
 
 test('菜单项：degraded 才能重连；无映射地址不能复制', () => {
@@ -53,7 +71,14 @@ test('菜单项：degraded 才能重连；无映射地址不能复制', () => {
 test('菜单项：手动实例一律禁写（不误杀契约）', () => {
   const manual = host('a', 'running', { web: { pid: 9, startedByUs: false }, mappedUrl: 'http://127.0.0.1:1/' });
   const by = Object.fromEntries(menuItems(manual).map((i) => [i.action, i.enabled]));
-  assert.deepEqual(by, { restart: false, stop: false, reconnect: false, 'copy-address': true });
+  assert.deepEqual(by, {
+    restart: false,
+    stop: false,
+    reconnect: false,
+    'copy-address': true,
+    'view-manage': true,
+    'open-new-window': true,
+  });
 });
 
 test('菜单项：crashed 可重启但不能关停', () => {
@@ -105,6 +130,21 @@ test('层序：菜单在 toast 之上、对话框之下', () => {
   assert.ok(z('toast') > z('scrim'), `--z-toast(${z('toast')}) 要高于 --z-scrim(${z('scrim')})`);
   assert.match(css, /\.toast-region\s*\{[^}]*pointer-events:\s*none/, 'toast 容器不该吃指针事件（间隙也会吞点击）');
   assert.match(css, /\.toast\s*\{[^}]*pointer-events:\s*auto/, 'toast 本体要照常可点（有关闭键）');
+});
+
+test('窄屏壳层只让主机标签独立横滚，固定入口不收缩', () => {
+  const css = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web', 'style.css'),
+    'utf8',
+  );
+  assert.match(css, /\.app-shell\s*\{[^}]*display:\s*flex[^}]*overflow:\s*hidden/s, '整条壳不能横滚');
+  assert.match(css, /\.brand\s*\{[^}]*flex(?:-shrink)?:\s*(?:none|0)/s, '品牌不能被长标签挤掉');
+  assert.match(css, /\.host-tabs\s*\{[^}]*flex:\s*1[^}]*min-width:\s*0[^}]*overflow-x:\s*auto/s,
+    '只有主机标签区应吃剩余宽度并独立横滚');
+  assert.match(css, /\.tabbar-actions\s*\{[^}]*flex:\s*none/s, 'overflow、管理与连接灯必须留在视口内');
+  assert.match(css, /\.tab-label\s*\{[^}]*max-width:[^;}]+;[^}]*overflow:\s*hidden[^}]*text-overflow:\s*ellipsis/s,
+    '长主机名必须截断，不能把管理入口推出 390px 视口');
+  assert.doesNotMatch(css, /\.tabbar\s*\{[^}]*overflow-x:\s*auto/s, '横滚放在 host-tabs，不能滚走管理入口');
 });
 
 /**

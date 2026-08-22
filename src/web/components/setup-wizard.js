@@ -82,6 +82,15 @@ export function pendingHosts(hosts, selection) {
   return hosts.filter((h) => !PROBED.has(h.phase) && (selection[h.name]?.enabled ?? true)).map((h) => h.name);
 }
 
+/** setup 表格里的本机不可用态不能沿用 SSH/远端语义。 */
+export function setupPhaseLabel(host) {
+  if (host?.local === true) {
+    if (host.phase === 'unreachable') return '本机不可用';
+    if (host.phase === 'no_dsh') return '本机未安装或未配置';
+  }
+  return phaseMeta(host?.phase).label;
+}
+
 /**
  * 第 4 步 JSON 预览的解析 + 前端基础结构校验（后端 schema 才是终裁）。
  * @returns {{ok:true, config:object}|{ok:false, error:string, line:number|null}}
@@ -312,6 +321,7 @@ export function createSetupWizard({
     for (const host of hosts) {
       const pick = ui.selection[host.name] ?? { enabled: true, autoStart: false };
       const meta = phaseMeta(host.phase);
+      const phaseLabel = setupPhaseLabel(host);
       const probing = !PROBED.has(host.phase);
       const enabledBox = input('checkbox', pick.enabled, {
         'aria-label': `纳管 ${host.name}`,
@@ -334,8 +344,11 @@ export function createSetupWizard({
       // 只有 ready 能开启链接；探测中/不可用的行禁用该勾选框但仍可改纳管
       autoBox.disabled = !pick.enabled || !canAutoStart(host);
       body.append(el('tr', { dataset: { host: host.name, probing: probing ? 'yes' : 'no' } }, [
-        el('td', { text: host.name }),
-        el('td.probe-cell', {}, [el('span.phase-badge', { dataset: { tone: meta.tone }, text: probing ? '探测中' : meta.label })]),
+        el('td', {}, [
+          el('span', { text: host.name }),
+          host.local ? el('span.tag.tag-lock', { text: '本机' }) : null,
+        ]),
+        el('td.probe-cell', {}, [el('span.phase-badge', { dataset: { tone: meta.tone }, text: probing ? '探测中' : phaseLabel })]),
         el('td', {}, [enabledBox]),
         el('td', {}, [autoBox]),
       ]));
@@ -353,7 +366,7 @@ export function createSetupWizard({
     const probeResults = Object.fromEntries(hosts.map((h) => [h.name, { phase: h.phase }]));
     return buildConfigFromAnswers(
       ensureAnswers(),
-      hosts.map((h) => h.name),
+      hosts.map((host) => ({ name: host.name, local: host.local === true })),
       probeResults,
       { hostDefaults: { localPort: null, remoteWebPort: null, workdir: null } },
       { selection: ui.selection },

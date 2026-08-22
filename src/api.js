@@ -9,10 +9,17 @@
  */
 
 import crypto from 'node:crypto';
+import os from 'node:os';
 
 import { DshError, asDshError } from './lib/errors.js';
 import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
-import { assertValid, defaultsPatchSchema, hostConfigPatchSchema, setupBodySchema } from './lib/validate.js';
+import {
+  assertValid,
+  defaultsPatchSchema,
+  hostConfigPatchSchema,
+  localHostCreateSchema,
+  setupBodySchema,
+} from './lib/validate.js';
 import * as launcher from './launcher.js';
 import * as prober from './prober.js';
 import * as store from './store.js';
@@ -361,6 +368,13 @@ export function createHandler({ managerCtl }) {
       sendJson(res, 200, { revision: store.currentRevision(), hosts: store.listHostViews() });
     }],
 
+    ['POST', /^\/api\/hosts\/local$/, async (req, res) => {
+      const body = await readJsonBody(req);
+      assertValid(localHostCreateSchema, body, '本机主机创建请求校验失败');
+      const host = store.createLocalHost(body.name ?? os.hostname());
+      sendJson(res, 201, { host });
+    }],
+
     ['GET', /^\/api\/config$/, (req, res) => {
       sendJson(res, 200, store.getConfig());
     }],
@@ -391,8 +405,21 @@ export function createHandler({ managerCtl }) {
       const body = await readJsonBody(req);
       assertValid(hostConfigPatchSchema, body, '主机配置校验失败（localPort 由 manager 分配，不接受提交）');
 
+      const current = requireHost(view.name);
+      if ('local' in body && body.local !== current.local) {
+        throw new DshError('NOT_ALLOWED', `主机 ${view.name} 的本机/SSH 身份不允许修改`, { host: view.name });
+      }
+      const hasMutableField = Object.keys(body).some((key) => key !== 'local');
+      if (!hasMutableField) {
+        sendJson(res, 200, { host: current });
+        return;
+      }
+
       store.updateConfig((draft) => {
         const host = draft.hosts[view.name];
+        if ('local' in body && body.local !== (host.local === true)) {
+          throw new DshError('NOT_ALLOWED', `主机 ${view.name} 的本机/SSH 身份不允许修改`, { host: view.name });
+        }
         if ('enabled' in body) host.enabled = body.enabled;
         if ('autoStart' in body) host.autoStart = body.autoStart;
         if ('remoteWebPort' in body) host.remoteWebPort = body.remoteWebPort;

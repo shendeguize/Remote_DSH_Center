@@ -19,7 +19,7 @@ import { unshq, unshqWorkdir } from './shell-word.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_WEB = path.join(HERE, 'fake-dsh-web.js');
 /** 假远端的 $HOME 展开值——ps 指纹里出现的绝对路径以此为准。 */
-const REMOTE_HOME = '/root';
+export const REMOTE_HOME = '/root';
 
 const die = (msg) => {
   process.stderr.write(`fake-ssh: ${msg}\n`);
@@ -56,6 +56,13 @@ function classify(body) {
   if (body.includes('echo "PID=$!"')) return 'launch';
   if (body.startsWith('tail -n ')) return 'logtail';
   return die(`无法识别的协议脚本：\n${body}`);
+}
+
+/** 留一份运输层账本，供全链用例断言本机没有误起 ssh -L。 */
+export function recordTransport(event) {
+  const dir = process.env.DSHC_HARNESS_DIR;
+  if (!dir) return;
+  fs.appendFileSync(path.join(dir, 'transport.ndjson'), `${JSON.stringify(event)}\n`);
 }
 
 // ── 协议回放 ─────────────────────────────────────────────────────────────
@@ -126,18 +133,18 @@ function logPath(name, logName) {
  * 启动目录（补丁 01 §4.1）：cd 段可选，缺失即 workdir=null（远端 $HOME 启动）。
  * 段在但形状不符 → die，这正是「协议模板改了形状此处必须跟着改」的断言点。
  */
-function workdirOf(body) {
+function workdirOf(body, home) {
   const seg = /; cd -- (.+?) \|\| \{ echo "ERR=workdir"; printf 'WD=%s\\n' .+?; exit 8; \}/.exec(body);
   if (!seg) {
     if (body.includes('ERR=workdir')) die(`cd 段形状不符，无法抽取启动目录：\n${body}`);
     return null;
   }
-  return unshqWorkdir(seg[1], REMOTE_HOME);
+  return unshqWorkdir(seg[1], home);
 }
 
-function replyLaunch(name, body) {
+function replyLaunch(name, body, { home }) {
   const logName = logNameOf(body);
-  const workdir = workdirOf(body);
+  const workdir = workdirOf(body, home);
   // 真机形态：--patch（启动器旗标）紧跟 web，--no-open 等 app 旗标在其后
   const patchNames = [...body.matchAll(/--patch "\$HOME\/\.dsh_center_remote\/patches\/([^"]+)"/g)].map((m) => m[1]);
   const portTok = must(/dsh web(?: --patch "[^"]+")* --no-open --host 127\.0\.0\.1 --port (\d+)/, body, '端口')[1];
@@ -187,7 +194,7 @@ function replyLaunch(name, body) {
   // 合成 ps 指纹：nohup/env 均 exec 链传递，最终 args 是 dsh web … 形态（12 §5.2）
   const fingerprint = [
     'dsh web',
-    ...patchNames.map((n) => `--patch ${REMOTE_HOME}/.dsh_center_remote/patches/${n}`),
+    ...patchNames.map((n) => `--patch ${home}/.dsh_center_remote/patches/${n}`),
     '--no-open --host 127.0.0.1 --port',
     portTok,
     ...extraArgs,
@@ -235,7 +242,7 @@ function replyPoll(name, body) {
   out('POLL_DONE=yes\n');
 }
 
-function replyVerify(name, body) {
+function replyVerify(name, body, { home }) {
   const pid = Number(must(/ps -p (\d+) -o args=/, body, 'PID')[1]);
   const port = Number(must(/grep -q ":(\d+) "/, body, '端口')[1]);
   must(/if \[ -r \/proc\/\d+\/cwd \]/, body, 'CWD 回读段');
@@ -262,7 +269,7 @@ function replyVerify(name, body) {
   // /proc 不可读（非 Linux / 无权限）→ unknown，无害降级
   const wd = h.processes[String(pid)]?.workdir ?? null;
   const readable = isAlive && !h.faults.noProcCwd;
-  out(`CWD=${readable ? (wd ?? REMOTE_HOME) : 'unknown'}\n`);
+  out(`CWD=${readable ? (wd ?? home) : 'unknown'}\n`);
   out('VERIFY_DONE=yes\n');
 }
 
@@ -344,6 +351,28 @@ function replyLogTail(name, body) {
   }
 }
 
+/**
+ * 同一套协议引擎供 fake-ssh 与 fake-local-sh 共用。运输层只注入主机身份与 HOME；
+ * PROBE/LAUNCH/POLL/VERIFY/STOP/LOG/CLEANUP 的解析和状态变更只有这一份。
+ */
+export function dispatchProtocol(name, body, {
+  home = REMOTE_HOME,
+  transport = 'ssh',
+} = {}) {
+  const kind = classify(body);
+  recordTransport({ transport, kind, host: name, home });
+  const handlers = {
+    probe: replyProbe,
+    launch: replyLaunch,
+    poll: replyPoll,
+    verify: replyVerify,
+    stop: replyStop,
+    cleanup: replyCleanup,
+    logtail: replyLogTail,
+  };
+  handlers[kind](name, body, { home });
+}
+
 // ── 隧道形态（ssh -N -L） ────────────────────────────────────────────────
 
 function runTunnel(name, forward) {
@@ -395,10 +424,6 @@ function runTunnel(name, forward) {
 
 // ── 主流程 ───────────────────────────────────────────────────────────────
 
-const parsed = parseArgv(process.argv.slice(2));
-const name = parsed.positional[0];
-if (!name) die('缺少目标主机');
-
 /**
  * sshd 的 `MaxStartups` 只数**尚未完成认证**的连接，认证一过就从额度里摘掉。
  * 额度是所有主机合起来算的（共用跳板机），所以记在全局而非某台的 faults 里。
@@ -433,38 +458,38 @@ function admitOrDrop() {
   process.on('exit', release);
 }
 
-const st0 = readState();
-const h0 = hostState({ hosts: st0.hosts ?? {} }, name);
-admitOrDrop();
+export function main(argv = process.argv.slice(2)) {
+  const parsed = parseArgv(argv);
+  const name = parsed.positional[0];
+  if (!name) die('缺少目标主机');
 
-if (h0.faults.hostkeyFail) {
-  process.stderr.write('Host key verification failed.\n');
-  process.exit(255);
-}
-if (!h0.reachable) {
-  process.stderr.write(`ssh: connect to host ${name} port 22: Operation timed out\n`);
-  process.exit(255);
-}
-if (h0.faults.connTimeoutMs) {
-  // 挂住不返回，供 sshExec/hostQueue 的强杀链与 unreachable 分类使用
-  setTimeout(() => process.exit(255), h0.faults.connTimeoutMs);
-} else if (parsed.forward) {
-  runTunnel(name, parsed.forward);
-} else {
-  const raw = parsed.positional[1];
-  if (raw === undefined) die('缺少远端命令');
-  if (!raw.startsWith('sh -c ')) die(`远端命令未按 12 §0 包 sh -c：${raw}`);
-  const body = unshq(raw.slice('sh -c '.length));
+  const st0 = readState();
+  const h0 = hostState({ hosts: st0.hosts ?? {} }, name);
+  admitOrDrop();
 
-  const kind = classify(body);
-  const handlers = {
-    probe: replyProbe,
-    launch: replyLaunch,
-    poll: replyPoll,
-    verify: replyVerify,
-    stop: replyStop,
-    cleanup: replyCleanup,
-    logtail: replyLogTail,
-  };
-  handlers[kind](name, body);
+  if (h0.faults.hostkeyFail) {
+    process.stderr.write('Host key verification failed.\n');
+    process.exit(255);
+  }
+  if (!h0.reachable) {
+    process.stderr.write(`ssh: connect to host ${name} port 22: Operation timed out\n`);
+    process.exit(255);
+  }
+  if (h0.faults.connTimeoutMs) {
+    // 挂住不返回，供 sshExec/hostQueue 的强杀链与 unreachable 分类使用
+    setTimeout(() => process.exit(255), h0.faults.connTimeoutMs);
+  } else if (parsed.forward) {
+    recordTransport({
+      transport: 'ssh', kind: 'tunnel', host: name, forward: parsed.forward,
+    });
+    runTunnel(name, parsed.forward);
+  } else {
+    const raw = parsed.positional[1];
+    if (raw === undefined) die('缺少远端命令');
+    if (!raw.startsWith('sh -c ')) die(`远端命令未按 12 §0 包 sh -c：${raw}`);
+    const body = unshq(raw.slice('sh -c '.length));
+    dispatchProtocol(name, body, { home: REMOTE_HOME, transport: 'ssh' });
+  }
 }
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

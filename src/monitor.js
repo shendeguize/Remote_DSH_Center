@@ -8,7 +8,9 @@
 
 import { logEvent } from './lib/bus.js';
 import { buildVerifyScript, kvOne, parseProtoOutput } from './lib/proto.js';
-import { execFailure, hostQueue, sshExec } from './lib/ssh.js';
+import {
+  execFailure, hostQueue, localExec, sshExec,
+} from './lib/ssh.js';
 import { mapPool } from './lib/pool.js';
 import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
@@ -63,7 +65,7 @@ export async function tick() {
   }
 }
 
-/** @returns {Promise<{host:string, outcome:'ok'|'no-tunnel'|'restarted'|'crashed'|'restart-failed'|'unknown'}>} */
+/** @returns {Promise<{host:string, outcome:'ok'|'no-tunnel'|'restarted'|'unresponsive'|'crashed'|'restart-failed'|'unknown'}>} */
 export async function checkOne(name) {
   const t = tunnel.status(name);
   if (!t || t.localPort === null) return { host: name, outcome: 'no-tunnel' };
@@ -74,18 +76,37 @@ export async function checkOne(name) {
   }
 
   logEvent(name, 'warn', `巡检发现本机端口 ${t.localPort} 不通，进入深度复核`);
+  const local = store.getHostView(name)?.local === true;
   const alive = await deepCheck(name);
 
   if (alive === false) {
     store.mutateHostState(name, (st) => { st.tunnel = null; });
     await tunnel.close(name);
     if (store.getPhase(name) === 'running') store.setPhase(name, 'crashed', 'monitor.deepCheck');
-    logEvent(name, 'error', '深度复核：远端实例已消失或指纹不符，标记 crashed');
+    logEvent(
+      name,
+      'error',
+      local
+        ? '深度复核：本机实例已消失或指纹不符，标记 crashed'
+        : '深度复核：远端实例已消失或指纹不符，标记 crashed',
+    );
     return { host: name, outcome: 'crashed' };
   }
   if (alive === null) {
-    logEvent(name, 'warn', '深度复核无法判定（ssh 故障或无受管记录），本轮不动状态');
+    logEvent(
+      name,
+      'warn',
+      local
+        ? '深度复核无法判定（本机命令执行故障或无受管记录），本轮不动状态'
+        : '深度复核无法判定（ssh 故障或无受管记录），本轮不动状态',
+    );
     return { host: name, outcome: 'unknown' };
+  }
+
+  // 本机没有运输通道可重建：进程和指纹仍对就保持 running，下一轮继续探活。
+  if (local) {
+    logEvent(name, 'warn', '深度复核：本机进程和指纹仍在，但 web 端口无响应');
+    return { host: name, outcome: 'unresponsive' };
   }
 
   try {
@@ -103,12 +124,16 @@ export async function checkOne(name) {
  * @returns {Promise<boolean|null>} null = 无从判断（无受管记录 / ssh 层故障）
  */
 async function deepCheck(name) {
-  const web = store.getHostState(name)?.web;
-  if (!web?.pid || !web?.cmdFingerprint) return null;
-
   try {
     return await hostQueue(name).run('monitor-verify', async (signal) => {
-      const res = await sshExec(name, buildVerifyScript({ pid: web.pid, port: web.port ?? 1 }), { signal });
+      // 队首重取 state/config，确保排队期间的 reload 不会留下旧运输类型。
+      const web = store.getHostState(name)?.web;
+      if (!web?.pid || !web?.cmdFingerprint) return null;
+      const local = store.getHostView(name)?.local === true;
+      const command = buildVerifyScript({ pid: web.pid, port: web.port ?? 1 });
+      const res = local
+        ? await localExec(command, { signal })
+        : await sshExec(name, command, { signal });
       if (execFailure(name, '巡检复核', res)) return null;
       const out = parseProtoOutput(res.stdout, { requireDone: 'VERIFY_DONE' });
       if (kvOne(out, 'ALIVE') !== 'yes') return false;

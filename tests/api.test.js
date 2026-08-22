@@ -14,6 +14,10 @@ import { MAX_BODY_BYTES, SETUP_ALLOWED, createSseHub, readJsonBody } from '../sr
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { logEvent, _resetForTest } from '../src/lib/bus.js';
 import * as store from '../src/store.js';
+import { bootServer } from './integration/helpers.js';
+import {
+  assertRest, hostConfigPutResponse, localHostCreateResponse,
+} from './contract/schemas.js';
 
 const bodyOf = (text) => Readable.from([Buffer.from(text)]);
 
@@ -39,6 +43,80 @@ test('setup 门禁白名单＝13 §4 的六项', () => {
     'POST /api/hosts/probe',
     'POST /api/setup',
   ]);
+});
+
+test('POST /api/hosts/local：缺省名称取 hostname，并以 201 持久化本机身份', async (t) => {
+  const ctx = await bootServer(t);
+  const res = await ctx.api('POST', '/api/hosts/local', {});
+
+  assertRest(res, { status: 201, schema: localHostCreateResponse, label: 'POST local(default)' });
+  assert.equal(res.json.host.name, os.hostname());
+  assert.equal(res.json.host.local, true);
+  assert.equal(res.json.host.config.local, true);
+  assert.equal(res.json.host.config.localPort, null);
+  assert.equal(res.json.host.sshInfo, null);
+
+  const config = (await ctx.get('/api/config')).json;
+  assert.equal(config.hosts[os.hostname()].local, true);
+  assert.equal(config.hosts[os.hostname()].localPort, null);
+});
+
+test('POST /api/hosts/local：显式名称成功，第二台本机以 409 拒绝', async (t) => {
+  const ctx = await bootServer(t);
+  const created = await ctx.api('POST', '/api/hosts/local', { name: 'workstation' });
+  assertRest(created, { status: 201, schema: localHostCreateResponse, label: 'POST local(explicit)' });
+  assert.equal(created.json.host.name, 'workstation');
+
+  const duplicate = await ctx.api('POST', '/api/hosts/local', { name: 'workstation-2' });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.json.code, 'LOCAL_HOST_EXISTS');
+  assert.equal(Object.hasOwn((await ctx.get('/api/config')).json.hosts, 'workstation-2'), false);
+});
+
+test('POST /api/hosts/local：与现有主机重名以 409 拒绝', async (t) => {
+  const ctx = await bootServer(t);
+  const res = await ctx.api('POST', '/api/hosts/local', { name: 'gpu-1' });
+
+  assert.equal(res.status, 409);
+  assert.equal(res.json.code, 'LOCAL_NAME_CONFLICT');
+  assert.equal(Object.values((await ctx.get('/api/config')).json.hosts).some((host) => host.local), false);
+});
+
+test('POST /api/hosts/local：setup gate 下不是白名单动作', async (t) => {
+  const ctx = await bootServer(t, { setupCompleted: false });
+  const before = fs.readFileSync(path.join(ctx.harness.homeDir, 'config.json'), 'utf8');
+  const res = await ctx.api('POST', '/api/hosts/local', { name: 'workstation' });
+
+  assert.equal(res.status, 409);
+  assert.equal(res.json.code, 'SETUP_REQUIRED');
+  assert.equal(fs.readFileSync(path.join(ctx.harness.homeDir, 'config.json'), 'utf8'), before, '门禁拒绝不得落盘');
+});
+
+test('PUT host config：local 身份不可翻转，同值回显不写盘', async (t) => {
+  const ctx = await bootServer(t);
+  const configFile = path.join(ctx.harness.homeDir, 'config.json');
+  const remoteBefore = fs.readFileSync(configFile, 'utf8');
+
+  const remoteFlip = await ctx.api('PUT', '/api/hosts/gpu-1/config', { local: true });
+  assert.equal(remoteFlip.status, 409);
+  assert.equal(remoteFlip.json.code, 'NOT_ALLOWED');
+
+  const remoteSame = await ctx.api('PUT', '/api/hosts/gpu-1/config', { local: false });
+  assertRest(remoteSame, { status: 200, schema: hostConfigPutResponse, label: 'PUT remote local no-op' });
+  assert.equal(remoteSame.json.host.local, false);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), remoteBefore, '远端身份同值提交不重写配置');
+
+  await ctx.api('POST', '/api/hosts/local', { name: 'workstation' });
+  const localBefore = fs.readFileSync(configFile, 'utf8');
+
+  const localFlip = await ctx.api('PUT', '/api/hosts/workstation/config', { local: false });
+  assert.equal(localFlip.status, 409);
+  assert.equal(localFlip.json.code, 'NOT_ALLOWED');
+
+  const localSame = await ctx.api('PUT', '/api/hosts/workstation/config', { local: true });
+  assertRest(localSame, { status: 200, schema: hostConfigPutResponse, label: 'PUT local local no-op' });
+  assert.equal(localSame.json.host.local, true);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), localBefore, '本机身份同值提交不重写配置');
 });
 
 /** 只实现 hub 用到的 ServerResponse/IncomingMessage 面。 */

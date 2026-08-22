@@ -15,6 +15,7 @@ import {
   canAutoStart,
   defaultAnswers,
   getByPath,
+  normalizeHostCandidates,
   parseIntStrict,
   parseRange,
   previewJson,
@@ -23,7 +24,7 @@ import {
   vRange,
   validateAnswers,
 } from '../src/web/setup-schema.js';
-import { runSetupWizard } from '../src/cli.js';
+import { runSetupWizard, withLocalCandidate } from '../src/cli.js';
 import { FACTORY_DEFAULTS, newFactoryConfig } from '../src/defaults.js';
 import { configSchema, validate } from '../src/lib/validate.js';
 
@@ -77,6 +78,18 @@ test('canAutoStart：只有 ready 能开启链接', () => {
   assert.equal(canAutoStart(undefined), false, '探测未完成不能自启');
 });
 
+test('候选归一化兼容 string[]，对象候选保留 local 身份', () => {
+  assert.deepEqual(normalizeHostCandidates([
+    'gpu-1',
+    { name: 'workstation', local: true },
+    { name: 'gpu-2', local: false },
+  ]), [
+    { name: 'gpu-1', local: false },
+    { name: 'workstation', local: true },
+    { name: 'gpu-2', local: false },
+  ]);
+});
+
 test('buildConfigFromAnswers 产出的 config 通过后端 configSchema', () => {
   const answers = defaultAnswers(newFactoryConfig());
   const config = buildConfigFromAnswers(
@@ -99,6 +112,7 @@ test('buildConfigFromAnswers 产出的 config 通过后端 configSchema', () => 
   assert.equal(config.hosts['gpu-2'].autoStart, false, 'no_dsh 不许自启');
   assert.equal(config.hosts['gpu-3'].enabled, false);
   assert.equal(config.hosts['gpu-3'].autoStart, false, '未纳管必然不自启');
+  assert.equal(config.hosts['gpu-1'].local, false, '旧 string[] 候选仍按 SSH 主机生成');
   assert.deepEqual(config.hosts['gpu-1'].inject, { env: {}, extraArgs: [], patches: [] });
 });
 
@@ -147,6 +161,28 @@ test('一路回车 = 出厂默认 + 全部纳管 + ready 自启', async () => {
   assert.equal(res.config.hosts['b-nodsh'].autoStart, false);
   assert.deepEqual(configErrors(res.config), []);
   assert.equal(script.left, 0, '不该有多余提问');
+});
+
+test('CLI init 候选把本机身份传给探测，并生成 local:true/localPort:null', async () => {
+  const script = scriptedAsk(['', '', '', '', '', '']);
+  const probed = {};
+  const res = await runSetupWizard({
+    ask: script.ask,
+    print: silent,
+    current: newFactoryConfig(),
+    sshHosts: withLocalCandidate(['gpu-1'], 'workstation'),
+    probeHost: async (name, candidate) => {
+      probed[name] = candidate.local;
+      return { phase: 'ready' };
+    },
+  });
+
+  assert.deepEqual(probed, { 'gpu-1': false, workstation: true });
+  assert.equal(res.config.hosts['gpu-1'].local, false);
+  assert.equal(res.config.hosts.workstation.local, true);
+  assert.equal(res.config.hosts.workstation.localPort, null);
+  assert.deepEqual(configErrors(res.config), []);
+  assert.equal(script.left, 0, '本机候选不应新增额外交互问题');
 });
 
 test('非法端口就地重问，不污染答案', async () => {

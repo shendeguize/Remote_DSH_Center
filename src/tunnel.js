@@ -1,5 +1,5 @@
 /**
- * ssh -L 隧道子进程管理（11 §5）。
+ * ssh -L 隧道子进程与本机直连条目管理（11 §5）。
  *
  * 三条边界：
  * 1. 子进程生命周期与退避重连全在本模块（monitor 只做周期探活，见 11 §5.5）。
@@ -78,7 +78,8 @@ const SUSPEND_HINT = {
 };
 
 /**
- * @typedef {{host:string, localPort:number, remotePort:number, child:import('node:child_process').ChildProcess|null,
+ * @typedef {{host:string, localPort:number, remotePort:number, direct:boolean,
+ *   child:import('node:child_process').ChildProcess|null,
  *   killedByUs:boolean, forcedReason:string|null, connected:boolean, attempt:number,
  *   suspendedReason:string|null, stderrTail:string, denyStamps:number[],
  *   retryTimer:NodeJS.Timeout|null, readyPending:boolean, closed:boolean}} Entry
@@ -94,7 +95,8 @@ function entry(name) {
   return entries.get(name) ?? null;
 }
 
-/** @returns {{localPort:number, connected:boolean, reconnectAttempt:number, suspendedReason:string|null}|null} */
+/** @returns {{localPort:number, connected:boolean, reconnectAttempt:number,
+ *   suspendedReason:string|null, direct?:true}|null} */
 export function status(name) {
   const e = entry(name);
   if (!e || e.closed) return null;
@@ -103,12 +105,15 @@ export function status(name) {
     connected: e.connected,
     reconnectAttempt: e.attempt,
     suspendedReason: e.suspendedReason,
+    ...(e.direct ? { direct: true } : {}),
   };
 }
 
 export function isOpen(name) {
   const e = entry(name);
-  return Boolean(e && !e.closed && e.child && e.child.exitCode === null && e.child.signalCode === null);
+  if (!e || e.closed) return false;
+  if (e.direct) return true;
+  return Boolean(e.child && e.child.exitCode === null && e.child.signalCode === null);
 }
 
 export function listOpen() {
@@ -261,11 +266,28 @@ const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?
 // ── 打开 / 关闭 ──────────────────────────────────────────────────────────
 
 /**
- * spawn + 就绪确认（§5.2）。失败抛 DshError，并保证不留残留子进程。
+ * 远端 spawn + 就绪确认；本机只登记恒等映射的直连条目。
+ * 失败抛 DshError，并保证不留残留子进程。
  * @param {string} name
- * @param {{localPort:number, remotePort:number}} p
+ * @param {{localPort:number, remotePort:number, direct?:boolean}} p
  */
-export async function open(name, { localPort, remotePort }) {
+export async function open(name, { localPort, remotePort, direct = false }) {
+  if (
+    direct
+    && (
+      !Number.isInteger(localPort)
+      || localPort < 1
+      || localPort > 65_535
+      || localPort !== remotePort
+    )
+  ) {
+    throw new DshError(
+      'VALIDATION',
+      '本机直连端口必须是有效端口，且与 dsh web 实际端口一致',
+      { host: name },
+    );
+  }
+
   const prev = entry(name);
   if (prev) await close(name);
 
@@ -274,10 +296,11 @@ export async function open(name, { localPort, remotePort }) {
     host: name,
     localPort,
     remotePort,
+    direct,
     child: null,
     killedByUs: false,
     forcedReason: null,
-    connected: false,
+    connected: direct,
     attempt: 0,
     suspendedReason: null,
     stderrTail: '',
@@ -288,19 +311,32 @@ export async function open(name, { localPort, remotePort }) {
   };
   entries.set(name, e);
 
-  spawnChild(e);
-  try {
-    await waitReady(e);
-  } catch (err) {
-    e.closed = true;
-    entries.delete(name);
-    throw err;
+  if (!direct) {
+    spawnChild(e);
+    try {
+      await waitReady(e);
+    } catch (err) {
+      e.closed = true;
+      entries.delete(name);
+      throw err;
+    }
   }
 
   store.mutateHostState(name, (st) => {
-    st.tunnel = { localPort, remotePort, openedAt: new Date().toISOString() };
+    st.tunnel = {
+      localPort,
+      remotePort,
+      ...(direct ? { direct: true } : {}),
+      openedAt: new Date().toISOString(),
+    };
   });
-  logEvent(name, 'info', `隧道就绪 127.0.0.1:${localPort} → 远端 ${remotePort}`);
+  logEvent(
+    name,
+    'info',
+    direct
+      ? `本机直连已登记 127.0.0.1:${localPort}`
+      : `隧道就绪 127.0.0.1:${localPort} → 远端 ${remotePort}`,
+  );
   return status(name);
 }
 
@@ -309,11 +345,16 @@ export async function close(name) {
   const e = entry(name);
   if (!e) return;
   e.closed = true;
-  e.killedByUs = true;
   clearRetry(e);
+  entries.delete(name);
+  if (e.direct) {
+    e.connected = false;
+    return;
+  }
+
+  e.killedByUs = true;
   const child = e.child;
   killChild(e);
-  entries.delete(name);
   if (child) await waitExit(child);
   e.connected = false;
 }
@@ -341,17 +382,24 @@ export async function closeUnconfigured() {
   for (const name of gone) {
     const e = entry(name);
     const port = e?.localPort ?? null;
+    const direct = e?.direct === true;
     // eslint-disable-next-line no-await-in-loop -- 逐条收，数量与「刚被删掉的主机数」同阶
     await close(name);
     const pid = store.getHostState(name)?.web?.pid ?? null;
     logEvent(
       name,
       'warn',
-      `${name} 已不在配置里，已收回它占的本机端口 ${port ?? '(未知)'}`
-        + (pid ? `；远端实例还在跑（pid=${pid}），没有动它` : ''),
+      direct
+        ? `${name} 已不在配置里，已清除本机直连记录（web 端口 ${port ?? '(未知)'}）`
+          + (pid ? `；本机实例还在跑（pid=${pid}），没有动它` : '')
+        : `${name} 已不在配置里，已收回它占的本机端口 ${port ?? '(未知)'}`
+          + (pid ? `；远端实例还在跑（pid=${pid}），没有动它` : ''),
       pid
-        ? '删一条配置不等于要停掉远端那个服务，所以此处不替你杀远端进程。'
-          + '想停掉：把这台主机加回配置再关停，或者直接去远端处理。'
+        ? direct
+          ? '删一条配置不等于要停掉本机受管服务，所以此处不替你杀进程。'
+            + '想停掉：把这台主机加回配置再关停，或者手工处理。'
+          : '删一条配置不等于要停掉远端那个服务，所以此处不替你杀远端进程。'
+            + '想停掉：把这台主机加回配置再关停，或者直接去远端处理。'
         : null,
     );
   }
@@ -362,6 +410,9 @@ export async function closeUnconfigured() {
 export async function restartChild(name) {
   const e = entry(name);
   if (!e) throw new DshError('NOT_FOUND', `主机 ${name} 无隧道记录`, { host: name });
+  if (e.direct) {
+    throw new DshError('NOT_ALLOWED', '本机主机使用直连，没有隧道子进程可重建', { host: name });
+  }
   e.killedByUs = true;
   const old = e.child;
   killChild(e);
@@ -514,6 +565,9 @@ export async function requestReconnect(name) {
   const e = entry(name);
   if (!e || e.closed) {
     throw new DshError('NOT_FOUND', `主机 ${name} 当前无隧道可重连（请先启动）`, { host: name });
+  }
+  if (e.direct) {
+    throw new DshError('NOT_ALLOWED', '本机主机使用直连，没有隧道可重连', { host: name });
   }
   e.suspendedReason = null;
   e.attempt = 0;

@@ -73,6 +73,9 @@ export const api = {
   config: () => call('GET', '/api/config'),
 
   probeAll: () => call('POST', '/api/hosts/probe'),
+  createLocalHost: (name) => call('POST', '/api/hosts/local', {
+    body: name === undefined ? {} : { name },
+  }),
   probeHost: (name) => call('POST', `/api/hosts/${enc(name)}/probe`),
   startHost: (name) => call('POST', `/api/hosts/${enc(name)}/start`),
   stopHost: (name) => call('POST', `/api/hosts/${enc(name)}/stop`),

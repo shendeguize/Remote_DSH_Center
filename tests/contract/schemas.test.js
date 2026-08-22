@@ -13,9 +13,11 @@ import {
 
 const HOST_VIEW = {
   name: 'gpu-1',
+  local: false,
   sshInfo: { hostName: '10.0.0.1', user: 'root', port: 22 },
   orphaned: false,
   config: {
+    local: false,
     enabled: true,
     autoStart: false,
     localPort: 17701,
@@ -80,6 +82,20 @@ test('缺省与 null 语义区分：可为 null 的键仍必须存在', () => {
   const missing = structuredClone(HOST_VIEW);
   delete missing.web;
   assert.equal(validate(hostView, missing).ok, false);
+});
+
+test('HostView 的顶层 local 与 config.local 都是必填身份字段', () => {
+  const missingTopLevel = structuredClone(HOST_VIEW);
+  delete missingTopLevel.local;
+  const topLevelResult = validate(hostView, missingTopLevel);
+  assert.equal(topLevelResult.ok, false);
+  assert.ok(topLevelResult.errors.some((e) => e.includes('local: required')));
+
+  const missingConfig = structuredClone(HOST_VIEW);
+  delete missingConfig.config.local;
+  const configResult = validate(hostView, missingConfig);
+  assert.equal(configResult.ok, false);
+  assert.ok(configResult.errors.some((e) => e.includes('config.local: required')));
 });
 
 test('workdir 只收 null、绝对路径与 ~ 形态（补丁 01 §5.1）', () => {

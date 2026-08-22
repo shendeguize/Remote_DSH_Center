@@ -29,6 +29,129 @@ test('样式里 [hidden] 一律 display:none：否则焦点会掉进隐藏抽屉
   assert.match(css, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/, '作者样式里的 display:flex 会盖掉 UA 的 [hidden]');
   assert.match(css, /:focus-visible\s*\{[^}]*outline/, '自定义控件要有可见焦点圈');
   assert.match(css, /prefers-reduced-motion/, '要尊重「减少动态效果」');
+  assert.match(css, /\.hub-content\s*\{[^}]*margin-block:\s*auto/s, '桌面 Hub 应在剩余高度里垂直居中');
+  assert.match(css, /@media\s*\(max-width:\s*620px\)[\s\S]*?\.hub-content\s*\{[^}]*margin-block:\s*0/s,
+    '窄屏内容过高时应从顶部正常滚动，不能被居中裁掉');
+});
+
+test('品牌、标签、固定动作与连接灯同处一行 app shell', async (t) => {
+  const { app, dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const shell = dom.app.querySelector('.app-shell');
+  const header = dom.app.querySelector('.app-header');
+  const tabbar = dom.app.querySelector('.tabbar');
+  const actions = dom.app.querySelector('.tabbar-actions');
+  const indicator = dom.app.querySelector('.conn-indicator');
+
+  assert.ok(shell, '缺少单行 app shell');
+  assert.equal(header.parentNode, shell, '品牌 header 必须进入 shell，不能再独占一行');
+  assert.equal(tabbar.parentNode, shell, '标签 nav 必须与品牌同排');
+  assert.equal(indicator.parentNode, actions, '连接灯应排在 overflow/管理固定动作一侧');
+  assert.equal(indicator.getAttribute('role'), 'status');
+
+  const labels = {
+    connecting: 'manager 连接中',
+    open: 'manager 已连接',
+    reconnecting: 'manager 重连中',
+    offline: 'manager 离线',
+  };
+  for (const [sse, label] of Object.entries(labels)) {
+    app.store.setConnection({ sse });
+    assert.equal(indicator.getAttribute('aria-label'), label, `${sse} 的连接状态没有可读文案`);
+  }
+});
+
+test('主机 tab 与 keep-alive panel 使用稳定 id 配对，显隐语义同步', async (t) => {
+  const { dom } = await mount(t, {
+    hash: '#/host/gpu-1',
+    hosts: [running('gpu-1'), running('gpu-2')],
+  });
+  const tab = (name) => dom.app.querySelector(`.host-tabs .tab[data-host="${name}"]`);
+  const pane = (name) => dom.app.querySelector(`.iframe-pane[data-host="${name}"]`);
+
+  const firstTab = tab('gpu-1');
+  const firstPane = pane('gpu-1');
+  assert.equal(firstTab.getAttribute('aria-controls'), firstPane.getAttribute('id'));
+  assert.equal(firstPane.getAttribute('role'), 'tabpanel');
+  assert.equal(firstPane.getAttribute('aria-labelledby'), firstTab.getAttribute('id'));
+  assert.deepEqual(
+    [firstTab.getAttribute('aria-selected'), firstPane.hidden, firstPane.getAttribute('aria-hidden')],
+    ['true', false, 'false'],
+  );
+
+  tab('gpu-2').dispatchEvent({ type: 'click', detail: 1 });
+  await flush();
+  const updatedFirstTab = tab('gpu-1');
+  const secondTab = tab('gpu-2');
+  const secondPane = pane('gpu-2');
+  assert.equal(secondTab.getAttribute('aria-controls'), secondPane.getAttribute('id'));
+  assert.equal(secondPane.getAttribute('aria-labelledby'), secondTab.getAttribute('id'));
+  assert.deepEqual(
+    [updatedFirstTab.getAttribute('aria-selected'), firstPane.hidden, firstPane.getAttribute('aria-hidden')],
+    ['false', true, 'true'],
+  );
+  assert.deepEqual(
+    [secondTab.getAttribute('aria-selected'), secondPane.hidden, secondPane.getAttribute('aria-hidden')],
+    ['true', false, 'false'],
+  );
+});
+
+test('iframe loading 与 starting placeholder 是可聚焦的礼貌状态区', async (t) => {
+  const loadingMount = await mount(t, { hash: '#/host/gpu-1', hosts: [running('gpu-1')] });
+  const loading = loadingMount.dom.app.querySelector('.iframe-loading');
+  assert.equal(loading.getAttribute('role'), 'status');
+  assert.equal(loading.getAttribute('aria-live'), 'polite');
+  assert.equal(loading.getAttribute('aria-busy'), 'true');
+  assert.equal(loading.getAttribute('tabindex'), '-1');
+});
+
+test('starting placeholder 与 tab 配对，并向读屏声明忙碌状态', async (t) => {
+  const starting = hostView('gpu-starting', { phase: 'starting' });
+  const { dom } = await mount(t, { hash: '#/host/gpu-starting', hosts: [starting] });
+  const tab = dom.app.querySelector('.host-tabs .tab');
+  const placeholder = dom.app.querySelector('.iframe-pane.is-placeholder');
+  const overlay = placeholder.querySelector('.iframe-overlay');
+
+  assert.equal(tab.getAttribute('aria-controls'), placeholder.getAttribute('id'));
+  assert.equal(placeholder.getAttribute('role'), 'tabpanel');
+  assert.equal(placeholder.getAttribute('aria-labelledby'), tab.getAttribute('id'));
+  assert.deepEqual([placeholder.hidden, placeholder.getAttribute('aria-hidden')], [false, 'false']);
+  assert.equal(overlay.getAttribute('role'), 'status');
+  assert.equal(overlay.getAttribute('aria-live'), 'polite');
+  assert.equal(overlay.getAttribute('aria-busy'), 'true');
+  assert.equal(overlay.getAttribute('tabindex'), '-1');
+});
+
+test('键盘激活 starting 标签把焦点交给状态区，鼠标点击不强抢', async (t) => {
+  const starting = hostView('gpu-starting', { phase: 'starting' });
+  const { dom } = await mount(t, { hosts: [starting] });
+
+  let tab = dom.app.querySelector('.host-tabs .tab');
+  tab.focus();
+  tab.dispatchEvent({ type: 'click', detail: 0 });
+  const overlay = dom.app.querySelector('.iframe-pane.is-placeholder .iframe-overlay');
+  assert.equal(dom.document.activeElement, overlay, '键盘激活后应直接听到启动进度');
+
+  dom.window.location.hash = '#/hub';
+  await flush();
+  dom.document.body.focus();
+  tab = dom.app.querySelector('.host-tabs .tab');
+  tab.dispatchEvent({ type: 'click', detail: 1 });
+  assert.equal(dom.document.activeElement, dom.document.body, '鼠标用户不应被强行移动焦点');
+});
+
+test('键盘激活 ready 标签后，starting 状态一到就接管焦点', async (t) => {
+  const ready = hostView('gpu-ready');
+  const { dom, es } = await mount(t, { hosts: [ready] });
+  const tab = dom.app.querySelector('.host-tabs .tab');
+
+  tab.focus();
+  tab.dispatchEvent({ type: 'click', detail: 0 });
+  assert.notEqual(dom.document.activeElement?.className, 'iframe-overlay', '状态尚未到时不能焦到隐藏节点');
+
+  es().send('host-changed', { revision: 2, host: { ...ready, phase: 'starting' } });
+  await flush();
+  const overlay = dom.app.querySelector('.iframe-pane.is-placeholder .iframe-overlay');
+  assert.equal(dom.document.activeElement, overlay, 'ready 的异步启动反馈出现后应接住键盘焦点');
 });
 
 test('键盘链路：表格行回车进主机 → Esc 关抽屉 → 焦点回到触发处', async (t) => {

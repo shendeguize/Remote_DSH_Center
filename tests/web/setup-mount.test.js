@@ -138,7 +138,7 @@ test('换步把焦点带到新步骤的标题上（前进、后退都算）', as
   assert.equal(dom.document.activeElement, port, '还在填这个字段，焦点不许被标题夺走');
 });
 
-test('提交：POST /api/setup 用预览内容，端口未变则回管理台', async (t) => {
+test('提交：POST /api/setup 用预览内容，端口未变则进入主机选择页', async (t) => {
   let saved = false;
   const { calls, dom, wizard: w } = await mountSetup(t, {
     hosts: [hostView('gpu-1')],
@@ -147,7 +147,7 @@ test('提交：POST /api/setup 用预览内容，端口未变则回管理台', a
         saved = true;
         return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, port: 7788, portChanged: false, restartRequired: false, restarting: false }) };
       }
-      // 落盘后 manager 就该自报已初始化——守卫据此放行管理台
+      // 落盘后 manager 就该自报已初始化——守卫据此放行主机选择页
       if (path === '/api/manager/info' && saved) {
         return { ok: true, status: 200, text: async () => JSON.stringify({ ...MANAGER_INFO, setupCompleted: true }) };
       }
@@ -166,13 +166,14 @@ test('提交：POST /api/setup 用预览内容，端口未变则回管理台', a
   const submitted = calls.find((c) => c.path === '/api/setup');
   assert.ok(submitted, '必须发出 POST /api/setup');
   assert.equal(submitted.body.hosts['gpu-1'].enabled, true);
-  assert.equal(dom.window.location.hash, '#/', '端口没变直接进管理台');
+  assert.equal(dom.window.location.hash, '#/hub', '端口没变直接进主机选择页');
 
   // 向导整块被藏起来，焦点会跟着一起消失。刚用键盘走完四步的人不该被丢在文档顶端。
   const landed = dom.document.activeElement;
   assert.notEqual(landed, dom.document.body, '收尾后焦点掉回 body');
-  assert.equal(landed, dom.app.querySelector('.view-dashboard').querySelector('h2'),
-    '该落在管理台的标题上');
+  const hubTitle = dom.app.querySelector('.view-hub h2');
+  assert.equal(hubTitle.textContent, '选择一台主机开始工作', '主机选择页标题语义不许漂移');
+  assert.equal(landed, hubTitle, '焦点该落在主机选择页标题上');
 });
 
 test('手改 JSON：非法不许提交也不许返回；合法则原样提交', async (t) => {

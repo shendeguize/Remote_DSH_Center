@@ -8,6 +8,9 @@ import {
   COMMON_SSH_OPTS,
   TUNNEL_SSH_OPTS,
   SSH_OUTPUT_CAP_BYTES,
+  localExec,
+  localCopy,
+  localShBin,
   sshExec,
   scpTo,
   execFailure,
@@ -17,6 +20,7 @@ import {
   liveChildCount,
   _resetQueues,
 } from '../../src/lib/ssh.js';
+import { exitCodeFor } from '../../src/cli.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-ssh-'));
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -50,6 +54,12 @@ setInterval(() => {}, 1000);
 const FAIL = shim('fail.cjs', `
 process.stderr.write('ssh: connect to host x port 22: Connection refused');
 process.exit(255);
+`);
+
+const LOCAL_RESULT = shim('local-result.cjs', `
+process.stdout.write('local-out');
+process.stderr.write('local-err');
+process.exit(7);
 `);
 
 /**
@@ -94,6 +104,60 @@ test('sshExec argv：统一参数 + host + sh -c <shq(body)>（12 §0）', async
   assert.equal(argv[7], "sh -c 'echo '\\''hi'\\''; ls'");
 });
 
+test('localExec argv：前导参数 + -c + 原始模板文本，不套远端 sh -c', async (t) => {
+  t.after(() => { delete process.env.DSHC_LOCAL_SH_BIN; });
+  delete process.env.DSHC_LOCAL_SH_BIN;
+  assert.deepEqual(localShBin(), { bin: 'sh', prefixArgs: [] });
+  process.env.DSHC_LOCAL_SH_BIN = ARGV_DUMP;
+
+  const command = "printf '%s\\n' \"raw text\"; echo $HOME";
+  assert.deepEqual(localShBin(), {
+    bin: process.execPath,
+    prefixArgs: [path.join(dir, 'argv-dump.cjs')],
+  });
+  const res = await localExec(command);
+  assert.equal(res.code, 0);
+  assert.deepEqual(JSON.parse(res.stdout), ['-c', command]);
+});
+
+test('localExec 保留 stdout/stderr/退出码的 ExecResult 形状', async (t) => {
+  t.after(() => { delete process.env.DSHC_LOCAL_SH_BIN; });
+  process.env.DSHC_LOCAL_SH_BIN = LOCAL_RESULT;
+
+  const res = await localExec('ignored');
+  assert.deepEqual(res, {
+    code: 7,
+    signal: null,
+    stdout: 'local-out',
+    stderr: 'local-err',
+    stdoutDropped: 0,
+    stderrDropped: 0,
+    timedOut: false,
+    aborted: false,
+  });
+  const err = execFailure('workstation', '取远端日志', res);
+  assert.equal(err.code, 'LOCAL_EXEC_FAILED');
+  assert.equal(err.detail, 'local-err');
+  assert.match(err.message, /取本机日志失败/);
+  assert.doesNotMatch(err.message, /远端|SSH/);
+  assert.equal(exitCodeFor(err), 1, '本机命令失败是操作失败，不是通信故障');
+});
+
+test('localExec 与 sshExec 共用 2MB 留尾输出封顶', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_LOCAL_SH_BIN;
+    delete process.env.DSHC_TEST_SPEW_MB;
+  });
+  process.env.DSHC_LOCAL_SH_BIN = SPEW;
+  process.env.DSHC_TEST_SPEW_MB = '4';
+
+  const res = await localExec('spew', { timeoutMs: 10_000 });
+  assert.equal(res.code, 0);
+  assert.ok(res.stdout.length <= SSH_OUTPUT_CAP_BYTES);
+  assert.ok(res.stdoutDropped > 0);
+  assert.match(res.stdout, /MARKER=tail-survived/);
+});
+
 test('sshExec 拒绝危险 host 名（ssh 参数位注入）', async () => {
   await assert.rejects(() => sshExec('-oProxyCommand=x', 'ls'), (e) => e.code === 'VALIDATION');
 });
@@ -126,6 +190,34 @@ test('sshExec 通过 AbortSignal 中止', async (t) => {
   const res = await p;
   assert.equal(res.aborted, true);
   assert.equal(res.timedOut, false);
+});
+
+test('localExec 超时映射 CLI 退出 2，并复用 timeout/AbortSignal 强杀语义', async (t) => {
+  t.after(() => { delete process.env.DSHC_LOCAL_SH_BIN; });
+  process.env.DSHC_LOCAL_SH_BIN = SLOW;
+
+  const timed = await localExec('sleep', { timeoutMs: 300 });
+  assert.equal(timed.timedOut, true);
+  assert.equal(timed.stdout, 'got-term');
+  assert.equal(execFailure('workstation', '远端探测', timed).code, 'LOCAL_TIMEOUT');
+  assert.equal(
+    exitCodeFor(execFailure('workstation', '远端探测', timed)),
+    2,
+    'LOCAL_TIMEOUT 属于超时或通信失败；普通执行/复制失败仍退出 1',
+  );
+
+  process.env.DSHC_LOCAL_SH_BIN = IGNORE_TERM;
+  const killed = await localExec('stubborn', { timeoutMs: 200 });
+  assert.equal(killed.timedOut, true);
+  assert.equal(killed.signal, 'SIGKILL');
+
+  process.env.DSHC_LOCAL_SH_BIN = SLOW;
+  const ac = new AbortController();
+  const pending = localExec('sleep', { timeoutMs: 60_000, signal: ac.signal });
+  setTimeout(() => ac.abort(), 200);
+  const aborted = await pending;
+  assert.equal(aborted.aborted, true);
+  assert.equal(aborted.timedOut, false);
 });
 
 /**
@@ -172,6 +264,41 @@ test('在飞账本：已经收场的不再挂着（不许无限长的账本）',
   assert.equal(liveChildCount(), 0);
   shutdownSsh(); // 空账本上调也不许抛
   reopenSsh();
+});
+
+test('localExec 与 localCopy 遵从共享关停闩，reopen 后恢复', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_LOCAL_SH_BIN;
+    delete process.env.DSHC_SSH_BIN;
+    reopenSsh();
+  });
+  process.env.DSHC_LOCAL_SH_BIN = SLOW;
+  process.env.DSHC_SSH_BIN = SLOW;
+
+  const pending = [
+    sshExec('gpu-1', 'sleep', { timeoutMs: 60_000 }),
+    localExec('sleep', { timeoutMs: 60_000 }),
+  ];
+  await new Promise((resolve) => { setTimeout(resolve, 100); });
+  assert.equal(liveChildCount(), 2);
+  shutdownSsh();
+  const stopped = await Promise.all(pending);
+  assert.deepEqual(stopped.map((res) => res.stdout), ['got-term', 'got-term']);
+  assert.equal(liveChildCount(), 0);
+
+  const blockedExec = await localExec('sleep');
+  assert.equal(blockedExec.aborted, true);
+
+  const blockedCopy = await localCopy(
+    path.join(dir, 'never-read'),
+    '.dsh_center_remote/patches/never-written',
+  );
+  assert.equal(blockedCopy.aborted, true);
+  assert.equal(liveChildCount(), 0);
+
+  reopenSsh();
+  process.env.DSHC_LOCAL_SH_BIN = ARGV_DUMP;
+  assert.equal((await localExec('true')).code, 0);
 });
 
 /**
@@ -258,6 +385,158 @@ test('scpTo argv：COMMON_SSH_OPTS + -- + host:remoteRelPath', async (t) => {
     '/tmp/a.yml',
     'gpu-1:.dsh_center_remote/patches/aaa-a.yml',
   ]);
+});
+
+test('localCopy 在隔离 HOME 下递归建目录并复制文件', async (t) => {
+  const home = fs.mkdtempSync(path.join(dir, 'local-home-'));
+  const source = path.join(dir, 'patch.yml');
+  const relative = '.dsh_center_remote/patches/nested/abc-patch.yml';
+  fs.writeFileSync(source, 'patch-body');
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+
+  const res = await localCopy(source, relative);
+  assert.deepEqual(res, {
+    code: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    stdoutDropped: 0,
+    stderrDropped: 0,
+    timedOut: false,
+    aborted: false,
+  });
+  assert.equal(
+    fs.readFileSync(path.join(home, relative), 'utf8'),
+    'patch-body',
+  );
+});
+
+test('localCopy：rename 是提交点，迟到 abort 不删除已原子替换的旧目标', async (t) => {
+  const home = fs.mkdtempSync(path.join(dir, 'copy-commit-home-'));
+  const source = path.join(dir, 'copy-commit-source');
+  const relative = '.dsh_center_remote/patches/committed.yml';
+  const target = path.join(home, relative);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(source, 'new-content');
+  fs.writeFileSync(target, 'old-content');
+
+  const previousHome = process.env.HOME;
+  const originalRename = fs.promises.rename;
+  const ac = new AbortController();
+  process.env.HOME = home;
+  fs.promises.rename = async (...args) => {
+    await originalRename(...args);
+    ac.abort();
+  };
+  t.after(() => {
+    fs.promises.rename = originalRename;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+
+  const res = await localCopy(source, relative, { signal: ac.signal });
+
+  assert.equal(res.code, 0, 'rename 已成功就必须报告成功');
+  assert.equal(res.aborted, false, '提交后的迟到 abort 不得改写已完成结果');
+  assert.equal(fs.readFileSync(target, 'utf8'), 'new-content', '旧目标必须被原子替换且保留新内容');
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(target)).filter((name) => name.includes('.dshc-copy-')),
+    [],
+    '提交后不得残留临时文件',
+  );
+  assert.equal(liveChildCount(), 0);
+});
+
+test('localCopy 拒绝绝对路径、.. 穿越和 NUL', async (t) => {
+  const home = fs.mkdtempSync(path.join(dir, 'escape-home-'));
+  const source = path.join(dir, 'escape-source');
+  fs.writeFileSync(source, 'x');
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+
+  for (const remotePath of [
+    path.join(home, '.dsh_center_remote/absolute'),
+    '.dsh_center_remote/../outside',
+    '.dsh_center_remote/patches/\0bad',
+  ]) {
+    // eslint-disable-next-line no-await-in-loop -- 每个危险路径都必须独立拒绝
+    await assert.rejects(
+      () => localCopy(source, remotePath),
+      (err) => err instanceof Error && err.code === 'VALIDATION',
+    );
+  }
+  assert.equal(fs.existsSync(path.join(home, 'outside')), false);
+});
+
+test('localCopy 拒绝目标中间目录 symlink，不向 HOME 外写文件', async (t) => {
+  const home = fs.mkdtempSync(path.join(dir, 'symlink-home-'));
+  const outside = fs.mkdtempSync(path.join(dir, 'symlink-outside-'));
+  const source = path.join(dir, 'symlink-source');
+  fs.writeFileSync(source, 'must-stay-inside');
+  fs.mkdirSync(path.join(home, '.dsh_center_remote'));
+  fs.symlinkSync(outside, path.join(home, '.dsh_center_remote', 'patches'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+
+  const res = await localCopy(
+    source,
+    '.dsh_center_remote/patches/nested/escaped.yml',
+  );
+  assert.equal(res.code, null);
+  assert.match(res.stderr, /符号链接|symlink/i);
+  assert.equal(
+    execFailure('workstation', 'patch 上载', res).code,
+    'LOCAL_COPY_FAILED',
+  );
+  assert.equal(fs.existsSync(path.join(outside, 'nested', 'escaped.yml')), false);
+});
+
+test('localCopy 源文件失败返回稳定 ExecResult，预中止不落正式文件', async (t) => {
+  const home = fs.mkdtempSync(path.join(dir, 'copy-fail-home-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+
+  const missing = await localCopy(
+    path.join(dir, 'missing-source'),
+    '.dsh_center_remote/patches/missing',
+  );
+  assert.equal(missing.code, null);
+  assert.equal(missing.aborted, false);
+  assert.match(missing.stderr, /ENOENT|no such file/i);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stdoutDropped, 0);
+  assert.equal(missing.stderrDropped, 0);
+  const copyErr = execFailure('workstation', 'patch 上载', missing);
+  assert.equal(copyErr.code, 'LOCAL_COPY_FAILED');
+  assert.match(copyErr.detail, /ENOENT|no such file/i);
+  assert.equal(exitCodeFor(copyErr), 1);
+
+  const source = path.join(dir, 'abort-source');
+  const relative = '.dsh_center_remote/patches/aborted';
+  fs.writeFileSync(source, 'do-not-copy');
+  const ac = new AbortController();
+  ac.abort();
+  const aborted = await localCopy(source, relative, { signal: ac.signal });
+  assert.equal(aborted.aborted, true);
+  assert.equal(fs.existsSync(path.join(home, relative)), false);
+  assert.equal(liveChildCount(), 0);
 });
 
 // ── §6 每主机串行队列 ────────────────────────────────────────────────────

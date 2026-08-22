@@ -8,17 +8,65 @@
 import {
   ACTION_LABEL, DASH, button, clear, dshSummary, el, fmtAgo, isManaged, mappingSummary, phaseBadge, phaseHint, rowActions, text,
 } from '../utils.js';
+import { field, input } from '../form.js';
 
 const COLUMNS = ['主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
+
+function localNoDshReason(reason) {
+  if (reason === 'missing-bin') return '本机未安装 dsh';
+  if (reason === 'no-web-profile') return '本机 dsh 未配置 web profile';
+  return '';
+}
+
+function displayedPhaseBadge(host) {
+  if (!host.local || host.phase !== 'unreachable') return phaseBadge(host.phase);
+  return el('span.phase-badge', { dataset: { tone: 'neutral' } }, [
+    el('span.status-dot', { dataset: { dot: 'none' } }),
+    el('span', { text: '本机探测失败' }),
+  ]);
+}
+
+function displayedPhaseHint(host) {
+  if (!host.local) return phaseHint(host);
+  if (host.phase === 'no_dsh') return localNoDshReason(host.probe?.noDshReason);
+  if (host.phase === 'unreachable') return '本机命令执行失败';
+  return phaseHint(host);
+}
+
+function displayedDshSummary(host) {
+  const summary = dshSummary(host);
+  if (!host.local || host.phase !== 'no_dsh') return summary;
+  return {
+    ...summary,
+    line2: localNoDshReason(host.probe?.noDshReason),
+  };
+}
+
+function displayedMappingSummary(host) {
+  if (!host.local) return mappingSummary(host);
+  if (!host.mappedUrl || host.tunnel?.localPort == null) return { line1: DASH, line2: '', url: null };
+  return { line1: `本机 ${host.tunnel.localPort}`, line2: '直连 dsh web', url: host.mappedUrl };
+}
 
 export function createHostTable({ store, actions }) {
   const tbody = el('tbody');
   const empty = el('p.empty-hint', { text: '尚无主机：确认 ~/.ssh/config 中有可用 Host 条目，然后重新探测。' });
+  const countLabel = el('span.card-sub.host-count');
+  const localName = field('本机名称（可选）', input('text', '', {
+    placeholder: '留空使用系统主机名',
+    autocomplete: 'off',
+    'aria-label': '本机名称（可选）',
+  }));
+  const addLocalButton = button('添加本机', {
+    onClick: () => actions.addLocalHost(localName.input.value),
+  });
+  addLocalButton.dataset.act = 'add-local';
+  addLocalButton.setAttribute('aria-label', '添加本机');
 
   const root = el('section.card.host-table-card', {}, [
     el('header.card-header', {}, [
       el('h2', { text: '主机' }),
-      el('span.card-sub.host-count'),
+      el('div.row-actions', {}, [countLabel, localName.root, addLocalButton]),
     ]),
     el('div.table-scroll', {}, [
       el('table.host-table', {}, [
@@ -28,10 +76,23 @@ export function createHostTable({ store, actions }) {
     ]),
     empty,
   ]);
-  const countLabel = root.querySelector('.host-count');
 
   /** @type {Map<string, HTMLTableRowElement>} */
   const rows = new Map();
+
+  function syncHeader() {
+    const hosts = store.listHosts();
+    const loaded = store.state.hostsLoaded;
+    const hasLocal = hosts.some((host) => host.local === true);
+    const showAddLocal = loaded && !hasLocal;
+    const addLocalDisabled = !showAddLocal || !store.canWrite() || store.isPending('local:create');
+    countLabel.textContent = hosts.length > 0 ? `${hosts.length} 台` : '';
+    localName.root.hidden = !showAddLocal;
+    localName.input.disabled = addLocalDisabled;
+    addLocalButton.hidden = !showAddLocal;
+    addLocalButton.disabled = addLocalDisabled;
+    addLocalButton.title = !store.canWrite() ? '与 manager 失联，写操作已暂停' : '';
+  }
 
   function renderAll() {
     clear(tbody);
@@ -43,7 +104,7 @@ export function createHostTable({ store, actions }) {
       tbody.append(tr);
     }
     empty.hidden = hosts.length > 0;
-    countLabel.textContent = hosts.length > 0 ? `${hosts.length} 台` : '';
+    syncHeader();
   }
 
   function renderOne(name) {
@@ -52,6 +113,8 @@ export function createHostTable({ store, actions }) {
     if (!host) {
       existing?.remove();
       rows.delete(name);
+      empty.hidden = rows.size > 0;
+      syncHeader();
       return;
     }
     const fresh = renderRow(host);
@@ -59,6 +122,7 @@ export function createHostTable({ store, actions }) {
     else tbody.append(fresh);
     rows.set(name, fresh);
     empty.hidden = rows.size > 0;
+    syncHeader();
   }
 
   function renderRow(host) {
@@ -84,24 +148,29 @@ export function createHostTable({ store, actions }) {
     const ssh = host.sshInfo;
     tr.append(el('td.host-cell', {}, [
       el('strong', { text: host.name }),
-      el('small', { text: ssh ? `${text(ssh.user)}@${text(ssh.hostName)}:${text(ssh.port)}` : 'ssh config 中已消失' }),
-      host.orphaned ? el('span.tag.tag-warn', { text: 'orphaned', title: 'config 里还有，ssh config 里已不见' }) : null,
+      host.local ? el('span.tag.tag-lock', { text: '本机' }) : null,
+      ssh
+        ? el('small', { text: `${text(ssh.user)}@${text(ssh.hostName)}:${text(ssh.port)}` })
+        : (host.local ? null : el('small', { text: 'ssh config 中已消失' })),
+      !host.local && host.orphaned
+        ? el('span.tag.tag-warn', { text: 'orphaned', title: 'config 里还有，ssh config 里已不见' })
+        : null,
     ]));
 
-    const hint = phaseHint(host);
+    const hint = displayedPhaseHint(host);
     tr.append(el('td', {}, [
-      phaseBadge(host.phase),
+      displayedPhaseBadge(host),
       hint ? el('small.phase-hint', { text: hint }) : null,
     ]));
 
-    const dsh = dshSummary(host);
+    const dsh = displayedDshSummary(host);
     tr.append(el('td.dsh-cell', {}, [
       el('span', { text: dsh.line1 }),
       dsh.line2 ? el('small', { text: dsh.line2, title: dsh.line2 }) : null,
       host.probe?.at ? el('small.probe-at', { text: `探测 ${fmtAgo(host.probe.at)}` }) : null,
     ]));
 
-    const mapping = mappingSummary(host);
+    const mapping = displayedMappingSummary(host);
     tr.append(el('td.mapping-cell', {}, [
       mapping.url
         ? el('a.mono-link', {

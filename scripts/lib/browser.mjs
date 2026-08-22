@@ -204,51 +204,34 @@ export async function launchChrome({ headful = false, noSandbox = null, env = pr
   if (needsNoSandbox) args.unshift('--no-sandbox', '--disable-dev-shm-usage');
 
   const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  // 冷启动在共享 runner 上会被 IO 拖到二十几秒（实测 CI 上偶发超时判红，而本机从不复现）。
-  // 放宽到 60s，并在超时时把 Chrome 自己的 stderr 一起交出来——否则只剩一句「没报出端口」，
-  // 分不清是慢、是缺库、还是沙箱起不来。
-  const startupMs = Number(env.DSHC_CHROME_TIMEOUT_MS) || 60_000;
-  const wsUrl = await new Promise((resolve, reject) => {
-    let buf = '';
-    const fail = (why) => reject(new Error(
-      `${why}${buf.trim() ? `\nChrome 说：${buf.trim().split('\n').slice(-8).join('\n')}` : ''}`,
-    ));
-    const timer = setTimeout(
-      () => fail(`Chrome 未在 ${Math.round(startupMs / 1000)}s 内报出调试端口`),
-      startupMs,
-    );
-    proc.stderr.setEncoding('utf8');
-    proc.stderr.on('data', (chunk) => {
-      buf += chunk;
-      const m = buf.match(/ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(m[0]);
-      }
-    });
-    // 挂 close 而不是 exit：exit 只说进程没了，stdio 可能还没读完——而「Chrome 退出」
-    // 这条路上最有价值的信息（缺哪个库）恰恰在 stderr 里，抢在它到达之前报错等于白报。
-    proc.once('close', (code) => {
-      clearTimeout(timer);
-      fail(`Chrome 退出（code ${code}）`);
-    });
-  });
+  let closed = false;
+  proc.once('close', () => { closed = true; });
+  let stopPromise = null;
+  const stop = () => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      const exited = closed || proc.exitCode !== null || proc.signalCode !== null
+        ? Promise.resolve()
+        : new Promise((resolve) => {
+          let timer;
+          const done = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          proc.once('exit', done);
+          timer = setTimeout(done, 2_000);
+          proc.kill('SIGKILL');
+        });
 
-  return {
-    proc,
-    wsUrl,
-    bin,
-    devtoolsBase: `http://${new URL(wsUrl).host}`,
-    kill() {
-      proc.kill('SIGKILL');
-      // Chrome 自己会拉起旁支（chrome_crashpad_handler 之类），它们继承了这根 stderr
-      // 的写端，又不吃我们发给主进程的信号。读端不主动关，那个 PipeWrap 就把事件循环
-      // 钉住——冒烟把结论都打完了还不退，CI 上烧到 job 超时（issue #112）。
+      // Chrome 的旁支可能继承这两根管道；主动断开，别让 PipeWrap 钉住调用方。
       proc.stdout?.destroy();
       proc.stderr?.destroy();
+      await exited;
       proc.unref();
-      // SIGKILL 是异步的：Chrome 还在往 profile 里写盘，递归删除会撞 ENOTEMPTY
-      // （macOS runner 上真的会），maxRetries 专治这个。
+
+      // 必须等主进程退出后再删：先删会与 Chrome 的最后一轮写盘打架，常见结果是
+      // 内容删光了、顶层 dshc-chrome-* 又被重建，久而久之 /tmp 堆满空 profile。
+      await sleep(50);
       try {
         fs.rmSync(profile, {
           recursive: true, force: true, maxRetries: 10, retryDelay: 100,
@@ -256,7 +239,52 @@ export async function launchChrome({ headful = false, noSandbox = null, env = pr
       } catch {
         // 一个临时目录没删净，绝不该把通过的冒烟判红——交给系统清理
       }
-    },
+    })();
+    return stopPromise;
+  };
+
+  // 冷启动在共享 runner 上会被 IO 拖到二十几秒（实测 CI 上偶发超时判红，而本机从不复现）。
+  // 放宽到 60s，并在超时时把 Chrome 自己的 stderr 一起交出来——否则只剩一句「没报出端口」，
+  // 分不清是慢、是缺库、还是沙箱起不来。
+  const startupMs = Number(env.DSHC_CHROME_TIMEOUT_MS) || 60_000;
+  let wsUrl;
+  try {
+    wsUrl = await new Promise((resolve, reject) => {
+      let buf = '';
+      const fail = (why) => reject(new Error(
+        `${why}${buf.trim() ? `\nChrome 说：${buf.trim().split('\n').slice(-8).join('\n')}` : ''}`,
+      ));
+      const timer = setTimeout(
+        () => fail(`Chrome 未在 ${Math.round(startupMs / 1000)}s 内报出调试端口`),
+        startupMs,
+      );
+      proc.stderr.setEncoding('utf8');
+      proc.stderr.on('data', (chunk) => {
+        buf += chunk;
+        const m = buf.match(/ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+/);
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0]);
+        }
+      });
+      // 挂 close 而不是 exit：exit 只说进程没了，stdio 可能还没读完——而「Chrome 退出」
+      // 这条路上最有价值的信息（缺哪个库）恰恰在 stderr 里，抢在它到达之前报错等于白报。
+      proc.once('close', (code) => {
+        clearTimeout(timer);
+        fail(`Chrome 退出（code ${code}）`);
+      });
+    });
+  } catch (err) {
+    await stop();
+    throw err;
+  }
+
+  return {
+    proc,
+    wsUrl,
+    bin,
+    devtoolsBase: `http://${new URL(wsUrl).host}`,
+    kill: stop,
   };
 }
 

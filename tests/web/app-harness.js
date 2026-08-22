@@ -22,10 +22,11 @@ export const DEFAULTS = { remoteWebPort: 8899, localPortRange: [17_701, 17_799] 
 export function hostView(name, patch = {}) {
   return {
     name,
+    local: false,
     enabled: true,
     orphaned: false,
     config: {
-      enabled: true, autoStart: false, localPort: null, remoteWebPort: null, workdir: null, inject: { env: {}, extraArgs: [], patches: [] },
+      local: false, enabled: true, autoStart: false, localPort: null, remoteWebPort: null, workdir: null, inject: { env: {}, extraArgs: [], patches: [] },
     },
     phase: 'ready',
     effectiveRemotePort: 8899,
@@ -47,7 +48,7 @@ export const running = (name) => hostView(name, {
   },
   tunnel: { localPort: 17_701, reconnectAttempt: 0, suspendedReason: null },
   config: {
-    enabled: true, autoStart: true, localPort: 17_701, remoteWebPort: null, workdir: null, inject: { env: {}, extraArgs: [], patches: [] },
+    local: false, enabled: true, autoStart: true, localPort: 17_701, remoteWebPort: null, workdir: null, inject: { env: {}, extraArgs: [], patches: [] },
   },
 });
 

@@ -104,6 +104,16 @@ const assert = (cond, msg) => {
   if (!cond) throw new Error(msg);
 };
 
+const TAB_PHASES = new Set(['ready', 'starting', 'running', 'degraded', 'crashed']);
+
+async function fixtureTabNames(rig) {
+  const res = await rig.api('GET', '/api/hosts');
+  return (res.json?.hosts ?? [])
+    .filter((host) => (host.config?.enabled ?? host.enabled) === true && TAB_PHASES.has(host.phase))
+    .map((host) => host.name)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 // ── 本机 manager（远端换假装置） ─────────────────────────────────────────
 
 function portFree(port) {
@@ -266,36 +276,71 @@ async function main() {
   try {
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await cdp.send('Page.navigate', { url: `${rig.base}/` });
-    await cdp.waitFor("document.querySelector('.host-table tbody tr')", '首屏渲染出主机行');
+    await cdp.waitFor(
+      "location.hash === '#/hub' && document.querySelectorAll('.view-hub:not([hidden]) .hub-host-card').length === 3",
+      '根路由落到 hub 并渲染主机卡',
+    );
 
     console.log('检查项：');
 
-    await check('S1', '首屏无控制台错误、无 4xx/5xx 资源', async () => {
-      await cdp.waitFor("document.querySelectorAll('.host-table tbody tr').length === 3", '三台主机都到位');
+    await check('S1', '根路由落 hub；首屏无控制台错误、无 4xx/5xx 资源', async () => {
+      const landing = await cdp.eval(`
+        const visible = (node) => Boolean(node && node.getClientRects().length > 0);
+        return {
+          hash: location.hash,
+          hub: visible(document.querySelector('.view-hub')),
+          manage: visible(document.querySelector('.view-dashboard')),
+          visibleOps: [...document.querySelectorAll('.probe-all, .reload-config')].filter(visible).length,
+          toolbarOps: document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config').length,
+          headerOps: document.querySelectorAll('.app-header .probe-all, .app-header .reload-config').length,
+        };
+      `);
+      assert(landing.hash === '#/hub' && landing.hub && !landing.manage,
+        `新浏览器根路由应落 hub，实测 ${landing.hash}（hub=${landing.hub}, manage=${landing.manage}）`);
+      assert(landing.visibleOps === 0, `hub 上露出了 ${landing.visibleOps} 个运维写按钮`);
+      assert(landing.toolbarOps === 2 && landing.headerOps === 0,
+        `探测/重载应只属于 manage toolbar（toolbar=${landing.toolbarOps}, header=${landing.headerOps}）`);
       const bad = responses.filter((r) => r.status >= 400 && r.url.startsWith(rig.base));
       assert(bad.length === 0, `有失败请求：${bad.map((b) => `${b.status} ${b.url}`).join(', ')}`);
       assert(consoleErrors.length === 0, consoleErrors.join(' | '));
       return `${responses.length} 个请求全部 2xx`;
     });
 
-    await check('S2', '状态呈现：颜色之外还有文字与形状', async () => {
-      const badges = await cdp.eval(`
-        return [...document.querySelectorAll('.phase-badge')].map((b) => ({
+    await check('S2', 'ready 标签按 fixture 常驻；状态不只靠颜色', async () => {
+      const expected = await fixtureTabNames(rig);
+      const state = await cdp.eval(`
+        return {
+          badges: [...document.querySelectorAll('.view-hub:not([hidden]) .phase-badge')].map((b) => ({
           tone: b.dataset.tone ?? null,
           text: b.textContent.trim(),
           dot: b.querySelector('.status-dot')?.dataset.dot ?? null,
           color: getComputedStyle(b).color,
-        }));
+          })),
+          tabs: [...document.querySelectorAll('.host-tabs .tab')].map((t) => ({
+            host: t.dataset.host,
+            title: t.title,
+            dot: t.querySelector('.status-dot')?.dataset.dot ?? null,
+          })),
+        };
       `);
+      const { badges, tabs } = state;
       assert(badges.length > 0, '页面里没有状态徽章');
       for (const b of badges) {
         assert(b.text.length > 0, `徽章缺文字（tone=${b.tone}）`);
         assert(b.tone, '徽章缺 data-tone');
         assert(b.dot, '徽章缺形状标识 .status-dot[data-dot]');
       }
-      return `${badges.length} 个徽章，形状取值 ${[...new Set(badges.map((b) => b.dot))].join('/')}`;
+      assert(JSON.stringify(tabs.map((tab) => tab.host)) === JSON.stringify(expected),
+        `常驻标签应按 fixture 为 ${expected.join('/')}，实测 ${tabs.map((tab) => tab.host).join('/')}`);
+      for (const tab of tabs) {
+        assert(tab.dot === 'hollow' && /可拉起/.test(tab.title),
+          `${tab.host} 的 ready 标签缺空心状态或文字（dot=${tab.dot}, title=${tab.title}）`);
+      }
+      return `${tabs.length} 个 fixture 标签，${badges.length} 个文字+形状徽章`;
     });
 
+    await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+    await cdp.waitFor("location.hash === '#/manage' && !document.querySelector('.view-dashboard').hidden", '显式进入管理台');
     for (const width of [1024, 1440]) {
       // eslint-disable-next-line no-await-in-loop -- 逐个宽度
       await check(`S3-${width}`, `${width}px 宽不横向溢出`, async () => {
@@ -314,7 +359,47 @@ async function main() {
         return path.relative(REPO, shot);
       });
     }
+
+    await check('S3-420', '窄屏仍是单行薄壳，管理入口常见且主机标签独立横滚', async () => {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 900, deviceScaleFactor: 1, mobile: false });
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/hub` });
+      await cdp.waitFor("location.hash === '#/hub' && !document.querySelector('.view-hub').hidden", '窄屏 hub 到位');
+      await sleep(120);
+      const layout = await cdp.eval(`
+        const shell = document.querySelector('.app-shell');
+        const header = document.querySelector('.app-header');
+        const tabs = document.querySelector('.host-tabs');
+        const manage = document.querySelector('.tab-manage');
+        const sr = shell.getBoundingClientRect();
+        const hr = header.getBoundingClientRect();
+        const tr = tabs.getBoundingClientRect();
+        const mr = manage.getBoundingClientRect();
+        return {
+          shellHeight: Math.round(sr.height),
+          sameRow: Math.abs(hr.top - tr.top) <= 8 && Math.abs(hr.bottom - tr.bottom) <= 8,
+          documentWidth: document.documentElement.scrollWidth,
+          viewportWidth: document.documentElement.clientWidth,
+          manageVisible: mr.width > 0 && mr.left >= -1 && mr.right <= innerWidth + 1,
+          tabs: {
+            overflowX: getComputedStyle(tabs).overflowX,
+            scroll: tabs.scrollWidth,
+            client: tabs.clientWidth,
+          },
+        };
+      `);
+      assert(layout.shellHeight <= 52, `app shell 高 ${layout.shellHeight}px，超过薄壳上限 52px`);
+      assert(layout.sameRow, '品牌与标签条没有落在同一行');
+      assert(layout.documentWidth <= layout.viewportWidth + 1,
+        `窄屏文档横溢 ${layout.documentWidth - layout.viewportWidth}px`);
+      assert(layout.manageVisible, '窄屏管理入口被挤出视口或隐藏');
+      assert(layout.tabs.overflowX === 'auto' && layout.tabs.scroll > layout.tabs.client,
+        `host-tabs 没独立横滚（overflow=${layout.tabs.overflowX}, ${layout.tabs.scroll}/${layout.tabs.client}）`);
+      return `shell ${layout.shellHeight}px，host-tabs ${layout.tabs.scroll}/${layout.tabs.client}px`;
+    });
+
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+    await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
     await check('S4', '键盘链路：Tab 到主机行 → Enter 开抽屉 → Esc 关且焦点归位', async () => {
       await cdp.eval("document.body.focus(); if (document.activeElement !== document.body) document.activeElement.blur(); return true;");
@@ -440,7 +525,7 @@ async function main() {
     // 而真机上 focus() 对它静默失效——issue #32 最后那一段就栽在这儿。
     await check('S4d', '状态更新不把键盘焦点甩掉（含忙碌态的禁用键）', async () => {
       // 主机路由下管理台是 hidden 的，隐藏元素接不了焦点——先回管理台
-      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.eval("window.location.hash = '#/manage'; return true;");
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
       // 从界面上按键触发，才会走「本页自己有在飞的写操作」那条路（pending:changed →
       // 整表重建，且同名控件在忙碌态下变 disabled）。直接打后端 API 压不到它：
@@ -482,7 +567,7 @@ async function main() {
     });
 
     await check('S4e', '行内控件的 Enter/Space 真按得动（不被行吞掉）', async () => {
-      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.eval("window.location.hash = '#/manage'; return true;");
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
       // 原生激活只有真浏览器能验：单测垫片不会因为 Enter 就替按钮生成 click，
@@ -510,7 +595,7 @@ async function main() {
     });
 
     await check('S4f', '按住的那一下不被重建吞掉（鼠标与 Space 都在抬起才激活）', async () => {
-      await cdp.eval("window.location.hash = '#/'; return true;");
+      await cdp.eval("window.location.hash = '#/manage'; return true;");
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
       // 只有真浏览器验得到：垫片里 click 是直接调的，不存在「按下与抬起要是同一个节点」
@@ -621,6 +706,64 @@ async function main() {
       }
     });
 
+    await check('S4h', 'hub 卡片可键盘一步拉起；starting 遮罩与 tab/panel ARIA 配对', async () => {
+      await waitHost(rig, 'gpu-1', ['ready']);
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/hub` });
+      await cdp.waitFor("!document.querySelector('.view-hub').hidden", '进入 hub');
+      await cdp.eval("document.activeElement?.blur(); document.body.focus(); return true;");
+
+      let card = null;
+      for (let i = 0; i < 30 && !card; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 逐次 Tab，验证真实焦点链
+        await cdp.key('Tab', { keyCode: 9 });
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        const at = await cdp.eval(FOCUS_PROBE);
+        if (at.tag.startsWith('button.hub-host-card') && at.host === 'gpu-1') card = at;
+      }
+      assert(card?.host, 'Tab 30 次都没落到 gpu-1 的 hub 主机卡');
+
+      await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+      await cdp.waitFor(`
+        location.hash === '#/host/' + encodeURIComponent(${JSON.stringify(card.host)})
+          && document.querySelector('.host-tabs .tab[data-host="${card.host}"] .dot-starting')
+          && !document.querySelector('.iframe-pane[data-host="${card.host}"], .iframe-pane.is-placeholder').hidden
+          && /正在启动/.test(document.querySelector('.iframe-overlay:not([hidden])')?.textContent ?? '')
+      `, 'ready 卡一步进入 starting 遮罩');
+
+      const starting = await cdp.eval(`
+        const tab = document.querySelector('.host-tabs .tab[data-host=${JSON.stringify(card.host)}]');
+        const panel = document.querySelector('[role="tabpanel"]:not([hidden])');
+        const status = panel?.querySelector('.iframe-overlay:not([hidden])');
+        return {
+          tabStillPresent: Boolean(tab),
+          tabSelected: tab?.getAttribute('aria-selected'),
+          tabControls: tab?.getAttribute('aria-controls'),
+          panelId: panel?.id,
+          panelLabelledBy: panel?.getAttribute('aria-labelledby'),
+          panelHidden: panel?.getAttribute('aria-hidden'),
+          busy: status?.getAttribute('aria-busy'),
+        };
+      `);
+      assert(starting.tabStillPresent, `${card.host} 从 ready 进 starting 时标签消失了`);
+      assert(starting.tabSelected === 'true' && starting.panelHidden === 'false',
+        `激活语义不完整（selected=${starting.tabSelected}, hidden=${starting.panelHidden}）`);
+      assert(starting.tabControls === starting.panelId && starting.panelLabelledBy,
+        `tab/panel 未配对（controls=${starting.tabControls}, panel=${starting.panelId}, labelledby=${starting.panelLabelledBy}）`);
+      const expectedTabId = await cdp.eval(
+        `return document.querySelector('.host-tabs .tab[data-host=${JSON.stringify(card.host)}]').id;`,
+      );
+      assert(starting.panelLabelledBy === expectedTabId,
+        `panel aria-labelledby=${starting.panelLabelledBy}，应指向 ${expectedTabId}`);
+      assert(starting.busy === 'true', `starting status aria-busy=${starting.busy}`);
+
+      await waitHost(rig, card.host, ['running']);
+      await cdp.waitFor(
+        `document.querySelector('.iframe-pane[data-host=${JSON.stringify(card.host)}] iframe')`,
+        '一步拉起后 iframe 就绪',
+      );
+      return `${card.host}：ready → starting 遮罩 → running`;
+    });
+
     await check('S5', 'Tab 一圈都不进 [hidden] 区域', async () => {
       await cdp.eval("document.activeElement?.blur(); return true;");
       const seen = [];
@@ -635,14 +778,27 @@ async function main() {
       return `${new Set(seen).size} 个可聚焦落点`;
     });
 
-    await check('S6', '标签页菜单：Shift+F10 开、方向键移动、Esc 收回、选完还焦', async () => {
-      const host = await waitHost(rig, 'gpu-1', ['ready']);
-      assert(host, 'gpu-1 应已就绪');
-      await rig.api('POST', '/api/hosts/gpu-1/start');
-      await waitHost(rig, 'gpu-1', ['running']);
-      await cdp.waitFor("document.querySelector('.host-tabs .tab')", '标签栏出现 running 主机');
+    // S6/S6b 验的是菜单键盘链路、焦点与 toast 遮挡，不认领系统剪贴板。真 clipboard
+    // 会跨 Chrome profile 争用 macOS pasteboard：一趟被强退留下的 headless Chrome
+    // 足以让下一趟卡在 Runtime.evaluate，随后所有 CDP 命令连锁超时。专用页面里把写入
+    // 收成本地假动作，既保留产品的 async copy → toast 链路，也不把外部剪贴板混进判据。
+    await cdp.eval(`
+      if (navigator.clipboard) {
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          configurable: true,
+          value: async () => {},
+        });
+      }
+      return true;
+    `);
 
-      await cdp.eval("document.querySelector('.host-tabs .tab').focus(); return true;");
+    await check('S6', '标签页菜单：Shift+F10 开、方向键移动、Esc 收回、选完还焦', async () => {
+      const before = await waitHost(rig, 'gpu-1', ['ready', 'running']);
+      if (before.phase === 'ready') await rig.api('POST', '/api/hosts/gpu-1/start');
+      await waitHost(rig, 'gpu-1', ['running']);
+      await cdp.waitFor("document.querySelector('.host-tabs .tab[data-host=\"gpu-1\"]')", '标签栏保留 gpu-1');
+
+      await cdp.eval("document.querySelector('.host-tabs .tab[data-host=\"gpu-1\"]').focus(); return true;");
       await cdp.key('F10', { code: 'F10', keyCode: 121, modifiers: 8 }); // 8 = Shift
       await cdp.waitFor("document.querySelector('.context-menu') && !document.querySelector('.context-menu').hidden", 'Shift+F10 开菜单');
       // 判「焦点确实换了一项」，不能只判「落在某个菜单项上」——开菜单时焦点本就在首项，
@@ -687,7 +843,7 @@ async function main() {
     await check('S6b', '右键菜单靠边打开：整块在视口内，且不被 toast 压住', async () => {
       await cdp.waitFor("document.querySelector('.host-tabs .tab')", '标签栏有 running 主机');
       await cdp.eval(`
-        const t = document.querySelector('.host-tabs .tab');
+        const t = document.querySelector('.host-tabs .tab[data-host="gpu-1"]');
         t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 300, clientY: 60 }));
         return true;
       `);
@@ -706,7 +862,7 @@ async function main() {
       for (const [where, x, y] of corners) {
         // eslint-disable-next-line no-await-in-loop -- 逐个方位
         await cdp.eval(`
-          const t = document.querySelector('.host-tabs .tab');
+          const t = document.querySelector('.host-tabs .tab[data-host="gpu-1"]');
           t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: ${x}, clientY: ${y} }));
           return true;
         `);
@@ -761,6 +917,96 @@ async function main() {
       return `${host.mappedUrl} 200`;
     });
 
+    await check('S7b', 'iframe keepalive：切页不换；degraded 不重载；crashed 恢复只重载一次', async () => {
+      const host = await waitHost(rig, 'gpu-1', ['running']);
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/host/gpu-1` });
+      await cdp.waitFor("document.querySelector('.iframe-pane[data-host=\"gpu-1\"] iframe')", 'keepalive 基准 iframe 在位');
+      await cdp.eval(`
+        const frame = document.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+        window.__keepaliveFrame = frame;
+        return true;
+      `);
+      const rootResponses = () => responses.filter((response) => response.url === host.mappedUrl).length;
+      const responseMark = rootResponses();
+      assert(responseMark > 0, 'keepalive 前提：没记录到 iframe 文档响应');
+
+      await cdp.eval("window.location.hash = '#/hub'; return true;");
+      await cdp.waitFor("!document.querySelector('.view-hub').hidden", '切到 hub');
+      await cdp.eval("window.location.hash = '#/host/gpu-1'; return true;");
+      await cdp.waitFor("!document.querySelector('.iframe-pane[data-host=\"gpu-1\"]').hidden", '切回 keepalive pane');
+      const switched = await cdp.eval(`
+        const frame = document.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+        return {
+          same: frame === window.__keepaliveFrame,
+          src: frame?.src,
+        };
+      `);
+      assert(switched.same && switched.src === host.mappedUrl && rootResponses() === responseMark,
+        `切页动了 iframe（same=${switched.same}, src=${switched.src}, 文档响应 ${rootResponses() - responseMark}）`);
+
+      const tunnel = await import('../src/tunnel.js');
+      const firstTunnelPid = tunnel._childPid('gpu-1');
+      assert(firstTunnelPid, 'degraded 前提：gpu-1 没有隧道子进程');
+      process.kill(firstTunnelPid, 'SIGUSR1');
+      await cdp.waitFor(`
+        !document.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay').hidden
+          && /隧道断开/.test(document.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay').textContent)
+      `, 'degraded 遮罩出现', { timeoutMs: 8_000 });
+      const degraded = await cdp.eval(`
+        const frame = document.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+        const tab = document.querySelector('.host-tabs .tab[data-host="gpu-1"]');
+        return {
+          same: frame === window.__keepaliveFrame,
+          tabTone: tab?.querySelector('.status-dot')?.className ?? '',
+        };
+      `);
+      assert(degraded.same && rootResponses() === responseMark,
+        `degraded 不该换/重载 iframe（same=${degraded.same}, 文档响应 ${rootResponses() - responseMark}）`);
+      assert(/dot-degraded/.test(degraded.tabTone), `degraded 标签状态没跟上：${degraded.tabTone}`);
+
+      await waitHost(rig, 'gpu-1', ['running'], { timeoutMs: 20_000 });
+      await cdp.waitFor(
+        "document.querySelector('.iframe-pane[data-host=\"gpu-1\"] .iframe-overlay').hidden",
+        'degraded 自动恢复',
+        { timeoutMs: 20_000 },
+      );
+      await sleep(300);
+      assert(rootResponses() === responseMark, 'degraded → running 触发了 iframe reload');
+
+      rig.harness.crash('gpu-1');
+      const secondTunnelPid = tunnel._childPid('gpu-1');
+      assert(secondTunnelPid, 'crashed 前提：恢复后没有隧道子进程');
+      process.kill(secondTunnelPid, 'SIGUSR1');
+      await cdp.waitFor(`
+        !document.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay').hidden
+          && /已退出/.test(document.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay').textContent)
+      `, 'crashed 遮罩出现', { timeoutMs: 20_000 });
+      const crashed = await cdp.eval(`
+        const frame = document.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+        const tab = document.querySelector('.host-tabs .tab[data-host="gpu-1"]');
+        return {
+          same: frame === window.__keepaliveFrame,
+          tabTone: tab?.querySelector('.status-dot')?.className ?? '',
+        };
+      `);
+      assert(crashed.same && rootResponses() === responseMark,
+        `crashed 期间没保住旧文档（same=${crashed.same}, 文档响应 ${rootResponses() - responseMark}）`);
+      assert(/dot-crashed/.test(crashed.tabTone), `crashed 标签状态没跟上：${crashed.tabTone}`);
+
+      const restart = await rig.api('POST', '/api/hosts/gpu-1/start');
+      assert(restart.status === 202, `crashed 重启返回 ${restart.status}`);
+      await waitHost(rig, 'gpu-1', ['running'], { timeoutMs: 20_000 });
+      const reloadDeadline = Date.now() + 10_000;
+      while (rootResponses() === responseMark && Date.now() < reloadDeadline) {
+        // eslint-disable-next-line no-await-in-loop -- 等真实 iframe 文档响应
+        await sleep(100);
+      }
+      await sleep(500);
+      const reloads = rootResponses() - responseMark;
+      assert(reloads === 1, `crashed 恢复应只加载一次 iframe 文档，实测 ${reloads}`);
+      return '切页 0 / degraded 0 / crashed 恢复 1 次 reload';
+    });
+
     // S7 走的是「页内改 hash」——真机 v0.2.0-rc.3 上出问题的偏偏是另一条：
     // 首屏就带着 host 路由（书签 / 刷新 / dshc open <host>）。那时主机集合还没到，
     // 曾被当成「标签已消失」直接改写回 #/，深链于是永远落在管理台（issue #15）。
@@ -787,34 +1033,49 @@ async function main() {
       await cdp.waitFor("document.querySelector('.iframe-pane[data-host=\\\"gpu-1\\\"] iframe')", '刷新后仍在主机页');
       const afterReload = await cdp.eval('return location.hash;');
       assert(afterReload === '#/host/gpu-1', `刷新后地址变成 ${afterReload}`);
+
+      // 访问过的可开主机已记为 lastHost；根路由应恢复它，而不是退回管理台/hub。
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
+      await cdp.waitFor(
+        "location.hash === '#/host/gpu-1' && document.querySelector('.iframe-pane[data-host=\"gpu-1\"] iframe')",
+        '根路由恢复 lastHost',
+      );
       await screenshot(cdp, 'deeplink-cold-boot');
-      return '冷启动与刷新都落在主机页';
+      return '深链冷启动、刷新与根路由恢复都落在主机页';
     });
 
     // 真机上是 8 台主机 + 37 字符长名把标签栏撑到 2058px（可视 1024px），激活标签
-    // 停在可视区外，看起来像一个都没选中（issue #25）。假装置只有两台短名主机，
-    // 撑不出溢出——把视口收窄到 480px 等价复现，且不用为此多起几台主机。
+    // 停在可视区外，看起来像一个都没选中（issue #25）。假装置只有三台主机，
+    // 把视口收窄到 420px 等价复现，且不用为此多起几台主机。
     await check('S11', '标签栏溢出时激活标签仍在可视区内', async () => {
       await rig.api('POST', `/api/hosts/${encodeURIComponent(LONG_HOST)}/start`);
       await waitHost(rig, LONG_HOST, ['running']);
       await cdp.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 900, deviceScaleFactor: 1, mobile: false });
-      await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
-      // gpu-1 在 S6/S7 里已经起着，加上长名这台就是两个标签
-      await cdp.waitFor("document.querySelectorAll('.host-tabs .tab').length === 2", '长名主机的标签也在');
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/hub` });
+      const expectedTabs = await fixtureTabNames(rig);
+      await cdp.waitFor(
+        `document.querySelectorAll('.host-tabs .tab').length === ${expectedTabs.length}`,
+        '标签数量收敛到 fixture 实际可用态',
+      );
+      const actualTabs = await cdp.eval(
+        "return [...document.querySelectorAll('.host-tabs .tab')].map((tab) => tab.dataset.host);",
+      );
+      assert(JSON.stringify(actualTabs) === JSON.stringify(expectedTabs),
+        `标签应按 fixture 为 ${expectedTabs.join('/')}，实测 ${actualTabs.join('/')}`);
 
       const overflowing = await cdp.eval(`
-        const bar = document.querySelector('.tabbar');
+        const bar = document.querySelector('.host-tabs');
         return { scroll: bar.scrollWidth, client: bar.clientWidth, overflowX: getComputedStyle(bar).overflowX };
       `);
       assert(overflowing.overflowX === 'auto', `标签栏 overflow-x=${overflowing.overflowX}，溢出就滚不动了`);
       assert(overflowing.scroll > overflowing.client,
-        `480px 下标签栏没撑出溢出（${overflowing.scroll}/${overflowing.client}），判据在空转`);
+        `420px 下标签栏没撑出溢出（${overflowing.scroll}/${overflowing.client}），判据在空转`);
 
       // 挑排在最后的那个标签——只有它才需要真的滚一段才看得见
       const target = await cdp.eval(`
         const tabs = [...document.querySelectorAll('.host-tabs .tab')];
         const last = tabs[tabs.length - 1];
-        const bar = document.querySelector('.tabbar');
+        const bar = document.querySelector('.host-tabs');
         return {
           host: last.dataset.host,
           // 不滚的话它够不够得着（offsetLeft 是内容坐标，与 scrollLeft 无关）
@@ -828,7 +1089,7 @@ async function main() {
       await cdp.waitFor(`document.querySelector('.host-tabs .tab.is-active')?.dataset.host === ${JSON.stringify(target.host)}`, '激活标签就位');
       await sleep(200);
       const at = await cdp.eval(`
-        const bar = document.querySelector('.tabbar');
+        const bar = document.querySelector('.host-tabs');
         const t = document.querySelector('.host-tabs .tab.is-active');
         const bb = bar.getBoundingClientRect(); const tb = t.getBoundingClientRect();
         return {
@@ -846,7 +1107,7 @@ async function main() {
 
     // 回管理台与 1440 宽，别把后面的场景留在 iframe 页 / 窄视口上
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
+    await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
     await cdp.waitFor("document.querySelector('.host-table tbody tr')", '回到管理台');
 
     await check('S8', '减少动效：动画真的关掉', async () => {
@@ -870,6 +1131,8 @@ async function main() {
     });
 
     await check('S9', 'manager 掉线：横幅出现且写按钮禁用；期间不堆连接', async () => {
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+      await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '断线前显式进入管理台');
       const before = responses.filter((r) => r.url.endsWith('/api/events')).length;
       // 掐线前先按下一次写操作，让断线发生在「有动作在飞」的真实时刻，
       // 而不是页面闲着的时候（判据不靠它，见 S9b 的说明）。
@@ -885,12 +1148,12 @@ async function main() {
         const row = document.querySelector('.host-table tbody tr');
         return {
           banner: document.querySelector('.disconnect-banner').textContent.trim(),
-          writable: [...document.querySelectorAll('.header-actions .btn')].some((b) => !b.disabled),
+          writable: [...document.querySelectorAll('.manage-header .btn')].some((b) => !b.disabled),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
         };
       `);
       assert(/失联/.test(state.banner), `横幅文案不含「失联」：${state.banner}`);
-      assert(!state.writable, '断线后 header 写按钮仍可点');
+      assert(!state.writable, '断线后 manage toolbar 写按钮仍可点');
       assert(!state.rowWritable, '断线后行内写按钮仍可点');
       await sleep(3_000);
       const after = responses.filter((r) => r.url.endsWith('/api/events')).length;
@@ -910,12 +1173,12 @@ async function main() {
       const back = await cdp.eval(`
         const row = document.querySelector('.host-table tbody tr');
         return {
-          headerWritable: [...document.querySelectorAll('.header-actions .btn')].some((b) => !b.disabled),
+          toolbarWritable: [...document.querySelectorAll('.manage-header .btn')].some((b) => !b.disabled),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
           rows: document.querySelectorAll('.host-table tbody tr').length,
         };
       `);
-      assert(back.headerWritable, '恢复后 header 写按钮还禁着');
+      assert(back.toolbarWritable, '恢复后 manage toolbar 写按钮还禁着');
       assert(back.rowWritable, '恢复后行内写按钮还禁着');
       assert(back.rows >= 1, `恢复后表里只有 ${back.rows} 行，快照没回灌`);
       return '横幅消失且写操作恢复';
@@ -933,11 +1196,17 @@ async function main() {
         // eslint-disable-next-line no-await-in-loop -- 同上
         await waitHost(rig, name, ['running']);
       }
-      await cdp.send('Page.navigate', { url: `${rig.base}/#/` });
-      await cdp.waitFor("document.querySelectorAll('.host-tabs .tab').length >= 2", '标签栏至少两个标签');
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/hub` });
+      const expectedNames = await fixtureTabNames(rig);
+      await cdp.waitFor(
+        `document.querySelectorAll('.host-tabs .tab').length === ${expectedNames.length}`,
+        '标签栏数量收敛到 fixture 实际可用态',
+      );
 
       const names = await cdp.eval("return [...document.querySelectorAll('.host-tabs .tab')].map((t) => t.dataset.host);");
-      assert(names.length >= 2, `只有 ${names.length} 个标签，方向键判据在空转`);
+      assert(JSON.stringify(names) === JSON.stringify(expectedNames),
+        `标签应按 fixture 为 ${expectedNames.join('/')}，实测 ${names.join('/')}`);
+      assert(names.length >= 2, `fixture 只有 ${names.length} 个标签，方向键判据在空转`);
       const focused = () => cdp.eval("return document.activeElement?.dataset?.host ?? '';");
       const stops = () => cdp.eval("return [...document.querySelectorAll('.host-tabs .tab')].filter((t) => t.getAttribute('tabindex') !== '-1').length;");
 
@@ -950,8 +1219,15 @@ async function main() {
       assert(!routeAfterArrow.startsWith('#/host/'),
         `方向键顺手切页了（${routeAfterArrow}）——手动激活才不会一路划过去拉起一串 iframe`);
 
-      await cdp.key('ArrowRight', { code: 'ArrowRight', keyCode: 39 });
-      await sleep(120);
+      for (let i = 1; i < names.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 逐个标签走到末尾并环绕
+        await cdp.key('ArrowRight', { code: 'ArrowRight', keyCode: 39 });
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(120);
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        assert(await focused() === names[(i + 1) % names.length],
+          `第 ${i + 1} 次 ArrowRight 应到 ${names[(i + 1) % names.length]}，实测「${await focused()}」`);
+      }
       assert(await focused() === names[0], `走到末尾该环绕回 ${names[0]}，实测「${await focused()}」`);
       await cdp.key('End', { code: 'End', keyCode: 35 });
       await sleep(120);
@@ -969,6 +1245,8 @@ async function main() {
       // 修复前：1500 条事件 → 14.8 万次 DOM 变更、一个 2278ms 的长任务，那 2.3 秒里
       // 页面点不动。判据取「变更批次」这个与机器快慢无关的量，长任务只作兜底。
       const BURST = 1500;
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+      await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '事件风暴前显式进入管理台');
       await cdp.waitFor("document.querySelector('.event-list')", '事件面板在位');
       // 合帧靠 rAF，而 rAF 只在页面可见时才跑。跑到这里时这一页往往已经是 hidden
       // （前面开过 iframe、换过视口），那样一帧都不会来，判据就成了空转。
@@ -1027,7 +1305,7 @@ async function main() {
     });
   } finally {
     cdp.close();
-    chrome.kill();
+    await chrome.kill();
     await rig.shutdown().catch(() => {});
     if (!flag('keep')) rig.cleanup();
   }

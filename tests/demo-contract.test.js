@@ -13,15 +13,20 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import * as machine from '../src/lib/machine.js';
 import { PHASES } from '../src/lib/machine.js';
+import { drawerCopy } from '../src/web/components/host-drawer.js';
+import { overlayFor } from '../src/web/components/iframe-pane.js';
+import { setupPhaseLabel } from '../src/web/components/setup-wizard.js';
 import { createFakeManager, FakeApiError } from '../site/demo/demo-manager.js';
 import { DEGRADED_ROUTES, ROUTE_IDS, dispatch, matchRoute } from '../site/demo/demo-routes.js';
 import {
   accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
   managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
+  localHostCreateResponse,
 } from './contract/schemas.js';
 
 /** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
@@ -79,11 +84,41 @@ const req = (manager, method, pathname, { body, query } = {}) => dispatch(manage
   method, pathname, body, query: new URLSearchParams(query ?? ''),
 });
 
+// ── 本机文案覆盖 ─────────────────────────────────────────────────────────
+
+test('setup 本机不可用态使用本机文案，远端文案保持原样', () => {
+  assert.equal(setupPhaseLabel({ local: true, phase: 'unreachable' }), '本机不可用');
+  assert.equal(setupPhaseLabel({ local: true, phase: 'no_dsh' }), '本机未安装或未配置');
+  assert.equal(setupPhaseLabel({ local: false, phase: 'unreachable' }), 'SSH 不可达');
+  assert.equal(setupPhaseLabel({ local: false, phase: 'no_dsh' }), '未安装/未配置');
+});
+
+test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () => {
+  const copy = drawerCopy({ local: true });
+  for (const value of Object.values(copy)) {
+    assert.doesNotMatch(value, /SSH|远端|隧道/);
+  }
+  assert.match(copy.probeTitle, /本机探测/);
+  assert.match(copy.processLabel, /本机进程/);
+  assert.match(copy.workdirLabel, /本机实际工作目录/);
+  assert.match(copy.logTitle, /本机日志/);
+
+  for (const phase of ['degraded', 'crashed', 'starting']) {
+    const spec = overlayFor({ local: true, phase, mappedUrl: null, tunnel: { suspendedReason: null } });
+    assert.doesNotMatch(`${spec.title} ${spec.body}`, /SSH|远端|隧道/, `本机 ${phase} 遮罩不应出现远端运输文案`);
+  }
+  const waiting = overlayFor({ local: true, phase: 'running', mappedUrl: null });
+  assert.doesNotMatch(`${waiting.title} ${waiting.body}`, /SSH|远端|隧道/);
+
+  assert.match(overlayFor({ local: false, phase: 'degraded', tunnel: {} }).title, /隧道断开/);
+  assert.match(overlayFor({ local: false, phase: 'crashed' }).title, /远端 dsh web/);
+});
+
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 14 个真实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 14, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 15 个真实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 15, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -94,6 +129,7 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['POST', '/api/reload', 'reload'],
     ['POST', '/api/setup', 'setup'],
     ['POST', '/api/hosts/probe', 'probe-all'],
+    ['POST', '/api/hosts/local', 'local-create'],
     ['POST', '/api/hosts/gpu-a100/probe', 'probe'],
     ['POST', '/api/hosts/gpu-a100/start', 'start'],
     ['POST', '/api/hosts/gpu-a100/stop', 'stop'],
@@ -132,6 +168,11 @@ test('GET /api/manager/info、/api/hosts、/api/config 全过契约校验', () =
     ['cpu-build', 'gpu-4090-daily', 'gpu-a100', 'legacy-box'],
     '主机列表必须按 name 升序（13 §2.1）',
   );
+  assert.equal(
+    hosts.json.hosts.some((host) => host.local),
+    false,
+    '普通已完成 demo 不应静默追加仅供 setup 使用的本机候选',
+  );
 
   const config = req(manager, 'GET', '/api/config');
   assert.equal(config.status, 200);
@@ -161,6 +202,8 @@ test('拉起：202 受理 → starting → running，且恰好一条 operation-d
   assert.equal(res.status, 202);
   assertShape(accepted, res.json, 'POST start 的 202 体');
   assert.equal(res.json.host, 'gpu-4090-daily');
+  assert.equal(r.manager.getHost('gpu-4090-daily').phase, 'starting', 'hub 一步拉起后必须先进入 starting');
+  assert.equal(r.manager.getHost('gpu-4090-daily').mappedUrl, null, 'starting 时 iframe 尚无可加载地址');
 
   await r.settle();
 
@@ -179,6 +222,7 @@ test('拉起：202 受理 → starting → running，且恰好一条 operation-d
   assert.ok(host.web.startedByUs, '本工具拉起的实例必须标 startedByUs');
   assert.ok(host.tunnel.connected);
   assert.equal(host.config.localPort, 17702, '端口应从区间里分配且避开已占用的 17701');
+  assert.match(host.mappedUrl, /mock-dsh-web/, 'running 后才下发 demo iframe 地址');
 });
 
 test('重启走 running → ready → starting → running（状态机不许 running 直接回 starting）', async () => {
@@ -251,6 +295,54 @@ test('全量探测：四台各自出结果，probe-all 收一条汇总 operation
 });
 
 // ── 写端点 ───────────────────────────────────────────────────────────────
+
+test('POST /api/hosts/local：缺省/显式名称、单例约束、HostView 与 SSE 更新均对齐产品', async () => {
+  const defaults = rig();
+  const created = req(defaults.manager, 'POST', '/api/hosts/local', { body: {} });
+  assert.equal(created.status, 201);
+  assertShape(localHostCreateResponse, created.json, 'POST local(default)');
+  assert.equal(created.json.host.name, 'local-host');
+  assert.equal(created.json.host.local, true);
+  assert.equal(created.json.host.config.local, true);
+  assert.equal(created.json.host.config.localPort, null);
+  assert.equal(created.json.host.sshInfo, null);
+
+  const changed = defaults.frames.filter((f) => f.type === 'host-changed' && f.data.host.name === 'local-host');
+  assert.equal(changed.length, 1, '创建响应之外还应广播一次 host-changed');
+  assertShape(hostView, changed[0].data.host, 'POST local 的 SSE HostView');
+  assert.equal(defaults.manager.config().hosts['local-host'].localPort, null);
+
+  const probe = req(defaults.manager, 'POST', '/api/hosts/local-host/probe');
+  assert.equal(probe.status, 202, '前端创建后会立即探测，demo 必须能继续接住');
+  await defaults.settle();
+  assert.equal(defaults.manager.getHost('local-host').phase, 'ready');
+
+  const duplicate = grab(() => req(defaults.manager, 'POST', '/api/hosts/local', { body: { name: 'second-local' } }));
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.code, 'LOCAL_HOST_EXISTS');
+
+  const explicit = rig();
+  const named = req(explicit.manager, 'POST', '/api/hosts/local', { body: { name: 'workstation' } });
+  assert.equal(named.status, 201);
+  assert.equal(named.json.host.name, 'workstation');
+});
+
+test('demo 添加本机后重跑 setup，HostView 与 config 始终保留 local identity', () => {
+  const { manager } = rig();
+  req(manager, 'POST', '/api/hosts/local', { body: { name: 'workstation' } });
+
+  const submitted = req(manager, 'GET', '/api/config').json;
+  assert.equal(submitted.hosts.workstation.local, true, 'setup 前配置应标记本机');
+  const res = req(manager, 'POST', '/api/setup', { body: submitted });
+  assert.equal(res.status, 200);
+
+  const host = manager.getHost('workstation');
+  const saved = manager.config().hosts.workstation;
+  assert.equal(host.local, true, '重跑 setup 不得把候选 HostView 改成远端');
+  assert.equal(host.config.local, true, 'HostView.config.local 应与顶层 identity 一致');
+  assert.equal(saved.local, true, 'setup 落下的新 config 也应保留本机 identity');
+  assert.equal(host.local, host.config.local);
+});
 
 test('PUT /api/hosts/:name/config：回传 HostView，且拒收 localPort 与未知键', () => {
   const { manager } = rig();
@@ -389,6 +481,23 @@ test('mappedUrl 的有意偏离仅此一处：非 null 时必与 localPort、pha
   }
 });
 
+test('mock dsh web 是独立侧栏工作区轮廓，并保留 query 与 keep-alive 观察钩子', () => {
+  const html = fs.readFileSync(new URL('../site/mock-dsh-web/index.html', import.meta.url), 'utf8');
+
+  assert.match(html, /data-mock-dsh-web/, 'iframe 内容应有稳定的 Mock 根标记');
+  assert.match(html, /演示内容 · Mock dsh web/, '必须明确标注这是演示内容');
+  for (const copy of ['新会话', '工作区', '设置', '今天想在远端工作区完成什么？', '模式']) {
+    assert.match(html, new RegExp(copy), `mock 缺少 dsh web 轮廓：${copy}`);
+  }
+  for (const id of ['hostName', 'conn', 'draft', 'keepNote', 'term', 'foot']) {
+    assert.match(html, new RegExp(`id="${id}"`), `既有可观察钩子 #${id} 不得丢失`);
+  }
+  assert.match(html, /params\.get\('host'\)/, '应继续从 query 显示 host');
+  assert.match(html, /params\.get\('port'\)/, '应继续从 query 显示 port');
+  assert.match(html, /keepaliveForm/, '输入框必须属于不会触发页面跳转的演示表单');
+  assert.doesNotMatch(html, /(?:src|href)="https?:\/\//, 'mock 页面不得加载外部资源');
+});
+
 // ── setup 模式（首启引导） ────────────────────────────────────────────────
 
 test('setup 模式：门禁生效时只放行白名单，setup 提交后自动拉起勾了自启的主机', async () => {
@@ -404,16 +513,34 @@ test('setup 模式：门禁生效时只放行白名单，setup 提交后自动�
   assert.equal(blocked.status, 409);
   assert.equal(blocked.code, 'SETUP_REQUIRED');
 
-  // 白名单内可用：主机清单 + 全量探测
-  assert.equal(req(r.manager, 'GET', '/api/hosts').status, 200);
-  for (const host of r.manager.hosts().hosts) {
+  // 白名单内可用：主机清单（SSH + 恰好一台只驻内存的本机候选）+ 全量探测
+  const hosts = req(r.manager, 'GET', '/api/hosts');
+  assert.equal(hosts.status, 200);
+  const localCandidates = hosts.json.hosts.filter((host) => host.local);
+  assert.equal(localCandidates.length, 1, 'setup 应与产品 server 一样提供恰好一台本机候选');
+  const [localCandidate] = localCandidates;
+  assert.equal(localCandidate.config.local, true);
+  assert.equal(localCandidate.config.localPort, null);
+  assert.equal(localCandidate.sshInfo, null);
+  assert.equal(localCandidate.orphaned, false);
+  assert.equal(
+    Object.hasOwn(req(r.manager, 'GET', '/api/config').json.hosts, localCandidate.name),
+    false,
+    'setup 本机候选只驻内存，提交前不应进入 config',
+  );
+  for (const host of hosts.json.hosts) {
     assert.equal(host.phase, 'unknown', '引导态下主机应从「等待探测」起步');
   }
+  const createBlocked = grab(() => req(r.manager, 'POST', '/api/hosts/local', { body: {} }));
+  assert.equal(createBlocked.status, 409, 'setup 门禁仍应拒绝普通创建本机 API');
+  assert.equal(createBlocked.code, 'SETUP_REQUIRED');
+
   req(r.manager, 'POST', '/api/hosts/probe');
   await r.settle();
   assert.equal(r.manager.getHost('gpu-a100').phase, 'ready');
 
   const submitted = req(r.manager, 'GET', '/api/config').json;
+  submitted.hosts[localCandidate.name] = structuredClone(localCandidate.config);
   submitted.hosts['gpu-a100'].autoStart = true;
   const res = req(r.manager, 'POST', '/api/setup', { body: submitted });
   assert.equal(res.status, 200);
@@ -422,6 +549,9 @@ test('setup 模式：门禁生效时只放行白名单，setup 提交后自动�
   await r.settle(12);
   assert.equal(r.manager.managerInfo().setupCompleted, true, '门禁应已撤除');
   assert.equal(r.manager.getHost('gpu-a100').phase, 'running', '勾了开启链接的主机要被自动拉起');
+  assert.equal(r.manager.getHost(localCandidate.name).local, true, 'setup 提交应兑现候选的本机身份');
+  assert.equal(r.manager.config().hosts[localCandidate.name].local, true);
+  assert.equal(r.manager.config().hosts[localCandidate.name].localPort, null);
 });
 
 // ── 重置 ─────────────────────────────────────────────────────────────────

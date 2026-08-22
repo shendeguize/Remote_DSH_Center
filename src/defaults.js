@@ -15,6 +15,7 @@ export const FACTORY_DEFAULTS = Object.freeze({
     localPortRange: Object.freeze([17701, 17799]),
   }),
   hostDefaults: Object.freeze({
+    local: false,
     enabled: true,
     autoStart: false,
     localPort: null,
@@ -32,6 +33,7 @@ export const FACTORY_DEFAULTS = Object.freeze({
 /** 深拷贝一份可写的主机默认配置（FACTORY_DEFAULTS 全冻结，不能直接塞进草稿）。 */
 export function newHostConfig() {
   return {
+    local: FACTORY_DEFAULTS.hostDefaults.local,
     enabled: FACTORY_DEFAULTS.hostDefaults.enabled,
     autoStart: FACTORY_DEFAULTS.hostDefaults.autoStart,
     localPort: FACTORY_DEFAULTS.hostDefaults.localPort,

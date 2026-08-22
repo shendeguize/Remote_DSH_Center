@@ -5,7 +5,7 @@
  * （tests/demo-contract.test.js）。它不碰 DOM、不碰全局，只做「解析 URL → 调引擎 →
  * 返回 {status, json|text}」，把 Response 的包装留给 demo-shim.js。
  *
- * 端点集合取自 13_api_schema.md §2/§3：14 个真实现，
+ * 端点集合取自 13_api_schema.md §2/§3：15 个真实现，
  * 外加 manager 自身的 restart/shutdown 两个降级提示（浏览器里没有进程可操作）。
  */
 
@@ -22,6 +22,7 @@ const TABLE = Object.freeze([
   ['POST', /^\/api\/reload$/, 'reload'],
   ['POST', /^\/api\/setup$/, 'setup'],
   ['POST', /^\/api\/hosts\/probe$/, 'probe-all'],
+  ['POST', /^\/api\/hosts\/local$/, 'local-create'],
   ['POST', /^\/api\/hosts\/([^/]+)\/probe$/, 'probe'],
   ['POST', /^\/api\/hosts\/([^/]+)\/start$/, 'start'],
   ['POST', /^\/api\/hosts\/([^/]+)\/stop$/, 'stop'],
@@ -79,6 +80,13 @@ export function dispatch(manager, {
     case 'manager-info': return { status: 200, json: manager.managerInfo() };
     case 'hosts': return { status: 200, json: manager.hosts() };
     case 'config': return { status: 200, json: manager.config() };
+    case 'local-create': {
+      const request = body ?? {};
+      if (typeof request !== 'object' || Array.isArray(request)) {
+        throw new FakeApiError(400, 'VALIDATION', '请求体须为对象');
+      }
+      return { status: 201, json: manager.createLocalHost(request.name) };
+    }
     case 'probe-all': return { status: 202, json: manager.probeAll() };
     case 'probe': return { status: 202, json: manager.probeHost(hit.name) };
     case 'start': return { status: 202, json: manager.startHost(hit.name) };

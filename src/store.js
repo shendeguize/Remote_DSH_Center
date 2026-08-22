@@ -16,6 +16,7 @@ import { DshError } from './lib/errors.js';
 import { assertTransition } from './lib/machine.js';
 import { emitConfigChanged, emitHostChanged, logEvent } from './lib/bus.js';
 import { configSchema, hostStateSchema, validate } from './lib/validate.js';
+import { assertSafeHost } from './lib/shq.js';
 
 const STATE_DEBOUNCE_MS = 100;
 
@@ -30,6 +31,8 @@ let state = { hosts: {} };
 let sshInfoByName = new Map();
 /** config 有而 ssh config 无的主机（内存标记，不持久化，不删配置）。 */
 let orphaned = new Set();
+/** setup 向导内置的本机候选（只驻内存，绝不写入 config）。 */
+let setupLocalCandidate = null;
 /** 由 server.js 注入，避免 store → tunnel 依赖（防环规则 3）。 */
 let tunnelStatusProvider = () => null;
 
@@ -291,6 +294,7 @@ function loadStateFile() {
 export async function init({ pathsOverride } = {}) {
   paths = pathsOverride ?? resolvePaths();
   cleanupTmpLeftovers();
+  setupLocalCandidate = null;
 
   const loaded = loadConfigFile();
   config = loaded.config;
@@ -313,6 +317,7 @@ export function _reset() {
   state = { hosts: {} };
   sshInfoByName = new Map();
   orphaned = new Set();
+  setupLocalCandidate = null;
   tunnelStatusProvider = () => null;
   revision = 0;
 }
@@ -350,6 +355,83 @@ function deepFreeze(o) {
   return Object.freeze(o);
 }
 
+function assertNoLocalSshConflict(candidate, sshHosts = sshInfoByName) {
+  const conflict = Object.entries(candidate?.hosts ?? {})
+    .find(([name, host]) => host?.local === true && sshHosts.has(name));
+  if (!conflict) return;
+  const [name] = conflict;
+  throw new DshError('LOCAL_NAME_CONFLICT', `本机名称 ${name} 与 SSH Host 重名`, { host: name });
+}
+
+function isSafeHostName(name) {
+  try {
+    assertSafeHost(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * setup 的可信本机名纯算法：已有 local 优先，否则 hostname safe fallback 后稳定避让
+ * config/SSH 名称。CLI 与 server 共用，避免两边各算各的发生漂移。
+ */
+export function canonicalSetupLocalName(preferredName, {
+  hosts = {},
+  sshNames = [],
+} = {}) {
+  const existing = Object.entries(hosts).find(([, host]) => host?.local === true)?.[0];
+  if (existing) return existing;
+
+  const base = isSafeHostName(preferredName) ? preferredName : 'local-host';
+  const occupied = new Set([
+    ...Object.keys(hosts),
+    ...sshNames,
+  ]);
+  if (!occupied.has(base)) return base;
+  if (!occupied.has(`${base}-local`)) return `${base}-local`;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}-local-${suffix}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * setup 请求里的 local 是执行身份，不信任客户端自行声明：
+ * 只认当前配置里已经持久化的本机身份，或服务端此刻算出的 canonical 候选名。
+ */
+export function assertSetupLocalIdentities(
+  incoming,
+  preferredName,
+  sshNames = sshInfoByName.keys(),
+) {
+  const ssh = sshNames instanceof Set ? sshNames : new Set(sshNames);
+  const canonicalLocal = canonicalSetupLocalName(preferredName, {
+    hosts: config?.hosts,
+    sshNames: ssh,
+  });
+  for (const [name, host] of Object.entries(incoming?.hosts ?? {})) {
+    const existingLocal = config?.hosts?.[name]?.local === true;
+    const candidateLocal = canonicalLocal === name;
+    const requestedLocal = host?.local === true;
+    const existingRemote = (Object.hasOwn(config?.hosts ?? {}, name) && !existingLocal)
+      || ssh.has(name);
+
+    if (requestedLocal && (existingRemote || (!existingLocal && !candidateLocal))) {
+      const message = existingRemote
+        ? `初始化配置不能把 SSH 主机 ${name} 改成本机`
+        : `初始化配置不能把未经服务器认可的主机 ${name} 声明为本机`;
+      throw new DshError('NOT_ALLOWED', message, { host: name });
+    }
+
+    if (!requestedLocal && (existingLocal || candidateLocal)) {
+      throw new DshError('NOT_ALLOWED', `初始化配置不能把本机主机 ${name} 改成 SSH 主机`, {
+        host: name,
+      });
+    }
+  }
+}
+
 /**
  * config 写入唯一入口：mutator 改草稿 → 校验 → 原子写 → 按改动面 emit。
  * @param {(draft:any)=>void} mutator
@@ -364,6 +446,7 @@ export function updateConfig(mutator) {
   if (!ok) {
     throw new DshError('VALIDATION', '配置修改后校验失败，已放弃本次写入', { detail: errors.join('\n') });
   }
+  assertNoLocalSshConflict(draft);
 
   // 先落盘、成了才换内存。反过来写的后果是：盘写失败（目录只读、磁盘满、卷被卸载）时
   // 请求报 500、用户以为没生效，可跑着的 manager 已经在用新值，重启后又从盘上读回旧值
@@ -372,13 +455,8 @@ export function updateConfig(mutator) {
   config = draft;
 
   const changed = diffPaths(before, draft);
-  const touchedHosts = new Set();
-  let globalTouched = false;
-  for (const p of changed) {
-    const m = /^hosts\.([^.]+)/.exec(p);
-    if (m) touchedHosts.add(m[1]);
-    else globalTouched = true;
-  }
+  const touchedHosts = changedHostNames(before, draft);
+  const globalTouched = changed.some((p) => !p.startsWith('hosts.'));
   for (const name of touchedHosts) emitHostChanged(name);
   if (globalTouched) emitConfigChanged(changed);
   return { changed };
@@ -403,9 +481,10 @@ export function saveConfigFromSetup(incoming) {
   if (!ok) {
     throw new DshError('VALIDATION', '初始化配置校验失败', { detail: errors.join('\n') });
   }
+  assertNoLocalSshConflict(draft);
 
+  writeConfig(draft);
   config = draft;
-  writeConfigNow();
   emitConfigChanged(['setup']);
   for (const name of Object.keys(config.hosts)) emitHostChanged(name);
   return getConfig();
@@ -414,21 +493,35 @@ export function saveConfigFromSetup(incoming) {
 /** POST /api/reload：重读 → diff → emit。 */
 export function reloadConfig() {
   const before = structuredClone(config);
+  const beforeOnDiskText = configOnDiskText;
   const loaded = loadConfigFile();
+  try {
+    assertNoLocalSshConflict(loaded.config);
+  } catch (err) {
+    configOnDiskText = beforeOnDiskText;
+    throw err;
+  }
   config = loaded.config;
   if (loaded.migrated) writeConfigNow();
 
   const changed = diffPaths(before, config);
-  const touchedHosts = new Set();
-  let globalTouched = false;
-  for (const p of changed) {
-    const m = /^hosts\.([^.]+)/.exec(p);
-    if (m) touchedHosts.add(m[1]);
-    else globalTouched = true;
-  }
+  const touchedHosts = changedHostNames(before, config);
+  const globalTouched = changed.some((p) => !p.startsWith('hosts.'));
   for (const name of touchedHosts) emitHostChanged(name);
   if (globalTouched || changed.length > 0) emitConfigChanged(changed);
   return { changed };
+}
+
+/** Host 名允许含点，不能从 `hosts.<name>.<field>` 字符串靠正则截第一段。 */
+function changedHostNames(a, b) {
+  const names = new Set([...Object.keys(a?.hosts ?? {}), ...Object.keys(b?.hosts ?? {})]);
+  return new Set([...names].filter(
+    (name) => JSON.stringify(hostValue(a, name)) !== JSON.stringify(hostValue(b, name)),
+  ));
+}
+
+function hostValue(candidate, name) {
+  return candidate?.hosts && Object.hasOwn(candidate.hosts, name) ? candidate.hosts[name] : undefined;
 }
 
 /** 逐叶节点比较，产出点路径清单（emit 决策与 /api/reload 响应共用）。 */
@@ -455,18 +548,73 @@ function diffPaths(a, b, prefix = '') {
  * @param {{name:string, hostName?:string, user?:string, port?:number}[]} sshHosts
  */
 export function mergeSshHosts(sshHosts) {
-  sshInfoByName = new Map(sshHosts.map((h) => [h.name, h]));
+  const nextSshInfo = new Map(sshHosts.map((h) => [h.name, h]));
+  assertNoLocalSshConflict(config, nextSshInfo);
+  sshInfoByName = nextSshInfo;
 
-  const added = sshHosts.filter((h) => !(h.name in config.hosts)).map((h) => h.name);
+  const added = sshHosts.filter((h) => !Object.hasOwn(config.hosts, h.name)).map((h) => h.name);
   if (added.length > 0) {
     updateConfig((draft) => {
-      for (const name of added) draft.hosts[name] = newHostConfig();
+      draft.hosts = {
+        ...draft.hosts,
+        ...Object.fromEntries(added.map((name) => [name, newHostConfig()])),
+      };
     });
   }
 
-  orphaned = new Set(Object.keys(config.hosts).filter((n) => !sshInfoByName.has(n)));
+  orphaned = new Set(Object.keys(config.hosts)
+    .filter((n) => config.hosts[n]?.local !== true && !sshInfoByName.has(n)));
   for (const name of orphaned) emitHostChanged(name);
   return { added, orphaned: [...orphaned] };
+}
+
+/**
+ * setup 模式追加一个只驻内存的本机候选。若配置已有本机则直接复用；
+ * 默认名冲突时给出稳定且无冲突的 `-local[-N]` 建议名。
+ */
+export function ensureSetupLocalCandidate(preferredName) {
+  const existing = Object.entries(config?.hosts ?? {}).find(([, host]) => host?.local === true);
+  if (existing) {
+    setupLocalCandidate = null;
+    return existing[0];
+  }
+
+  const name = canonicalSetupLocalName(preferredName, {
+    hosts: config?.hosts,
+    sshNames: sshInfoByName.keys(),
+  });
+  setupLocalCandidate = {
+    name,
+    config: { ...newHostConfig(), local: true, localPort: null },
+  };
+  return name;
+}
+
+export function clearSetupLocalCandidate() {
+  setupLocalCandidate = null;
+}
+
+/**
+ * 已初始化用户添加本机：所有冲突检查都位于 updateConfig 的同一份草稿内，
+ * 只有原子写成功后 HostView 才可见。
+ */
+export function createLocalHost(name) {
+  assertSafeHost(name);
+  updateConfig((draft) => {
+    if (Object.values(draft.hosts).some((host) => host?.local === true)) {
+      throw new DshError('LOCAL_HOST_EXISTS', '已经存在本机主机，不能重复添加');
+    }
+    if (Object.hasOwn(draft.hosts, name) || sshInfoByName.has(name)) {
+      throw new DshError('LOCAL_NAME_CONFLICT', `本机名称 ${name} 已被现有主机或 SSH Host 使用`, {
+        host: name,
+      });
+    }
+    draft.hosts = {
+      ...draft.hosts,
+      [name]: { ...newHostConfig(), local: true, localPort: null },
+    };
+  });
+  return getHostView(name);
 }
 
 export function setTunnelStatusProvider(fn) {
@@ -533,29 +681,37 @@ export function dropHostState(name) {
 // ── HostView（13 §1.3） ─────────────────────────────────────────────────
 
 export function effectiveRemotePort(name) {
-  const host = config.hosts[name];
+  const host = hostConfigFor(name);
   return host?.remoteWebPort ?? config.defaults.remoteWebPort;
+}
+
+function hostConfigFor(name) {
+  if (config?.hosts && Object.hasOwn(config.hosts, name)) return config.hosts[name];
+  return setupLocalCandidate?.name === name ? setupLocalCandidate.config : null;
 }
 
 /** @returns {any|null} */
 export function getHostView(name) {
-  const hostConfig = config?.hosts?.[name];
+  const hostConfig = hostConfigFor(name);
   if (!hostConfig) return null;
   const st = state.hosts[name] ?? {};
-  const ssh = sshInfoByName.get(name) ?? null;
   const tunnelRuntime = tunnelStatusProvider(name);
 
+  const local = hostConfig.local === true;
+  const ssh = local ? null : (sshInfoByName.get(name) ?? null);
   const localPort = tunnelRuntime?.localPort ?? st.tunnel?.localPort ?? hostConfig.localPort ?? null;
   const phase = st.phase ?? 'unknown';
   const tunnelUsable = (phase === 'running' || phase === 'degraded') && localPort !== null;
 
   return {
     name,
+    local,
     sshInfo: ssh
       ? { hostName: ssh.hostName ?? null, user: ssh.user ?? null, port: ssh.port ?? null }
       : null,
-    orphaned: orphaned.has(name),
+    orphaned: local ? false : orphaned.has(name),
     config: {
+      local,
       enabled: hostConfig.enabled,
       autoStart: hostConfig.autoStart,
       localPort: hostConfig.localPort,
@@ -591,19 +747,21 @@ export function getHostView(name) {
 
 /** HostView[]，按 name 升序（GET /api/hosts 与 snapshot 的数据源）。 */
 export function listHostViews() {
-  return Object.keys(config?.hosts ?? {})
+  return listHostNames()
     .sort()
     .map((n) => getHostView(n))
     .filter(Boolean);
 }
 
 export function listHostNames() {
-  return Object.keys(config?.hosts ?? {}).sort();
+  const names = new Set(Object.keys(config?.hosts ?? {}));
+  if (setupLocalCandidate) names.add(setupLocalCandidate.name);
+  return [...names].sort();
 }
 
 export function hostCounts() {
   const counts = { total: 0, running: 0, degraded: 0, crashed: 0 };
-  for (const name of Object.keys(config?.hosts ?? {})) {
+  for (const name of listHostNames()) {
     counts.total += 1;
     const p = getPhase(name);
     if (p in counts) counts[p] += 1;

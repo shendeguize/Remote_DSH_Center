@@ -5,7 +5,7 @@
 
 import { DshError } from './errors.js';
 import { PHASES } from './machine.js';
-import { isWorkdirPath } from './shq.js';
+import { isWorkdirPath, SAFE_HOST_RE } from './shq.js';
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -180,11 +180,12 @@ const workdirSchema = V.nullable(V.custom(
 ));
 
 /**
- * workdir 可缺省（补丁 01 §5.1）：configVersion 不升，旧 config 缺字段由
- * store.migrateConfig 按 null 补齐，故校验层不能因为「没有这个键」就拒绝启动。
+ * workdir/local 可缺省：configVersion 不升，旧 config 缺字段由 store.migrateConfig
+ * 按默认值补齐，故校验层不能因为「没有这个键」就拒绝启动。
  */
 const hostConfigSchema = V.obj(
   {
+    local: V.bool(),
     enabled: V.bool(),
     autoStart: V.bool(),
     localPort: V.nullable(port),
@@ -192,7 +193,26 @@ const hostConfigSchema = V.obj(
     workdir: workdirSchema,
     inject: injectSchema,
   },
-  { optional: ['workdir'] },
+  { optional: ['local', 'workdir'] },
+);
+
+const hostsSchema = V.all(
+  V.rec(null, hostConfigSchema),
+  (value, path, errs) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
+    let localCount = 0;
+    for (const [name, host] of Object.entries(value)) {
+      if (host?.local !== true) continue;
+      localCount += 1;
+      if (!SAFE_HOST_RE.test(name) || name.startsWith('-')) {
+        fail(errs, `${path}.${name}`, `本机主机名须匹配 ${SAFE_HOST_RE} 且不以 - 开头`);
+      }
+      if (host.localPort !== null) {
+        fail(errs, `${path}.${name}.localPort`, '本机主机的 localPort 必须为 null');
+      }
+    }
+    if (localCount > 1) fail(errs, path, '最多只能有一个 local:true 主机');
+  },
 );
 
 const localPortRangeSchema = V.all(
@@ -216,7 +236,7 @@ export const configSchema = V.obj({
   setupCompleted: V.bool(),
   manager: V.obj({ port }),
   defaults: defaultsSchema,
-  hosts: V.rec(null, hostConfigSchema),
+  hosts: hostsSchema,
 });
 
 /** state 取宽松模式（extra=true）：12 §4.4 的增补字段允许出现。 */
@@ -252,21 +272,36 @@ export const setupBodySchema = V.obj(
     setupCompleted: V.bool(),
     manager: V.obj({ port }),
     defaults: defaultsSchema,
-    hosts: V.rec(null, hostConfigSchema),
+    hosts: hostsSchema,
   },
   { optional: ['configVersion', 'setupCompleted'] },
 );
 
-/** PUT /api/hosts/:name/config 局部体（13 §2.5）：全部键可选，localPort 明令拒收。 */
+/**
+ * PUT /api/hosts/:name/config 局部体：local 可用于回显身份，但 route 层只许它等于现值；
+ * localPort 仍由 manager 分配，明令拒收。
+ */
 export const hostConfigPatchSchema = V.obj(
   {
+    local: V.bool(),
     enabled: V.bool(),
     autoStart: V.bool(),
     remoteWebPort: V.nullable(port),
     workdir: workdirSchema,
     inject: injectSchema,
   },
-  { optional: ['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject'] },
+  { optional: ['local', 'enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject'] },
+);
+
+/** POST /api/hosts/local：名称缺省时由 Node 侧注入 os.hostname()。 */
+export const localHostCreateSchema = V.obj(
+  {
+    name: V.all(
+      V.str({ min: 1, pattern: SAFE_HOST_RE }),
+      V.custom((v) => typeof v !== 'string' || !v.startsWith('-') || '不得以 - 开头'),
+    ),
+  },
+  { optional: ['name'] },
 );
 
 /** PUT /api/config/defaults 局部体（13 §2.6）。 */

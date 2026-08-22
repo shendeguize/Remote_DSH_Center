@@ -41,6 +41,13 @@ const HIDE_DEMO_BAR = `
   return true;
 `;
 
+/** 截图里不收正在消退的通知，也不收意外悬着的菜单/确认框。 */
+const CLEAN_FRAME = `
+  document.querySelectorAll('.toast').length === 0
+    && !document.querySelector('.confirm-dialog[open]')
+    && !document.querySelector('.context-menu:not([hidden])')
+`;
+
 async function main() {
   if (!findChrome()) {
     process.stderr.write('找不到 Chrome/Chromium；用 DSHC_CHROME=<路径> 指定。\n');
@@ -55,6 +62,8 @@ async function main() {
   const shots = [];
 
   const shoot = async (name, label) => {
+    await cdp.waitFor(CLEAN_FRAME, `${name} 没有临时弹层`, { timeoutMs: 12_000 });
+    await sleep(200);
     const file = await captureScreenshot(cdp, OUT_DIR, name, { beyondViewport: false });
     shots.push({ name, label, file });
     process.stdout.write(`  ✔ ${name.padEnd(10)} ${label}\n`);
@@ -64,28 +73,61 @@ async function main() {
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable');
     await cdp.send('Emulation.setDeviceMetricsOverride', VIEWPORT);
+    // 截图是基线，不记录 pulse/blink 正好走到哪一帧。
+    await cdp.send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
     process.stdout.write('截图：\n');
 
-    // ① 管理台全景
+    // ① Hub 首屏。文件名继续叫 dashboard，兼容 README 与 landing 的既有引用；
+    // 管理全景放到下一张抽屉图的后景里，两层信息架构都能在五张图里出现。
     await cdp.send('Page.navigate', { url: `${srv.origin}/demo/` });
-    await cdp.waitFor("document.querySelectorAll('.host-table tbody tr').length === 4", '管理台四台主机就位');
+    await cdp.waitFor(
+      "location.hash === '#/hub' && document.querySelectorAll('.view-hub:not([hidden]) .hub-host-card').length === 2",
+      'Hub 可用主机就位',
+    );
     await cdp.eval(HIDE_DEMO_BAR);
     await sleep(400);
-    await shoot('dashboard', '管理台全景（四台主机铺满状态谱系）');
+    await shoot('dashboard', 'Hub 首屏：日常主机入口与管理入口');
 
-    // ② 主机详情抽屉
-    await cdp.click('tr[data-host="gpu-a100"]');
-    await cdp.waitFor("document.querySelector('.host-drawer') && !document.querySelector('.host-drawer').hidden", '抽屉打开');
+    // ② #/manage 上的主机详情抽屉
+    await cdp.eval("window.location.hash = '#/manage'; return true;");
+    await cdp.waitFor(
+      "location.hash === '#/manage' && !document.querySelector('.view-dashboard').hidden && document.querySelectorAll('.host-table tbody tr').length === 4",
+      '管理页四台主机就位',
+    );
+    await cdp.click('.host-table tr[data-host="gpu-a100"]');
+    await cdp.waitFor(
+      "document.querySelector('.host-drawer:not([hidden])') && document.querySelector('.drawer-scrim:not([hidden])')",
+      '抽屉打开',
+    );
+    // demo 事件时间取自当前时钟；只固定截图里的显示文本，避免每次重跑制造无意义像素差。
+    await cdp.eval(`
+      document.querySelectorAll('.probe-at').forEach((node) => { node.textContent = '探测 4 秒前'; });
+      document.querySelectorAll('.event-item time').forEach((node, index) => {
+        node.textContent = '00:00:' + String(index).padStart(2, '0');
+      });
+      return true;
+    `);
     await sleep(300);
-    await shoot('drawer', '主机详情抽屉：注入配置、远端日志、探测详情');
+    await shoot('drawer', '管理页主机详情：注入配置、远端日志、探测详情');
     await cdp.key('Escape', { keyCode: 27 });
     await cdp.waitFor("document.querySelector('.host-drawer').hidden", '抽屉关闭');
 
     // ③ 标签页里的远端 dsh web
     await cdp.eval("window.location.hash = '#/host/gpu-a100'; return true;");
-    await cdp.waitFor(`document.querySelector('.iframe-pane[data-host="gpu-a100"] iframe')`, 'iframe 建出来');
-    await sleep(3_600); // 等 mock 页的打字机把终端铺满
-    await shoot('iframe', '标签页：iframe 里是远端 dsh web 本体');
+    await cdp.waitFor(
+      `document.querySelector('.iframe-pane[data-host="gpu-a100"]:not([hidden]) iframe')?.contentDocument?.documentElement?.hasAttribute('data-mock-dsh-web')`,
+      'mock dsh web iframe 就绪',
+    );
+    // mock 页脚刻意带随机 session id；基线图把这一个易变字段归一化，避免每次重跑产生噪声。
+    await cdp.eval(`
+      const foot = document.querySelector('.iframe-pane[data-host="gpu-a100"] iframe')?.contentDocument?.querySelector('#foot');
+      if (!foot) return false;
+      foot.textContent = 'Mock session demo01 · http://127.0.0.1:17701/ · gpu-a100';
+      return true;
+    `);
+    await shoot('iframe', '单行薄壳：iframe 内是 mock dsh web 本体');
 
     // ④ 断联遮罩（退避重连要 ~7s 才恢复，够拍）
     await cdp.eval("window.__demo.manager.injectTunnelDrop('gpu-a100'); return true;");
@@ -107,11 +149,13 @@ async function main() {
       await sleep(250);
     }
     await cdp.waitFor("document.querySelector('.setup-hosts tbody tr')", '第 3 步的主机清单出现');
-    // 等最慢那台探测完（demo 里刻意让四台快慢不一，最慢 2.7s）：
-    // 四台结果都在的画面才看得出「开启链接只对可拉起的主机开放」
+    // 等最慢那台探测完（四台 SSH + 一台本机候选，最慢 2.7s）：
+    // 五台结果都在且本机标签已渲染，才拍下 README 承诺的同屏候选画面。
     await cdp.waitFor(
-      "document.querySelector('.wizard-progress')?.textContent.includes('4 / 共 4')",
-      '四台探测全部完成',
+      `document.querySelector('.wizard-progress')?.textContent.includes('5 / 共 5')
+        && document.querySelectorAll('.setup-hosts tbody tr').length === 5
+        && document.querySelector('.setup-hosts tbody .tag-lock')?.textContent === '本机'`,
+      '本机与四台 SSH 候选探测全部完成',
       { timeoutMs: 12_000 },
     );
     await sleep(300);

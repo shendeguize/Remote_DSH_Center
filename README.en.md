@@ -8,39 +8,42 @@
 [![deps](https://img.shields.io/badge/npm%20deps-0-blue)](package.json)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Collect the `dsh web` instances scattered across your remote machines into one local page.
-A small local service plus a CLI: `ssh -L` tunnels map each remote `dsh web` onto a local
-loopback port, and a single-entry console opens them as iframe tabs — start, stop,
-reconnect and read logs all in one place.
+Collect local and remote `dsh web` instances into one page. A small local service plus a
+CLI executes and connects to the local instance directly, while `ssh -L` maps remote
+instances onto local loopback ports. The Hub and iframe tabs are the everyday workspace;
+start, stop, probe, logs and other administration live on a secondary management page.
 
 **[▶ Live demo](https://shendeguize.github.io/Remote_DSH_Center/demo/)** (runs the real
 frontend against a browser-side mock backend — every button works, and you can inject
 tunnel drops and crashes yourself)
 · [Project page](https://shendeguize.github.io/Remote_DSH_Center/)
 
-![Console: four remote hosts with status, port mapping and actions](site/assets/shots/dashboard.png)
+![Hub: enter a local or remote dsh web from an available host card](site/assets/shots/dashboard.png)
 
 ## The problem
 
-You have N remote training boxes. For each one you `ssh` in, start a `dsh web`, remember
-which port it listens on, open an `ssh -L` to bring that port home, and bookmark yet
-another `127.0.0.1:178xx`. Past a handful of machines, just remembering which port belongs
+You have one local machine and N remote training boxes. The local instance needs its own
+page; for every remote you still `ssh` in, start `dsh web`, remember its port and open an
+`ssh -L` to bring it home. Past a handful of machines, just remembering which port belongs
 to which box is annoying — and when a tunnel dies at 3am, nothing tells you.
 
 This tool folds every one of those steps into one place:
 
+- **Two native transports.** `hosts.<name>.local: true` explicitly means local, so the
+  protocol script goes straight to the local shell; every other host still uses SSH.
+  The browser connects to the actual local web port, with no `ssh -L`.
 - **Nothing resident on the remote, nothing to install there.** No agent, no daemon.
   Probing, starting and stopping are single one-shot `ssh` invocations. The only remote
   footprint is `~/.dsh_center_remote/` (logs and optional patch files).
-- **Single-entry tabs.** Every running host gets a tab whose content is the real remote
-  dsh web. Switching tabs only toggles visibility — the iframe is never reloaded, so
-  in-page session state survives.
-- **Self-healing tunnels.** If a tunnel drops, reconnect backs off 1/2/4/8/16/30s and
-  returns to `running` on success. Only when a 30s sweep proves the remote process is
-  actually gone does the host go `crashed`.
-- **Never kills the wrong process.** Before stopping a remote process, the recorded `ps`
-  command-line fingerprint is compared verbatim; a mismatch refuses the kill. Instances
-  someone started by hand are read-only.
+- **Hub plus persistent tabs.** Every enabled, openable host stays in the top bar and on
+  the Hub. One click starts and enters a `ready` host. Switching views only toggles iframe
+  visibility, so in-page session state survives.
+- **Self-healing remote tunnels.** A dropped SSH tunnel reconnects with
+  1/2/4/8/16/30s backoff. A local host has no tunnel, never enters `degraded`, and goes
+  straight to `crashed` when its process is gone.
+- **Never kills the wrong process.** Before stopping either a local or remote process,
+  the recorded `ps` command-line fingerprint is compared verbatim; a mismatch refuses the
+  kill. Instances someone started by hand are read-only.
 - **Zero npm dependencies.** Runtime and tests use only Node ≥ 22 built-ins; the frontend
   is native ESM with no build step.
 
@@ -48,12 +51,15 @@ This tool folds every one of those steps into one place:
 
 | | |
 |---|---|
-| Local | macOS (primary target; `dshc service` autostart is launchd-only) or Linux; **Node ≥ 22** |
+| Local | macOS (primary target; `dshc service` autostart is launchd-only) or Linux; **Node ≥ 22**. A local `dsh` installation and web profile are needed only if you choose to manage this machine |
 | Remote | DeepSeek Harness (`dsh`) installed with a web profile configured. This tool **probes** only — it does not install anything |
 | Connectivity | Hosts come from `~/.ssh/config` with key-based login; the remote must not disable `AllowTcpForwarding` |
 
-Hosts missing `dsh` or the web profile are labelled "not installed / not configured"
-explicitly, rather than pretending to be usable.
+Local management is optional: setup offers one built-in local candidate, which you may
+leave unselected. A manager may contain at most one `local:true` entry, and an SSH host
+is never guessed to be local just because it is named `localhost` or `127.0.0.1`.
+Any target missing `dsh` or its web profile is labelled "not installed / not configured"
+explicitly rather than pretending to be usable.
 
 ## Install
 
@@ -106,14 +112,15 @@ To confirm what you ended up with: `dshc version` (version, channel, which Node,
 Then three commands to get going:
 
 ```bash
-dshc init      # four-step wizard: local port, agreed remote port, which hosts to manage
+dshc init      # four steps: manager/mapped ports, agreed web port, local and remote candidates, confirm
 dshc up        # start the manager in the background
-dshc open      # open the console in your browser
+dshc open      # open the Hub (the root may restore the last openable host)
 ```
 
-`dshc init` reads `~/.ssh/config`, lists candidate hosts and probes them one by one (slow
-hosts never block your selection). You can also skip installing entirely and run
-`node src/cli.js <command>`.
+In step 3, `dshc init` lists the built-in local candidate alongside remote candidates from
+`~/.ssh/config` and probes them one by one (slow hosts never block your selection). If the
+local candidate is unselected, it is not written to config. You can also skip installing
+entirely and run `node src/cli.js <command>`.
 
 ## A look around
 
@@ -123,23 +130,25 @@ code instead of going stale.
 | | |
 |---|---|
 | ![Wizard step 3: per-host probing and selection](site/assets/shots/setup.png) | ![Host detail drawer](site/assets/shots/drawer.png) |
-| **First-run wizard**: four steps and you are done. Step 3 probes each host; only "ready" hosts may be enabled | **Host detail**: working directory, env vars, extra args, patch files, plus remote logs and probe details |
-| ![A remote dsh web inside a tab](site/assets/shots/iframe.png) | ![Reconnect overlay while the tunnel is down](site/assets/shots/degraded.png) |
-| **Tabs**: the iframe holds the real remote dsh web — static assets and WebSockets all ride the tunnel | **Disconnected**: an overlay covers the pane but the page content stays; it clears on reconnect without a reload |
+| **First-run wizard**: four steps and you are done. Step 3 includes local and SSH candidates; only "ready" hosts may autostart | **Manage and host detail**: `#/manage` keeps the host table, global actions and configuration drawer, with direct-connection language for local hosts |
+| ![A dsh web page inside a tab](site/assets/shots/iframe.png) | ![Reconnect overlay while a remote tunnel is down](site/assets/shots/degraded.png) |
+| **Tabs**: the screenshot uses a standalone mock with the real dsh web interaction shape; normal use loads the target's real dsh web, shows loading on first load and keeps the iframe alive across views | **Remote disconnect**: an overlay covers the pane but keeps its content; it clears on reconnect without a reload. Local direct connections never enter this state |
 
 ## Architecture and data flow
 
 ```mermaid
 flowchart LR
     subgraph Local
-        B[Browser<br/>console SPA] -->|REST + SSE| M[manager<br/>127.0.0.1:7788]
+        B[Browser<br/>Hub + iframe tabs] -->|REST + SSE| M[manager<br/>127.0.0.1:7788]
         C[dshc CLI] -->|same REST API| M
-        B -.->|iframe connects directly<br/>127.0.0.1:17701| T
+        M -->|one-shot local shell<br/>probe / start / stop / sweep| L[dsh web — local<br/>127.0.0.1:actual port]
+        B -.->|iframe to actual port<br/>no ssh -L| L
         M --> T[ssh -L child process]
+        B -.->|iframe to mapped port<br/>127.0.0.1:17701| T
     end
     subgraph Remote host
-        T ==>|encrypted tunnel| W[dsh web<br/>127.0.0.1:8899]
-        M -->|one-shot ssh commands<br/>probe / start / stop / sweep| W
+        T ==>|encrypted tunnel| R[dsh web — remote<br/>127.0.0.1:8899]
+        M -->|one-shot ssh commands<br/>probe / start / stop / sweep| R
     end
 ```
 
@@ -149,11 +158,26 @@ Three things worth knowing:
   iframe's `src` is the `mappedUrl` the manager hands down, and every runtime parameter
   arrives in a response payload.
 - **Control plane and data plane are separate.** Control goes through the manager's
-  REST/SSE API; the data plane (dsh web pages, assets, WebSockets) is a direct browser
-  connection to the local mapped port and is never proxied through the manager.
+  REST/SSE API, then through a local shell or one-shot SSH running the same protocol
+  scripts. The data plane (pages, assets, WebSockets) connects directly from the browser:
+  the actual web port for local, an `ssh -L` mapped port for remote, never a manager proxy.
 - **Only SSE advances state.** Clicking a button never optimistically mutates a phase —
   the UI waits for the server's `host-changed` and `operation-done` frames, so what you
   see is the real state.
+
+## Everyday entry points
+
+- `#/hub` is the default start page. The `#/` root restores the last host only while it
+  remains openable; otherwise it lands on the Hub. Clicking the brand always goes
+  explicitly to the Hub and does not invoke `lastHost`.
+- Enabled hosts in `ready / starting / running / degraded / crashed` stay in the top bar.
+  Clicking a `ready` tab or Hub card performs "start and enter" in one step, with an
+  overlay showing progress.
+- `#/manage` is the secondary management entry for the host table, probe-all, reload,
+  global defaults and events. A host menu can open that host's drawer or its mapped URL
+  in a new window.
+- A local host has no tunnel to reconnect and never enters `degraded`; the UI hides or
+  refuses those meaningless operations.
 
 ## States and self-healing
 
@@ -163,7 +187,7 @@ Each host moves through eight phases:
 unknown → unreachable / no_dsh / ready          (the three probe outcomes)
 ready   → starting → running                    (start)
 running → degraded → running                    (tunnel dropped and came back)
-running → crashed → starting → running          (remote process died, manual restart)
+running → crashed → starting → running          (target process died, manual restart)
 ```
 
 - Tunnel drop → `degraded`, reconnect backing off 1/2/4/8/16/30s. If the remote explicitly
@@ -172,8 +196,13 @@ running → crashed → starting → running          (remote process died, manu
   **requires bytes back** — ssh keeps `accept`ing after the remote instance dies, so
   checking only `connect` yields false health. If that fails, it re-verifies over ssh:
   genuinely dead becomes `crashed`, still alive just gets a fresh tunnel child process.
-- After the manager itself restarts it **does not re-launch remotes**: it re-verifies
-  fingerprints, adopts the existing processes and rebuilds only the tunnels.
+- After the manager itself restarts it **does not re-launch managed processes**: it
+  re-verifies fingerprints and adopts existing instances, rebuilding remote tunnels or
+  re-registering local direct entries.
+- Local hosts reuse the same HTTP check and verbatim fingerprint verification but have no
+  transport channel to rebuild. A dead process becomes `crashed`; a matching live process
+  whose port does not respond stays `running` for the next sweep rather than inventing
+  `degraded`.
 
 ## Configuration and data
 
@@ -182,21 +211,26 @@ The code holds exactly one factory-default table, `src/defaults.js`:
 
 ```
 ~/.dsh_center/
-  config.json    # the only config source: manager port, default remote port, local port range, per-host switches and injection
-  state.json     # runtime state (remote pid/port/fingerprint, tunnels, patch sync records); safe to delete
+  config.json    # only config source: manager port, agreed web port, mapped-port range, per-host transport/switches/injection
+  state.json     # runtime state (target pid/port/fingerprint, tunnel or direct entry, patch sync records); safe to delete
   manager.log    # event log; long text such as ssh stderr lands here as indented continuations
   manager.pid
   app/           # where the one-click installer puts the code (not here if you cloned manually)
 ```
 
-The remote `dsh web` port is an agreed default (8899 out of the box); if it is taken, the
-launcher falls back to `--port 0` and lets the remote OS assign one. Local mapped ports are
-allocated from the configured range and, once given to a host, stay put across restarts.
+Each host config has an optional `local` identity. An older config without it is treated as
+`false` (SSH) and does not need setup again. A local entry requires `localPort: null`, and
+there may be at most one; its page URL always comes from that run's actual `dsh web` port
+instead of consuming the mapped-port pool.
+
+The agreed `dsh web` port is 8899 out of the box; if it is taken, the launcher falls back
+to `--port 0` and lets the target OS assign one. A remote also gets a local mapped port
+from the configured range, fixed across restarts. A local host uses its actual web port.
 
 Each host may also set a **working directory** (`hosts.<host>.workdir`) — the process
-working directory of the remote `dsh web`, which is also dsh's default workspace root and
-where `AGENTS.md` is loaded from. Empty (`null`) means the remote home directory. Only
-absolute paths or `~`, `~/…` are accepted (`~` is expanded remotely); if the directory
+working directory of the target `dsh web`, which is also dsh's default workspace root and
+where `AGENTS.md` is loaded from. Empty (`null`) means the target account's home directory.
+Only absolute paths or `~`, `~/…` are accepted (`~` is expanded by that account); if the directory
 cannot be entered, the start fails loudly instead of silently falling back to home.
 
 ```bash
@@ -215,8 +249,9 @@ Hosts:     dshc ls / probe / start / stop / reconnect / log / open / config
 Exit codes: 0 success | 1 operation failed | 2 timeout/communication failure | 3 usage error | 130 wait interrupted by Ctrl-C (the operation keeps going)
 ```
 
-`dshc --help` prints the full usage. The host list comes from `~/.ssh/config`
-(`DSHC_SSH_CONFIG` points at a different file). To start the manager at login,
+`dshc --help` prints the full usage. Remote candidates come from `~/.ssh/config`
+(`DSHC_SSH_CONFIG` points at a different file), and setup adds one safely named local
+candidate. To start the manager at login,
 `dshc service install` writes a launchd plist whose KeepAlive brings it back if killed.
 
 ## Security boundary
@@ -225,46 +260,50 @@ This is designed as a **single-user desktop tool on a trusted network**. Please 
 under that assumption:
 
 - The manager binds `127.0.0.1` only and has **no authentication**. Anything that can run
-  code on your machine can drive it, and therefore reach your remotes through the tunnels.
-  Do not expose it on `0.0.0.0` and do not forward its port to the internet.
+  code on your machine can drive it, including the managed local instance and remotes
+  reached through tunnels. Do not expose it on `0.0.0.0` or forward its port to the internet.
 - Binding to loopback does not stop a *browser* from making requests on someone else's behalf,
   so there are two cross-site gates: a request carrying an `Origin` must carry the manager's
   own origin, and `Host` must be a loopback name (the latter is what stops "attacker domain
   resolves to 127.0.0.1", which would otherwise put the page inside their origin). The CLI
   sends no `Origin` and is unaffected.
-- The tunnel is plain `ssh -L`: encryption and authentication are entirely your ssh config
-  and keys. This tool never handles credentials and stores no passwords.
-- On the remote it only writes `~/.dsh_center_remote/` (logs and patch files). It touches
-  no system directories and installs nothing resident.
-- Injected env vars and extra args go verbatim onto the remote command line, where `ps` can
-  see them — **do not put secrets there**.
-- Stopping only applies to processes whose fingerprint matches verbatim, so the worst case
-  is "failed to stop something it should have", never "stopped somebody else's process".
+- Remote data uses plain `ssh -L`, with encryption and authentication entirely from your
+  ssh config and keys. Local data connects directly to loopback, with no SSH. This tool
+  never handles credentials and stores no passwords.
+- The managed side, local or remote, writes only `~/.dsh_center_remote/` under that
+  account's HOME (logs and patch files). Local patch sync never cleans up existing files
+  it cannot prove ownership of, and its destination is constrained to that directory.
+- Injected env vars and extra args go verbatim onto the target command line, where `ps`
+  can see them — **do not put secrets there**.
+- Local and remote stopping only applies to a process whose fingerprint matches verbatim,
+  so the worst case is "failed to stop something it should have", never "stopped somebody
+  else's process".
 
 ## FAQ
 
 **Does it work on Linux?** Yes — manager and CLI both work. Only `dshc service` (autostart)
 is launchd-specific; on Linux write a systemd unit pointing at `dshc up --foreground`.
 
-**What if the remote has no dsh?** The probe labels it "not installed / not configured"
-with the reason (missing binary vs. missing web profile). It never tries to install
-anything and never lets you start a host that cannot run.
+**What if the local or remote target has no dsh?** The probe labels it
+"not installed / not configured" with the reason (missing binary vs. missing web profile).
+It never tries to install anything or lets you start a host that cannot run.
 
 **Someone else started a `dsh web` on the same box — will you kill it?** No. Such
 instances show up as "🔒 manual", read-only; `stop` and `restart` are refused outright.
 A fingerprint mismatch always means no kill.
 
 **Will the remote's `X-Frame-Options` block the iframe?** In practice dsh web sets no such
-header, so embedding works. If one ever does block, the tab shows an explicit failure with
-an "open in a new window" escape hatch.
+header, so embedding works. The loading state only means "waiting" and cannot diagnose a
+cross-origin failure; if embedding is blocked, use "open in a new window" from the host menu.
 
 **Do I need to restart the manager after changing config?** Host-level changes apply on the
 next start. Changing `manager.port` is only persisted — it takes a `dshc restart` to move
 the listener (the UI says so explicitly).
 
-**If I close the browser tab, does the remote process stop?** No. Remote processes and
-tunnels belong to the manager, not the browser. Stop one explicitly, or stop the manager
-(`dshc down` closes the tunnels it opened first).
+**If I close the browser tab, does dsh web stop?** No. Local and remote processes, plus
+remote tunnels, belong to the manager rather than the browser. Stop an instance explicitly
+with `dshc stop <host>`; `dshc down` only closes the manager and transport resources and
+does not stop managed dsh web processes as a side effect.
 
 **How do I upgrade?** `dshc update` — it recognises how you installed:
 
@@ -295,17 +334,19 @@ node ~/.dsh_center/app/scripts/install.mjs --uninstall   # 3. remove the dshc sy
 rm -rf ~/.dsh_center                                # 4. delete config, state, logs and code
 ```
 
-After step 4 nothing is left locally. On the remote side, delete `~/.dsh_center_remote/`
-(logs and patch files only):
+Step 4 removes the manager itself. If you managed the local machine, its logs and patches
+remain in `~/.dsh_center_remote/`; after confirming the instance is stopped, remove that
+directory separately. Remote hosts use the same per-host cleanup:
 
 ```bash
+rm -rf ~/.dsh_center_remote
 ssh <host> 'rm -rf ~/.dsh_center_remote'
 ```
 
-If a remote `dsh web` is still running, stop it from the console or with
-`dshc stop <host>` first. For anything left over, `ssh <host> 'pkill -f "dsh web"'` cleans
-up — but note that command does no fingerprint check and will also kill other people's
-instances, so use it with care.
+If a local or remote `dsh web` is still running, stop it from the management page or with
+`dshc stop <host>` first. For a remote process left over,
+`ssh <host> 'pkill -f "dsh web"'` cleans up — but note that command does no fingerprint
+check and will also kill other people's instances, so use it with care.
 
 ## Development
 
@@ -339,9 +380,10 @@ production `src/lib/machine.js`). Not one byte of `src/web/**` is modified — t
 the real frontend, which is why it cannot drift from the product: if it drifted, the demo
 would break first and `npm run check` would go red.
 
-Tests never touch real machines: `tests/harness/` is a set of fake ssh/scp/dsh-web shims
-plus a state engine and 15 fault scenarios, so every branch of the protocol templates is
-reproducible locally. Real-machine acceptance is a separate script:
+Tests never touch real machines: `tests/harness/` supplies fake ssh/scp, local-shell and
+dsh-web shims plus a state engine, 15 remote fault scenarios and a local end-to-end flow.
+Every protocol branch is reproducible under an isolated HOME. Real-machine acceptance is
+a separate script:
 
 ```bash
 npm run acceptance:real -- --host <ssh-host>                        # IT-01…13

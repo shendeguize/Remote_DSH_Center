@@ -22,20 +22,36 @@ import { applyScenario, crashRemote, reusePid, setFaults } from './scenarios.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_SSH = path.join(HERE, 'fake-ssh.js');
 export const FAKE_SCP = path.join(HERE, 'fake-scp.js');
+export const FAKE_LOCAL_SH = path.join(HERE, 'fake-local-sh.js');
 export const FAKE_OPEN = path.join(HERE, 'fake-open.js');
 export const REPO_ROOT = path.resolve(HERE, '..', '..');
 
 /**
- * @param {{hosts?: Record<string, object>, sshConfig?: string, config?: object}} [opts]
+ * @param {{hosts?: Record<string, object>, sshConfig?: string, config?: object,
+ *   local?: boolean|string|{name?:string,state?:object}}} [opts]
  */
 export function createHarness(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-harness-'));
   const harnessDir = path.join(root, 'harness');
   const homeDir = path.join(root, 'dsh_center');
+  const local = normalizeLocal(opts.local);
+  const localHost = local?.name ?? null;
+  const localHomeDir = local ? path.join(root, 'local-home') : null;
   fs.mkdirSync(harnessDir, { recursive: true });
   fs.mkdirSync(homeDir, { recursive: true });
+  if (localHomeDir) fs.mkdirSync(localHomeDir, { recursive: true });
 
-  const hosts = opts.hosts ?? { 'gpu-1': newHostState() };
+  const hosts = { ...(opts.hosts ?? (local ? {} : { 'gpu-1': newHostState() })) };
+  if (local) {
+    const seeded = local.state ?? hosts[localHost] ?? {};
+    hosts[localHost] = {
+      ...newHostState(),
+      ...seeded,
+      dshHome: seeded.dshHome === undefined || seeded.dshHome === '/root/.dsh'
+        ? path.join(localHomeDir, '.dsh')
+        : seeded.dshHome,
+    };
+  }
   writeState({ hosts }, harnessDir);
 
   const sshConfigPath = path.join(root, 'ssh_config');
@@ -43,6 +59,7 @@ export function createHarness(opts = {}) {
     sshConfigPath,
     opts.sshConfig
       ?? Object.keys(hosts)
+        .filter((name) => name !== localHost)
         .map((n, i) => `Host ${n}\n  HostName 10.0.0.${i + 1}\n  User root\n  Port 22\n`)
         .join('\n'),
   );
@@ -62,12 +79,19 @@ export function createHarness(opts = {}) {
     DSHC_SCP_BIN: `${process.execPath} ${FAKE_SCP}`,
     // 拦住浏览器：跑用例不该弹窗，而「有没有去开」本身是 dshc open 的核心行为
     DSHC_OPEN_BIN: `${process.execPath} ${FAKE_OPEN}`,
+    ...(local ? {
+      HOME: localHomeDir,
+      DSHC_LOCAL_SH_BIN: `${process.execPath} ${FAKE_LOCAL_SH}`,
+      DSHC_HARNESS_LOCAL_HOST: localHost,
+    } : {}),
   };
 
   return {
     root,
     harnessDir,
     homeDir,
+    localHost,
+    localHomeDir,
     sshConfigPath,
     env,
 
@@ -125,6 +149,19 @@ export function createHarness(opts = {}) {
       return readState(harnessDir).hosts?.[name]?.files ?? {};
     },
 
+    /** ssh/local 两种运输实际收到的协议种类；隧道另记 kind=tunnel。 */
+    transportCalls() {
+      try {
+        return fs.readFileSync(path.join(harnessDir, 'transport.ndjson'), 'utf8')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+      } catch {
+        return [];
+      }
+    },
+
     /** 杀掉本次装置拉起的全部假 dsh web，清理临时目录。 */
     cleanup() {
       const state = readState(harnessDir);
@@ -136,6 +173,13 @@ export function createHarness(opts = {}) {
       fs.rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+function normalizeLocal(value) {
+  if (!value) return null;
+  if (value === true) return { name: 'local-host', state: null };
+  if (typeof value === 'string') return { name: value, state: null };
+  return { name: value.name ?? 'local-host', state: value.state ?? null };
 }
 
 /** scenarios.js 的助手默认读 process.env.DSHC_HARNESS_DIR，此处临时切过去。 */

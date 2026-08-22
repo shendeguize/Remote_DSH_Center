@@ -5,9 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 import * as store from '../src/store.js';
-import { applyProbe, interpretProbe, parseRunningBlock } from '../src/prober.js';
+import {
+  applyProbe, interpretProbe, parseRunningBlock, probeHost, probeOnce,
+} from '../src/prober.js';
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { _resetForTest } from '../src/lib/bus.js';
+import { buildProbeScript } from '../src/lib/proto.js';
+import { unshq } from './harness/shell-word.js';
 
 const ok = (stdout) => ({ code: 0, stdout, stderr: '', timedOut: false, aborted: false });
 
@@ -80,6 +84,50 @@ test('parseRunningBlock：ps 行解析、忽略噪声行', () => {
   assert.deepEqual(parseRunningBlock(null), []);
 });
 
+test('probeOnce：同一 PROBE 模板按 local 显式选择本机或 ssh 运输', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-probe-transport-'));
+  const recorder = path.join(dir, 'record.mjs');
+  const localMark = path.join(dir, 'local.json');
+  const sshMark = path.join(dir, 'ssh.json');
+  fs.writeFileSync(recorder, [
+    "import fs from 'node:fs';",
+    'const [kind, mark, ...args] = process.argv.slice(2);',
+    'fs.writeFileSync(mark, JSON.stringify({ kind, args }));',
+    `process.stdout.write(${JSON.stringify(READY_SAMPLE)});`,
+  ].join('\n'));
+
+  const savedLocal = process.env.DSHC_LOCAL_SH_BIN;
+  const savedSsh = process.env.DSHC_SSH_BIN;
+  process.env.DSHC_LOCAL_SH_BIN = `${process.execPath} ${recorder} local ${localMark}`;
+  process.env.DSHC_SSH_BIN = `${process.execPath} ${recorder} ssh ${sshMark}`;
+  t.after(() => {
+    if (savedLocal === undefined) delete process.env.DSHC_LOCAL_SH_BIN;
+    else process.env.DSHC_LOCAL_SH_BIN = savedLocal;
+    if (savedSsh === undefined) delete process.env.DSHC_SSH_BIN;
+    else process.env.DSHC_SSH_BIN = savedSsh;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  assert.equal((await probeOnce('name-is-not-a-transport', { local: true })).phase, 'ready');
+  assert.equal(fs.existsSync(localMark), true);
+  assert.equal(fs.existsSync(sshMark), false, 'local=true 不得启动 ssh');
+  const localCall = JSON.parse(fs.readFileSync(localMark, 'utf8'));
+  assert.deepEqual(localCall.args, ['-c', buildProbeScript()]);
+
+  assert.equal((await probeOnce('gpu-1', { local: false })).phase, 'ready');
+  const remoteCall = JSON.parse(fs.readFileSync(sshMark, 'utf8'));
+  const wrapped = remoteCall.args.at(-1);
+  assert.equal(wrapped.startsWith('sh -c '), true);
+  assert.equal(unshq(wrapped.slice('sh -c '.length)), buildProbeScript(), '远端仍发送同一份模板');
+
+  fs.rmSync(localMark, { force: true });
+  fs.rmSync(sshMark, { force: true });
+  await storeFixture(t, { 'local-node': { local: true } });
+  await probeHost('local-node');
+  assert.equal(fs.existsSync(localMark), true, '队首从当前 HostView 读取 local');
+  assert.equal(fs.existsSync(sshMark), false);
+});
+
 async function storeFixture(t, hosts = { 'gpu-1': null }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-prober-'));
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
@@ -87,9 +135,14 @@ async function storeFixture(t, hosts = { 'gpu-1': null }) {
     setupCompleted: true,
     manager: { port: 7788 },
     defaults: { remoteWebPort: 8899, localPortRange: [17701, 17799] },
-    hosts: Object.fromEntries(Object.keys(hosts).map((n) => [n, {
-      enabled: true, autoStart: false, localPort: null, remoteWebPort: null,
+    hosts: Object.fromEntries(Object.entries(hosts).map(([n, override]) => [n, {
+      local: false,
+      enabled: true,
+      autoStart: false,
+      localPort: null,
+      remoteWebPort: null,
       inject: { env: {}, extraArgs: [], patches: [] },
+      ...(override ?? {}),
     }])),
   }));
   t.mock.method(console, 'log', () => {});

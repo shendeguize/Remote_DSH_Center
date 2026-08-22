@@ -83,10 +83,24 @@ test('缺 configVersion 视为 1 并补齐默认字段后落盘', async (t) => {
   assert.equal(cfg.defaults.remoteWebPort, 8899);
   assert.equal(cfg.hosts.a.enabled, false, '用户给的值保留');
   assert.equal(cfg.hosts.a.autoStart, false, '缺的字段补默认');
+  assert.equal(cfg.hosts.a.local, false, '旧配置缺 local 时补成远端主机');
   assert.deepEqual(cfg.hosts.a.inject, { env: {}, extraArgs: [], patches: [] });
 
   const onDisk = JSON.parse(fs.readFileSync(paths.config, 'utf8'));
   assert.equal(onDisk.configVersion, CONFIG_VERSION, '迁移结果已回写');
+});
+
+test('configVersion 1 旧配置缺 local：加载后行为等价 false 且版本不升', async (t) => {
+  const config = fullConfig();
+  assert.equal('local' in config.hosts['gpu-1'], false);
+  const { paths } = fixture(t, { config });
+  await store.init({ pathsOverride: paths });
+
+  assert.equal(CONFIG_VERSION, 1);
+  assert.equal(store.getConfig().configVersion, 1);
+  assert.equal(store.getConfig().hosts['gpu-1'].local, false);
+  assert.equal(store.getHostView('gpu-1').local, false);
+  assert.equal(store.getHostView('gpu-1').config.local, false);
 });
 
 test('configVersion 高于本程序 → fatal 拒启', async (t) => {
@@ -400,14 +414,19 @@ test('saveConfigFromSetup 强制 setupCompleted 并补齐主机默认字段', as
   store.saveConfigFromSetup({
     manager: { port: 7799 },
     defaults: { remoteWebPort: 8899, localPortRange: [17701, 17799] },
-    hosts: { 'gpu-9': { autoStart: true } },
+    hosts: {
+      'gpu-9': { autoStart: true },
+      'local-host': { local: true, localPort: null },
+    },
     setupCompleted: false,
   });
 
   assert.equal(store.isSetupCompleted(), true, 'setupCompleted 由后端强制置 true');
   assert.equal(store.getConfig().manager.port, 7799);
   assert.equal(store.getConfig().hosts['gpu-9'].autoStart, true);
+  assert.equal(store.getConfig().hosts['gpu-9'].local, false);
   assert.equal(store.getConfig().hosts['gpu-9'].localPort, null);
+  assert.equal(store.getConfig().hosts['local-host'].local, true, 'setup 规范化必须保留本机身份');
 });
 
 test('HostView 形状符合 13 §1.3：顶层键固定、mappedUrl 仅隧道可用时非 null', async (t) => {
@@ -417,9 +436,11 @@ test('HostView 形状符合 13 §1.3：顶层键固定、mappedUrl 仅隧道可�
 
   const view = store.getHostView('gpu-1');
   assert.deepEqual(Object.keys(view).sort(), [
-    'config', 'effectiveRemotePort', 'manualInstances', 'mappedUrl', 'name',
+    'config', 'effectiveRemotePort', 'local', 'manualInstances', 'mappedUrl', 'name',
     'orphaned', 'patchSync', 'phase', 'probe', 'sshInfo', 'tunnel', 'web',
   ]);
+  assert.equal(view.local, false);
+  assert.equal(view.config.local, false);
   assert.equal(view.effectiveRemotePort, 8899, 'null 覆写继承 defaults');
   assert.equal(view.mappedUrl, null, 'unknown 态无映射地址');
   assert.deepEqual(view.patchSync, { files: {} });
@@ -433,6 +454,18 @@ test('HostView 形状符合 13 §1.3：顶层键固定、mappedUrl 仅隧道可�
 
   store.setPhase('gpu-1', 'ready', 't');
   assert.equal(store.getHostView('gpu-1').mappedUrl, null, 'ready 态不给映射地址');
+});
+
+test('HostView 保留 local:true 主机身份', async (t) => {
+  const config = fullConfig();
+  config.hosts['gpu-1'].local = true;
+  config.hosts['gpu-1'].localPort = null;
+  const { paths } = fixture(t, { config });
+  await store.init({ pathsOverride: paths });
+
+  const view = store.getHostView('gpu-1');
+  assert.equal(view.local, true);
+  assert.equal(view.config.local, true);
 });
 
 test('effectiveRemotePort 优先用主机覆写', async (t) => {

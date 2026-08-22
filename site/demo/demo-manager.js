@@ -51,6 +51,8 @@ function uuid() {
 const clone = (v) => structuredClone(v);
 
 const LOG_LIMIT = 50;
+const DEFAULT_LOCAL_NAME = 'local-host';
+const SAFE_HOST_RE = /^[A-Za-z0-9._-]+$/;
 
 /**
  * @param {{
@@ -76,7 +78,7 @@ export function createFakeManager({
   const listeners = new Set();
   /** @type {Map<string, object>} name → HostView（对外一律深拷贝） */
   const hosts = new Map();
-  /** @type {Map<string, {gen:number}>} 私有元信息：不能混进 HostView，会污染契约 */
+  /** @type {Map<string, {gen:number, seed:object}>} 私有元信息：不能混进 HostView，会污染契约 */
   const meta = new Map();
   const pendingTimers = new Set();
 
@@ -179,15 +181,30 @@ export function createFakeManager({
 
   // ── 主机视图装配 ──────────────────────────────────────────────────────
 
-  const seedOf = (name) => DEMO_HOSTS.find((s) => s.name === name);
+  const seedOf = (name) => meta.get(name)?.seed;
 
   const probeDelay = (seed) => Math.max(
     1,
     Math.round((seed.probeDelayMs ?? timing.probeMs) * (timing.probeScale ?? 1)),
   );
 
+  const localSeed = (name) => ({
+    name,
+    local: true,
+    sshInfo: null,
+    probeResult: 'ready',
+    dsh: { dshPath: '/usr/local/bin/dsh', version: '0.1.0-rc.7', dshHome: '/Users/demo/.dsh' },
+    autoStart: false,
+    localPort: null,
+    remoteWebPort: null,
+    workdir: null,
+    pid: null,
+    probeDelayMs: timing.probeMs,
+    manualInstances: [],
+  });
+
   function attachRunning(host, seed, { ageMs = 0 } = {}) {
-    const localPort = allocateLocalPort(host.name);
+    const localPort = host.local ? host.effectiveRemotePort : allocateLocalPort(host.name);
     const remotePort = host.effectiveRemotePort;
     host.web = {
       pid: seed.pid ?? (nextPid += 1),
@@ -197,15 +214,19 @@ export function createFakeManager({
       log: `web-${remotePort}.log`,
       startedAt: iso(now() - ageMs),
       workdir: host.config.workdir,
-      cwd: host.config.workdir ? host.config.workdir.replace(/^~/, `/home/${host.sshInfo.user}`) : null,
+      cwd: host.config.workdir
+        ? host.config.workdir.replace(/^~/, host.local ? '/Users/demo' : `/home/${host.sshInfo.user}`)
+        : null,
     };
     host.tunnel = { localPort, connected: true, reconnectAttempt: 0, suspendedReason: null };
     host.mappedUrl = mockUrl(host.name, localPort);
   }
 
-  function buildHost(seed, phase) {
+  function buildHost(seed, phase, { persistConfig = true } = {}) {
     const at = iso(now() - SEED_AGE_MS.probe);
+    const local = seed.local === true;
     const hostConfig = {
+      local,
       enabled: true,
       autoStart: seed.autoStart,
       localPort: seed.localPort,
@@ -215,7 +236,8 @@ export function createFakeManager({
     };
     const host = {
       name: seed.name,
-      sshInfo: { ...seed.sshInfo },
+      local,
+      sshInfo: local ? null : { ...seed.sshInfo },
       orphaned: false,
       config: hostConfig,
       phase,
@@ -228,8 +250,8 @@ export function createFakeManager({
       manualInstances: seed.manualInstances.map((i) => ({ ...i })),
     };
     hosts.set(seed.name, host);
-    meta.set(seed.name, { gen: 0 });
-    config.hosts[seed.name] = clone(hostConfig);
+    meta.set(seed.name, { gen: 0, seed });
+    if (persistConfig) config.hosts[seed.name] = clone(hostConfig);
     if (phase === 'running') attachRunning(host, seed, { ageMs: SEED_AGE_MS.web });
     return host;
   }
@@ -261,12 +283,18 @@ export function createFakeManager({
     }
 
     if (mode === 'setup') {
+      // 与产品 server 一致：setup 额外暴露恰好一台只驻内存的本机候选。
+      // 它会随 POST /api/setup 被选入 config，但普通已完成 demo 不凭空追加。
+      buildHost(localSeed(DEFAULT_LOCAL_NAME), 'unknown', { persistConfig: false });
       // 引导态下不预设分配好的端口，一切由向导落盘后再来
       for (const host of hosts.values()) {
         host.config.localPort = null;
-        config.hosts[host.name].localPort = null;
         host.config.autoStart = false;
-        config.hosts[host.name].autoStart = false;
+        const saved = config.hosts[host.name];
+        if (saved) {
+          saved.localPort = null;
+          saved.autoStart = false;
+        }
       }
     } else {
       pushLog({
@@ -410,12 +438,32 @@ export function createFakeManager({
 
   // ── 对外 API（形状与 13 §2 对齐） ──────────────────────────────────────
 
+  function createLocalHost(requestedName) {
+    gate();
+    const name = requestedName ?? DEFAULT_LOCAL_NAME;
+    if (typeof name !== 'string' || !SAFE_HOST_RE.test(name) || name.startsWith('-')) {
+      throw new FakeApiError(400, 'VALIDATION', '本机主机名须由字母、数字、点、下划线或连字符组成，且不以 - 开头');
+    }
+    if ([...hosts.values()].some((host) => host.local)) {
+      throw new FakeApiError(409, 'LOCAL_HOST_EXISTS', '已经存在本机主机，不能重复添加');
+    }
+    if (hosts.has(name)) {
+      throw new FakeApiError(409, 'LOCAL_NAME_CONFLICT', `本机名称 ${name} 已被现有主机使用`);
+    }
+
+    const seed = localSeed(name);
+    const host = buildHost(seed, 'unknown');
+    pushLog({ host: name, level: 'info', msg: `已添加本机 ${name}` });
+    emitHost(name);
+    return { host: clone(host) };
+  }
+
   function probeAll() {
     const { operationId, body } = accept('probe-all');
     pushLog({ level: 'info', msg: `开始全量探测（${hosts.size} 台）` });
     for (const name of hosts.keys()) doProbe(name, null);
     // 汇总回执要等最慢那台落地：13 §3.4 要求每个 202 恰好一条 operation-done
-    const slowest = Math.max(...DEMO_HOSTS.map(probeDelay));
+    const slowest = Math.max(...[...hosts.keys()].map((name) => probeDelay(seedOf(name))));
     timer(() => finish(operationId, { host: null, action: 'probe-all' }), slowest + 20);
     return body;
   }
@@ -578,7 +626,9 @@ export function createFakeManager({
     for (const [name, hostCfg] of Object.entries(submitted.hosts ?? {})) {
       const host = hosts.get(name);
       if (!host) continue;
+      const local = host.local === true;
       host.config = {
+        local,
         enabled: Boolean(hostCfg.enabled),
         autoStart: Boolean(hostCfg.autoStart),
         localPort: hostCfg.localPort ?? null,
@@ -675,6 +725,7 @@ export function createFakeManager({
     saveDefaults,
     reload,
     setup,
+    createLocalHost,
     // SSE
     subscribe,
     // demo 控制

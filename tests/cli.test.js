@@ -7,9 +7,9 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  COMMANDS, EXIT, TERMINAL, UsageError, buildDefaultsPatchFor, buildHostPatchFor, classifyConfigFile, coerceConfigValue,
-  createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame, resolveHostArg, tailFile,
-  upToDateLines, usageText,
+  COMMANDS, EXIT, TERMINAL, UsageError, assertCliSetupLocalIdentities, buildDefaultsPatchFor, buildHostPatchFor,
+  classifyConfigFile, coerceConfigValue, createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame,
+  resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
 } from '../src/cli.js';
 
 test('update 的「已是最新」：跟着 rc 的人得看到新 rc，装正式版的人不受打扰', () => {
@@ -50,12 +50,15 @@ test('parseArgv 对坏用法抛 UsageError（→ 退出码 3）', () => {
   assert.equal(EXIT.usage, 3);
 });
 
-test('exitCodeFor：说不上话算 2，被受理后失败算 1', () => {
+test('exitCodeFor：超时/说不上话算 2，其余操作失败算 1', () => {
   // README 与 cli.js 文件头都写着「2 = 超时/通信失败」，那超时就必须真的给 2——
   // 脚本按退出码分流「重试」与「别重试」，混成 1 会让调用方无从判断。
   assert.equal(exitCodeFor({ status: 0, code: 'INTERNAL' }), EXIT.comm, '连 manager 都没连上');
   assert.equal(exitCodeFor({ status: 504, code: 'SSH_TIMEOUT' }), EXIT.comm);
   assert.equal(exitCodeFor({ status: 502, code: 'SSH_UNREACHABLE' }), EXIT.comm);
+  assert.equal(exitCodeFor({ status: 504, code: 'LOCAL_TIMEOUT' }), EXIT.comm, '本机执行超时仍属于超时');
+  assert.equal(exitCodeFor({ status: 500, code: 'LOCAL_EXEC_FAILED' }), EXIT.failed, '本机执行失败是操作失败');
+  assert.equal(exitCodeFor({ status: 500, code: 'LOCAL_COPY_FAILED' }), EXIT.failed, '本机复制失败是操作失败');
   assert.equal(exitCodeFor({ status: 409, code: 'KILL_REFUSED' }), EXIT.failed, '拒杀是动作失败，不是通信失败');
   // 值不合法是「你敲错了」，不是「操作没成」——重试一万次也还是这个结果（issue #63）
   assert.equal(exitCodeFor({ status: 400, code: 'VALIDATION' }), EXIT.usage);
@@ -75,6 +78,84 @@ test('resolveHostArg：精确优先、唯一前缀通过、歧义列候选', () 
   const missing = resolveHostArg('zzz', hosts);
   assert.equal(missing.ok, false);
   assert.deepEqual(missing.candidates, hosts);
+});
+
+test('withLocalCandidate：CLI init 始终只补一台本机，且避开 SSH 名称冲突', () => {
+  const candidates = withLocalCandidate(['workstation', 'gpu-1'], 'workstation');
+  assert.deepEqual(candidates, [
+    { name: 'workstation', local: false },
+    { name: 'gpu-1', local: false },
+    { name: 'workstation-local', local: true },
+  ]);
+  assert.equal(candidates.filter((candidate) => candidate.local).length, 1);
+
+  const current = {
+    hosts: {
+      'saved-local': { local: true },
+      'gpu-1': { local: false },
+    },
+  };
+  const reused = withLocalCandidate(['gpu-1'], 'new-hostname', current);
+  assert.deepEqual(reused, [
+    { name: 'gpu-1', local: false },
+    { name: 'saved-local', local: true },
+  ], '--force 应复用已经配置的本机名称');
+});
+
+test('withLocalCandidate：非法 hostname 回退为 safe-host，并稳定避让冲突', () => {
+  for (const hostname of ['研发 Mac', '-option', '']) {
+    const candidates = withLocalCandidate([], hostname);
+    assert.deepEqual(candidates, [{ name: 'local-host', local: true }], JSON.stringify(hostname));
+  }
+
+  const collided = withLocalCandidate(
+    ['local-host', 'local-host-local', 'local-host-local-2'],
+    '研发 Mac',
+  );
+  assert.equal(collided.at(-1).name, 'local-host-local-3');
+  assert.match(collided.at(-1).name, /^[A-Za-z0-9._-]+$/);
+  assert.equal(collided.at(-1).name.startsWith('-'), false);
+});
+
+test('运行中 setup 只保留单次原子提交，不再预登记本机', () => {
+  const source = fs.readFileSync(new URL('../src/cli.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /['"]\/api\/hosts\/local['"]/, 'init 不得先持久化本机身份');
+  const persistSource = source.slice(
+    source.indexOf('export async function persistSetup'),
+    source.indexOf('function raceWithDeadline'),
+  );
+  assert.equal(
+    [...persistSource.matchAll(/\bapiRequest\(/g)].length,
+    1,
+    '运行中 manager 路径只能发出一次请求',
+  );
+  assert.match(persistSource, /apiRequest\(port, 'POST', '\/api\/setup', config\)/);
+});
+
+test('CLI setup 可信身份只允许 canonical 候选，并拒绝把任意 SSH host 翻成本机', () => {
+  const context = {
+    current: { hosts: { 'gpu-1': { local: false } } },
+    preferredLocalName: 'workstation',
+    sshNames: ['gpu-1'],
+  };
+  assert.doesNotThrow(() => assertCliSetupLocalIdentities(
+    { hosts: { workstation: { local: true } } },
+    context,
+  ));
+  assert.throws(
+    () => assertCliSetupLocalIdentities(
+      { hosts: { 'client-picked-local': { local: true } } },
+      context,
+    ),
+    (err) => err.code === 'NOT_ALLOWED' && /未经 CLI 认可/.test(err.message),
+  );
+  assert.throws(
+    () => assertCliSetupLocalIdentities(
+      { hosts: { 'gpu-1': { local: true } } },
+      context,
+    ),
+    (err) => err.code === 'NOT_ALLOWED' && /SSH 主机/.test(err.message),
+  );
 });
 
 test('SSE 分帧器：跨 chunk、心跳注释、坏 JSON', () => {

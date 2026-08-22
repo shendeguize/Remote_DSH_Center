@@ -6,11 +6,41 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { overlayFor, paneDecision } from '../../src/web/components/iframe-pane.js';
+import {
+  createIframePanes, loadingText, overlayFor, paneDecision,
+} from '../../src/web/components/iframe-pane.js';
+import { createStore } from '../../src/web/store.js';
+import { installDom } from './dom-shim.js';
 
 const snap = (patch = {}) => ({
   mappedUrl: 'http://127.0.0.1:17701/', localPort: 17_701, phase: 'running', sawCrash: false, ...patch,
 });
+
+const host = (name, patch = {}) => ({
+  name,
+  local: false,
+  enabled: true,
+  config: { enabled: true },
+  phase: 'running',
+  mappedUrl: 'http://127.0.0.1:17701/',
+  tunnel: { localPort: 17_701, suspendedReason: null },
+  ...patch,
+});
+
+function mountPanes(t, hosts) {
+  const dom = installDom();
+  const store = createStore({
+    hosts: new Map(hosts.map((item) => [item.name, item])),
+    hostsLoaded: true,
+  });
+  const panes = createIframePanes({ store, actions: { hostAction() {} } });
+  dom.app.append(panes.root);
+  t.after(() => {
+    panes.destroy();
+    dom.restore();
+  });
+  return { dom, store, panes };
+}
 
 test('首次拿到映射地址才创建 pane', () => {
   assert.equal(paneDecision(null, { mappedUrl: null, localPort: null, phase: 'starting' }).kind, 'none');
@@ -69,4 +99,113 @@ test('遮罩文案与动作按 phase 裁剪', () => {
   assert.equal(overlayFor({ phase: 'running', mappedUrl: null }).action, null);
   assert.match(overlayFor({ phase: 'ready' }).title, /可拉起/);
   assert.match(overlayFor(null).title, /已消失/);
+});
+
+test('ready + start pending 只投影为启动遮罩，不伪造 phase 或 iframe', (t) => {
+  const ready = host('gpu-ready', { phase: 'ready', mappedUrl: null, tunnel: null });
+  const { dom, store, panes } = mountPanes(t, [ready]);
+  store.beginPending({ action: 'start', host: ready.name });
+
+  panes.show(ready.name);
+
+  assert.equal(store.getHost(ready.name).phase, 'ready', 'pending 只能影响视图，不能改 host 真相');
+  assert.equal(dom.app.querySelector('.iframe-pane iframe'), null, '无 mappedUrl 时不得创建 iframe');
+  const placeholder = dom.app.querySelector('.iframe-pane.is-placeholder');
+  assert.equal(placeholder.hidden, false);
+  assert.equal(placeholder.id, 'host-panel-gpu-ready');
+  assert.match(placeholder.textContent, /正在启动/);
+  assert.equal(placeholder.querySelector('.iframe-overlay').getAttribute('aria-busy'), 'true');
+});
+
+test('iframe 首载显示远端/本机文案，load 后隐藏，切标签不重置', (t) => {
+  assert.equal(loadingText({ local: false }), '正在加载远端页面…');
+  assert.equal(loadingText({ local: true }), '正在加载本机页面…');
+
+  const local = host('workstation', {
+    local: true,
+    mappedUrl: 'http://127.0.0.1:19001/',
+    tunnel: { localPort: 19_001, suspendedReason: null },
+  });
+  const { dom, panes } = mountPanes(t, [host('gpu-1'), local]);
+
+  panes.show('gpu-1');
+  const remoteFrame = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+  const remoteLoading = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-loading');
+  assert.equal(remoteLoading.hidden, false);
+  assert.equal(remoteLoading.textContent, '正在加载远端页面…');
+
+  remoteFrame.dispatchEvent({ type: 'load' });
+  assert.equal(remoteLoading.hidden, true);
+
+  panes.show('workstation');
+  const localLoading = dom.app.querySelector('.iframe-pane[data-host="workstation"] .iframe-loading');
+  assert.equal(localLoading.textContent, '正在加载本机页面…');
+  panes.show('gpu-1');
+  assert.equal(dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe'), remoteFrame);
+  assert.equal(remoteLoading.hidden, true, '切回 keep-alive pane 不能重现首载态');
+});
+
+test('映射变化 recreate 后重新显示 loading', (t) => {
+  const original = host('gpu-1');
+  const { dom, store, panes } = mountPanes(t, [original]);
+  panes.show('gpu-1');
+
+  const before = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+  before.dispatchEvent({ type: 'load' });
+  store.upsertHost(host('gpu-1', {
+    mappedUrl: 'http://127.0.0.1:17702/',
+    tunnel: { localPort: 17_702, suspendedReason: null },
+  }));
+
+  const after = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+  assert.notEqual(after, before);
+  assert.equal(dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-loading').hidden, false);
+});
+
+test('后端 phase 遮罩优先；degraded 恢复保持页面且不 reload', (t) => {
+  const running = host('gpu-1');
+  const { dom, store, panes } = mountPanes(t, [running]);
+  panes.show('gpu-1');
+
+  const frame = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+  let reloads = 0;
+  frame.contentWindow = { location: { reload: () => { reloads += 1; } } };
+  frame.dispatchEvent({ type: 'load' });
+
+  store.upsertHost(host('gpu-1', { phase: 'degraded' }));
+  const loading = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-loading');
+  const overlay = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay');
+  assert.equal(loading.hidden, true);
+  assert.equal(overlay.hidden, false);
+  assert.match(overlay.textContent, /隧道断开/);
+
+  store.upsertHost(running);
+  assert.equal(dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe'), frame);
+  assert.equal(reloads, 0, 'degraded 恢复必须交给页面自愈');
+  assert.equal(overlay.hidden, true);
+  assert.equal(loading.hidden, true);
+});
+
+test('crashed 遮罩不被 loading 遮住，恢复 reload 时重现 loading', (t) => {
+  const running = host('gpu-1');
+  const { dom, store, panes } = mountPanes(t, [running]);
+  panes.show('gpu-1');
+
+  const frame = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] iframe');
+  let reloads = 0;
+  frame.contentWindow = { location: { reload: () => { reloads += 1; } } };
+  store.upsertHost(host('gpu-1', { phase: 'crashed' }));
+
+  const loading = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-loading');
+  const overlay = dom.app.querySelector('.iframe-pane[data-host="gpu-1"] .iframe-overlay');
+  assert.equal(loading.hidden, true);
+  assert.equal(overlay.hidden, false);
+  assert.match(overlay.textContent, /已退出/);
+
+  store.upsertHost(running);
+  assert.equal(reloads, 1);
+  assert.equal(overlay.hidden, true);
+  assert.equal(loading.hidden, false);
+  frame.dispatchEvent({ type: 'load' });
+  assert.equal(loading.hidden, true);
 });

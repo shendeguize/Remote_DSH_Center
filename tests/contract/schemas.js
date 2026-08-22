@@ -39,6 +39,7 @@ const injectView = V.obj({
 const workdirView = V.nullable(V.str({ pattern: /^(?:\/|~$|~\/)/ }));
 
 const hostConfigView = V.obj({
+  local: V.bool(),
   enabled: V.bool(),
   autoStart: V.bool(),
   localPort: V.nullable(port),
@@ -49,6 +50,7 @@ const hostConfigView = V.obj({
 
 export const hostView = V.obj({
   name: V.str({ min: 1 }),
+  local: V.bool(),
   sshInfo: V.nullable(V.obj({
     hostName: V.nullable(V.str()),
     user: V.nullable(V.str()),
@@ -132,6 +134,7 @@ export const managerInfo = V.obj({
 });
 
 export const hostConfigPutResponse = V.obj({ host: hostView });
+export const localHostCreateResponse = V.obj({ host: hostView });
 
 export const defaultsPutResponse = V.obj({
   defaults: defaultsView,

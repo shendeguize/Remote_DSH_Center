@@ -96,6 +96,27 @@ export function createActions({ store, confirm, navigate }) {
     return guarded({ action: 'probe-all', run: () => api.probeAll() });
   }
 
+  /** 创建响应先落服务端 HostView，再复用既有 probe pending；phase 仍只由响应/SSE 决定。 */
+  async function addLocalHost(name) {
+    const requestedName = typeof name === 'string' ? name.trim() : '';
+    const created = await guarded({
+      action: 'local:create',
+      settleOnResolve: true,
+      run: () => api.createLocalHost(requestedName || undefined),
+    });
+    if (!created?.host) return created;
+
+    const hostName = created.host.name;
+    store.upsertHost(created.host);
+    store.addToast({ level: 'success', summary: `已添加本机 ${hostName}，正在探测`, timeoutMs: 4_000 });
+    await guarded({
+      action: 'probe',
+      host: hostName,
+      run: () => api.probeHost(hostName),
+    });
+    return created;
+  }
+
   /** toggle 走 config:save 通道；失败时用响应/回滚保持与服务端一致（10 §7 第 4 条）。 */
   async function setAutoStart(name, value) {
     const host = store.getHost(name);
@@ -175,11 +196,24 @@ export function createActions({ store, confirm, navigate }) {
       store.addToast({ level: 'warn', summary: `主机 ${name} 不存在或尚未同步` });
       return;
     }
+    // ready 标签就是「一步拉起」入口：先提交启动，再立即切路由；phase 仍只等
+    // 响应/SSE 推进，绝不在动作层乐观改成 running。
+    const enabled = host.config?.enabled ?? host.enabled;
+    if (host.phase === 'ready' && enabled !== false) void hostAction('start', name);
     navigate(`#/host/${encodeURIComponent(name)}`);
   }
 
   function openHostDrawer(name) {
     store.setDrawer({ open: true, host: name, dirty: false });
+  }
+
+  function viewHostInManage(name) {
+    if (!store.getHost(name)) {
+      store.addToast({ level: 'warn', summary: `主机 ${name} 不存在或尚未同步` });
+      return;
+    }
+    navigate('#/manage');
+    openHostDrawer(name);
   }
 
   async function loadHostLog(name, lines = 200) {
@@ -195,6 +229,7 @@ export function createActions({ store, confirm, navigate }) {
     navigate,
     hostAction,
     probeAll,
+    addLocalHost,
     setAutoStart,
     saveHostConfig,
     saveDefaults,
@@ -202,6 +237,7 @@ export function createActions({ store, confirm, navigate }) {
     restartManager,
     openHost,
     openHostDrawer,
+    viewHostInManage,
     loadHostLog,
     reportError,
   };

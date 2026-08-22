@@ -4,7 +4,7 @@
 
 import { logEvent } from './lib/bus.js';
 import { buildProbeScript, kvOne, parseProtoOutput } from './lib/proto.js';
-import { hostQueue, sshExec } from './lib/ssh.js';
+import { hostQueue, localExec, sshExec } from './lib/ssh.js';
 import { PROBE_PROTECTED_PHASES } from './lib/machine.js';
 import { asDshError } from './lib/errors.js';
 import { mapPool } from './lib/pool.js';
@@ -32,9 +32,20 @@ export function parseRunningBlock(raw) {
 /**
  * 把探测 stdout 解析为 ProbeResult（纯函数，喂样本即可单测）。
  * @param {{code:number|null, stdout:string, stderr:string, timedOut:boolean, aborted:boolean}} res
+ * @param {{local?:boolean}} [opts]
  * @returns {ProbeResult}
  */
-export function interpretProbe(res) {
+export function interpretProbe(res, { local = false } = {}) {
+  const rawStderr = res.stderr ?? '';
+  let failureStderr = rawStderr;
+  if (local) {
+    const summary = res.timedOut
+      ? '本机探测超时'
+      : res.aborted
+        ? '本机探测被中止'
+        : `本机探测命令执行失败（退出码 ${res.code ?? '未知'}）`;
+    failureStderr = rawStderr ? `${summary}\n${rawStderr}` : summary;
+  }
   const base = {
     ok: false,
     phase: 'unreachable',
@@ -44,7 +55,7 @@ export function interpretProbe(res) {
     profileWeb: false,
     runningRaw: '',
     noDshReason: null,
-    stderr: res.stderr ?? '',
+    stderr: failureStderr,
     manualInstances: [],
   };
 
@@ -55,7 +66,8 @@ export function interpretProbe(res) {
     out = parseProtoOutput(res.stdout, { requireDone: 'PROBE_DONE' });
   } catch (err) {
     // 协议输出不可解析：不是「连不上」，但也无法判定 dsh 状态 → 按 unreachable 呈现并留证
-    return { ...base, stderr: err.detail ?? err.message };
+    const detail = err.detail ?? err.message;
+    return { ...base, stderr: local ? `本机探测输出无法解析：${detail}` : detail };
   }
 
   const bin = kvOne(out, 'DSH_BIN');
@@ -98,9 +110,12 @@ export function interpretProbe(res) {
  * 「操作收敛到 server」的前提不成立，见 11 §1.3 例外条款）。
  * @returns {Promise<ProbeResult>}
  */
-export async function probeOnce(host, { timeoutMs, signal } = {}) {
-  const res = await sshExec(host, buildProbeScript(), { timeoutMs, signal });
-  return interpretProbe(res);
+export async function probeOnce(host, { local = false, timeoutMs, signal } = {}) {
+  const command = buildProbeScript();
+  const res = local
+    ? await localExec(command, { timeoutMs, signal })
+    : await sshExec(host, command, { timeoutMs, signal });
+  return interpretProbe(res, { local });
 }
 
 /** 单行 stderr 摘要（长文本不进环形缓冲，11 §7.2）。 */
@@ -116,7 +131,9 @@ function summarize(stderr) {
 /** 队列内探测并应用：probeOnce → setPhase(3 分类) + state.probe + manualInstances 并入。 */
 export async function probeHost(name) {
   return hostQueue(name).run('probe', async (signal) => {
-    const result = await probeOnce(name, { signal });
+    // 队首才重取 HostView：排队期间 reload 可能已换了配置快照，运输类型只认当前 config。
+    const local = store.getHostView(name)?.local === true;
+    const result = await probeOnce(name, { local, signal });
     applyProbe(name, result);
     return result;
   });

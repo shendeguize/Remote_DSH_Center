@@ -193,7 +193,11 @@ test('页面点「拉起」→ 真起真隧道 → 标签页 iframe 指向后端
   btnOf(dialog, '关停').click();
   await waitFor(() => app.store.getHost('gpu-1').phase === 'ready', 'SSE 推回 ready');
 
-  assert.equal(dom.app.querySelectorAll('.host-tabs .tab').length, 0, 'ready 后标签应移除');
+  assert.deepEqual(
+    dom.app.querySelectorAll('.host-tabs .tab').map((tab) => tab.dataset.host),
+    ['gpu-1'],
+    'ready 后标签仍应常驻',
+  );
   assert.equal(dom.app.querySelector('.iframe-pane[data-host="gpu-1"]'), null, 'pane 应销毁（会话不残留）');
 });
 
@@ -227,6 +231,14 @@ test('manager 掉线：横幅出现且写按钮全禁用', async (t) => {
   await waitFor(() => sources[0].readyState === 0 && !banner.hidden, '断线横幅出现');
 
   assert.match(banner.textContent, /失联/);
-  assert.equal(dom.app.querySelector('.header-actions .btn').disabled, true, '断线时写入口禁用');
+  assert.equal(dom.app.querySelector('.header-actions .btn'), null, '非 manage 路由不显示全局动作');
   assert.equal(btnOf(rowOf(dom, 'gpu-1'), '拉起').disabled, true);
+
+  dom.window.location.hash = '#/manage';
+  const manageActions = dom.app.querySelectorAll('.manage-header .btn');
+  assert.deepEqual(
+    manageActions.map((button) => [button.textContent, button.disabled]),
+    [['全部探测', true], ['重载配置', true]],
+    '全局动作只在 manage 页头，且断线时全部禁用',
+  );
 });

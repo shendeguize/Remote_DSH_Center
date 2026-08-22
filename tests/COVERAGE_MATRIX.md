@@ -7,7 +7,7 @@
 - 一条命令跑全：`npm run check`（测试+覆盖率 → 真浏览器 → 打包产物 → CLI 入口）
 - 全量单测与集成：`npm test`
 - 覆盖率门槛核对：`npm run coverage:gate`
-- 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，10 项）
+- 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，覆盖 Hub / 管理页 / iframe）
 - 真机验收：`npm run acceptance:real -- --host <ssh-host>`
 
 ## 1. 主机状态机迁移（`src/lib/machine.js` TRANSITIONS 全表）
@@ -64,11 +64,28 @@
 | STOP 缺指纹拒绝拼装 | `tests/lib/proto.test.js` §1.3 |
 | LOG 尾部读取 / 文件缺失 → `(no log)` | `tests/lib/proto.test.js` §1.4、`tests/harness/harness.test.js`、`tests/integration/cli.test.js` |
 | patch 清理协议（空格包裹匹配 + 兼职 mkdir） | `tests/lib/proto.test.js` §1.5 |
-| patch 同步：首传 / hash 未变跳过 / 改内容换名 / 旧文件清理 | `tests/harness/harness.test.js`、IT-09 |
+| 远端 patch 同步：首传 / hash 未变跳过 / 改内容换名 / 已移除项与旧文件清理 | `tests/harness/harness.test.js`、`tests/launcher.test.js`、IT-09 |
 | patch 本地不可读 → VALIDATION 快败；scp 失败 → 整体快败 | `tests/harness/harness.test.js`（scp-fail） |
 | ssh 统一参数、`sh -c <shq(body)>` 双层包装 | `tests/lib/ssh.test.js`、`tests/lib/shq.test.js` |
 | ssh 超时 TERM→2s→KILL 强杀链 | `tests/lib/ssh.test.js`、`tests/harness/harness.test.js`（conn-timeout） |
 | 每主机串行队列（串行 / 前序失败不阻断 / 跨主机并行 / 队列超时） | `tests/lib/ssh.test.js` |
+
+## 2.1 本机 transport 与 harness 全链
+
+| 分支 / 场景 | 覆盖 |
+|---|---|
+| `localExec` argv 为可覆盖前缀 + `-c` + 原始协议正文；ExecResult、2 MiB 留尾、timeout / AbortSignal 的 TERM→KILL 语义与 ssh 一致，本机失败归 `LOCAL_TIMEOUT / LOCAL_EXEC_FAILED` | `tests/lib/ssh.test.js`（argv / 结果形状 / 输出封顶 / timeout / abort）、`tests/launcher.test.js`（与 ssh 分支逐字对照五类协议模板） |
+| `localCopy` 目标只许在真实 HOME 的 `.dsh_center_remote/` 内：拒绝绝对路径、`..`、NUL、中间目录 symlink；同目录临时文件提交，源失败/预中止不留正式文件，rename 后迟到 abort 不回滚 | `tests/lib/ssh.test.js`（正常复制 / 提交点 / 路径穿越 / symlink / 失败与中止） |
+| ssh / localExec / localCopy 共用在飞账本与关停闩：关停收敛、闩后不启动、`reopenSsh` 恢复；本机 copy/exec 错误不伪装成 SSH 错误 | `tests/lib/ssh.test.js`（`shutdownSsh`、`liveChildCount`、共享闩、`execFailure`） |
+| PROBE 与 LAUNCH/POLL/VERIFY/STOP/LOG 只按显式 `local` 分流；同一 proto builder 输出逐字一致，普通主机名不触发本机猜测 | `tests/prober.test.js`、`tests/launcher.test.js` |
+| 配置身份：旧 config 缺 `local` 按 false 迁移且不升版本；`local:true` 要求 `localPort:null`、全配置最多一条，HostView 顶层回传身份；本机不与 SSH Host 合并 | `tests/lib/validate.test.js`、`tests/store.test.js`、`tests/contract/schemas.test.js` |
+| `localExec` 以 `-c <raw proto body>` 进入本机垫片；与 fake-ssh 共用唯一协议 dispatcher，远端 HOME 仍为 `/root`、本机 HOME 为隔离临时目录 | `tests/harness/harness.test.js`（远端 `/root` 快照回归）、`tests/harness/local-flow.test.js` |
+| 本机 PROBE ready → LAUNCH/POLL/VERIFY → direct entry → `/api/health` 200 → HostView.mappedUrl 恒等映射 → STOP 后 ready 且进程/state 清空 | `tests/harness/local-flow.test.js`「本机全链」 |
+| 本机不 spawn fake-ssh `-N -L`、`tunnel._childPid() === null`；不调用映射端口池且 `config.localPort` 始终为 null | `tests/harness/local-flow.test.js`（transport 账本 + 端口池注入计数） |
+| 本机 patch 与用户源共用目录：`local:true` 永久跳过 cleanup；每轮都对既有初始目标/摘要候选核对真实文件与内容，相同才复用、未知内容则有界避让；跨轮 `[A,B] → [A]` 不覆盖已移除 B，PATCH_ARGS 仍指向 A 内容；空格 / Unicode / 前导 `-` 与 symlink 源均不进入 cleanup API | `tests/launcher.test.js`、`tests/harness/local-flow.test.js` |
+| 本机进程崩溃：HTTP 失败后巡检经同一 VERIFY 判死，清 direct entry 并 `running → crashed` | `tests/harness/local-flow.test.js`「本机巡检」 |
+| 本机 PID 复用：STOP 指纹不符返回 `KILL_REFUSED`，保留 state.web / direct entry / mappedUrl 与存活进程；后续巡检不退化为 no-tunnel | `tests/harness/local-flow.test.js`「本机停止」 |
+| 本机 STOP timeout：保留 running 与 direct entry / mappedUrl，后续巡检仍正常；再次 STOP 成功后才清 web / direct / mappedUrl | `tests/harness/local-flow.test.js`「STOP timeout」 |
 
 ## 3. 隧道与巡检分支（11 §5）
 
@@ -86,6 +103,7 @@
 | manager 重启：running 不重拉、只重建隧道；已运行则跳过 autoStart | `tests/integration/resilience.test.js`、IT-08 |
 | 关停撞上重连的一拍：复核回来后不再重建隧道，本进程名下无孤儿子进程 | `tests/integration/resilience.test.js`「关停正撞上重连的一拍」 |
 | 关停收走在飞的一次性 ssh（TERM→KILL），且落闩不再起新的 | `tests/lib/ssh.test.js`（`shutdownSsh` 两条） |
+| 本机 direct entry 恒等端口、无子进程、HTTP 直达实际 web 端口；崩溃巡检不走隧道重建 | `tests/tunnel.test.js`、`tests/harness/local-flow.test.js` |
 
 ## 4. 故障注入场景库（`tests/harness/scenarios.js` 15 个）
 
@@ -119,6 +137,9 @@
 | 请求体解析边界（空体 / 非法 JSON / 超限 → VALIDATION） | `tests/api.test.js` |
 | 错误码族与 HTTP 状态映射（VALIDATION/PHASE_CONFLICT/KILL_REFUSED/NOT_FOUND/SETUP_REQUIRED…） | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
 | setup 门禁：未初始化时白名单外全 409 | `tests/integration/setup.test.js`、IT-12（页面侧人工） |
+| `POST /api/hosts/local`：缺省 hostname / 自定义名的 201、单例与名称冲突 409、setup gate 拒绝；创建后 HostView 与 SSE 都带 `local:true` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/hub.test.js`、`tests/web/mount.test.js` |
+| 本机/SSH 身份不可经 host config patch 翻转；setup 只信内置 canonical 本机候选，重跑保留既有身份且拒绝伪装 SSH 主机 | `tests/api.test.js`、`tests/integration/setup.test.js`、`tests/cli.test.js` |
+| setup 模式注入一台本机候选，probe-all 同时覆盖 local 与 ssh；提交后最多一台 local，普通已初始化启动不凭空新增 | `tests/integration/setup.test.js`、`tests/setup-wizard.test.js` |
 
 ## 6. CLI 与守护（11 §6、02 §9）
 
@@ -134,6 +155,7 @@
 | `POST /api/manager/restart` 裸后台继任 | `tests/integration/daemon.test.js` |
 | launchd plist 快照（KeepAlive / DSHC_MODE / DSHC_HOME 注入） | `tests/integration/daemon.test.js`；真机接管与 kill -9 拉回见 IT-11 |
 | `dshc init` 向导脚本化（默认值 / 重问 / --force 预填 / 取消） | `tests/setup-wizard.test.js` |
+| `dshc init` 合并 SSH 与内置本机候选：冲突时稳定改名、`--force` 复用既有 local、探测携带 transport、落盘为 `local:true/localPort:null`，未选择则不创建 | `tests/cli.test.js`、`tests/setup-wizard.test.js`、`tests/integration/setup.test.js` |
 
 ## 7. 前端逻辑与边界（10 §7 的 20 条）
 
@@ -163,8 +185,14 @@
 | 19 新端口迁移超时 | `tests/web/setup-mount.test.js`、`tests/web/setup-wizard.test.js` |
 | 20 GET 首屏与 SSE 全量交错 | `tests/web/store.test.js`（mergeFetchedHosts） |
 | 首屏即 host 路由（书签 / 刷新 / `dshc open <host>`）：主机集合迟到也不改写地址；到齐后建 iframe | `tests/web/mount.test.js`（用 responder 把 `/api/hosts` 卡住造出迟到）、`scripts/ui-smoke.mjs` S10 |
-| 主机真从状态里消失（≠ 尚未同步）→ 仍回管理台 | `tests/web/mount.test.js`（snapshot 整体替换掉该主机） |
+| 主机真从状态里消失（≠ 尚未同步）→ 回 Hub | `tests/web/mount.test.js`（snapshot 整体替换掉该主机） |
 | 切主机时激活标签滚进可视区；同一路由重渲染不再滚（否则用户自己拖的位置会被拽回去） | `tests/web/mount.test.js`（垫片记 `scrollIntoView` 的账）、`scripts/ui-smoke.mjs` S11（真滚了多少像素） |
+| 路由反转：`#/hub` 默认起始页、`#/manage` 次级管理页、非法路由回 Hub；根入口只在 lastHost 仍可开且启用时恢复，品牌链接始终直达 Hub | `tests/web/router.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S1/S10 |
+| Hub：五种可开态卡片、不可用/禁用折叠、空态添加本机；ready 卡片复用统一动作，一步提交 start 并进入标签，不乐观改 phase | `tests/web/hub.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S4h |
+| 常驻标签与收纳：enabled 的 ready/starting/running/degraded/crashed 常驻；其余进入 `+N`，可探测或去管理；ready 标签一步拉起 | `tests/web/tabbar.test.js`、`tests/web/mount.test.js`、`tests/web/ui-live.test.js` |
+| 管理次级入口：顶栏 `⌂ 管理`、Hub 链接、标签菜单「在管理台查看」并展开抽屉；全量探测/重载只在 manage 页头 | `tests/web/mount.test.js`、`tests/web/ui-live.test.js` |
+| 标签菜单「在新窗口打开」只消费后端 `mappedUrl`，切断 opener；本机显示徽标且不暴露 SSH/orphan/reconnect 文案 | `tests/web/mount.test.js`、`tests/web/tabbar.test.js` |
+| iframe 首载：本机/远端 loading 在 `load` 后隐藏，切页 keep-alive 不重置；recreate/reload 重现 loading，后端 phase 遮罩优先且 starting 无 URL 时有可访问占位 | `tests/web/panes.test.js`、`tests/web/a11y.test.js`、`tests/web/ui-live.test.js`、`scripts/ui-smoke.mjs` S4h/S7b |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
 | 抽屉的 Esc 挂在 document 上（焦点在外也能关）、开着时后景 `inert`、关掉即放开 | `tests/web/a11y.test.js` |
 | 重渲染保焦：同控件还在→留在它上面；控件消失或被禁用→退到那一行；更新别人不掀我的焦点 | `tests/web/a11y.test.js`（垫片已如实建模「移除含焦点子树→焦点回 body」） |
@@ -187,9 +215,10 @@
 
 | 真浏览器检查 | 覆盖 |
 |---|---|
-| 首屏零控制台错误、零 4xx/5xx（含 favicon 声明可取） | `scripts/ui-smoke.mjs` S1；静态侧回归 `tests/integration/static.test.js` |
-| 徽章「颜色 + 文字 + 形状」三重标识 | S2 |
-| 1024 / 1440 宽不横向溢出（附截图） | S3 |
+| 根路由落 Hub，首屏零控制台错误、零 4xx/5xx（含 favicon 声明可取），Hub 不泄露运维写按钮 | `scripts/ui-smoke.mjs` S1；静态侧回归 `tests/integration/static.test.js` |
+| ready 标签按 fixture 常驻；徽章「颜色 + 文字 + 形状」三重标识 | S2 |
+| 1024 / 1440 宽不横向溢出（附截图） | S3-1024 / S3-1440 |
+| 420px 窄屏保持单行薄壳，固定管理入口可见，只有主机标签区横向滚动 | S3-420 |
 | Tab → 主机行 → Enter 开抽屉 → Esc 关且焦点归位 | S4（暴露过「抽屉一开即脏草稿」，回归见 `tests/web/drawer.test.js`） |
 | 抽屉即模态：25 次 Tab 一次都不落到遮罩后面的控件上，焦点在抽屉外按 Esc 照样能关（`inert` 是浏览器原生语义，垫片证不了；判据自带收尾，失败也不会把后面的场景带崩） | S4b |
 | 就地校验的时机：打字不吵、离开字段就报、改对即灭（`blur` 不冒泡——第一版把处理器挂在 form 上，垫片能过、真机收不到） | S4c |
@@ -204,10 +233,21 @@
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |
+| iframe keep-alive：切 Hub/manage/主机不换 iframe；degraded 往返不 reload、crashed 恢复只 reload 一次 | S7b |
 | `prefers-reduced-motion: reduce` 下动画真为 none | S8 |
 | 掉线横幅 + 禁写 + 不堆 `/api/events` 连接 | S9 |
 | 深链冷启动与刷新都落在主机页（S7 走页内改 hash，抓不到「首屏即 host 路由」那条时序） | S10 |
 | 标签栏溢出时激活标签仍在可视区内（视口收窄 + 长名主机撑出溢出，且先断言「不滚就够不着」防空转） | S11 |
+
+## 7.1 Demo、站点与截图
+
+| 交付面 | 覆盖 |
+|---|---|
+| 浏览器内假 manager 对齐产品路由、HostView.local、`POST /api/hosts/local`、单例约束、setup 身份保持与 SSE；状态机仍复用产品真身 | `tests/demo-contract.test.js`、`site/demo/demo-manager.js`、`site/demo/demo-routes.js` |
+| mock dsh web 提供独立侧栏/工作区轮廓、query 标识与输入保活钩子，供 iframe 的真实加载与 keep-alive 判据使用 | `tests/demo-contract.test.js`、`site/mock-dsh-web/index.html` |
+| `site:check` 真浏览器走 Hub 首屏 → ready 一步拉起 → iframe → manage → 返回保活 → 断联/恢复 → setup，并检查资源 2xx 与控制台 | `scripts/site-check.mjs`；纯等待语义由 `tests/site-tooling.test.js` 覆盖 |
+| `site:shots` 固定生成 Hub dashboard、manage drawer、真实 mock iframe、远端 degraded 与带本机候选的 setup；图片路径由双语 README 链接检查兜住 | `scripts/site-shots.mjs`、`scripts/site-check.mjs` |
+| 双语 README 的本地链接、图片与 `dshc` 命令表同步 | `npm run site:check` 的 docs 子检查、`tests/site-tooling.test.js` |
 
 ## 8. 架构约束（ENG-24）
 
@@ -301,10 +341,10 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---|---|---|
-| `src/lib/**` | 99.37% | ≥ 90% | 达标（新增 `semver.js` 100%、`bundle.js` 100%） |
-| `src/*.js` | 88.79% | ≥ 75% | 达标（新增 `updater.js` 95.91%；最低仍是 `cli.js` 74.24%） |
-| `src/web/`（不含 components） | 96.20% | ≥ 80% | 达标 |
-| `src/web/components/**` | 93.97% | 仅报告 | DOM 组件不设卡（最低 `iframe-pane.js` 86.28%） |
+| `src/lib/**` | 97.64% | ≥ 90% | 达标 |
+| `src/*.js` | 90.39% | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 96.77% | ≥ 80% | 达标 |
+| `src/web/components/**` | 97.09% | 仅报告 | DOM 组件不设卡（最低 `toast-region.js` 91.55%） |
 
 ## 10. 未覆盖行说明
 
