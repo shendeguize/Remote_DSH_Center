@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.0-rc.9] - 2026-08-23
+
 ### 变更
 
 - 「批量同步配置」现在严格绑定本次预览：应用必须带上预览凭证；预览后只要源主机或任一目标
@@ -480,7 +482,8 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.8...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.9...HEAD
+[0.2.0-rc.9]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.8...v0.2.0-rc.9
 [0.2.0-rc.8]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.7...v0.2.0-rc.8
 [0.2.0-rc.7]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...v0.2.0-rc.7
 [0.2.0-rc.6]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.5...v0.2.0-rc.6
