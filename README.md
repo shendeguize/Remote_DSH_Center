@@ -199,8 +199,11 @@ setup。本机条目要求 `localPort: null` 且全配置最多一个，实际�
 
 每台主机还可指定**启动目录**（`hosts.<主机>.workdir`）——目标 `dsh web` 的进程工作目录，
 也是未显式选择 Workspace/cwd 时的新会话回落目录与 `AGENTS.md` 加载位置。它不会自动登记成
-dsh Web 的 Workspace，也不会替换浏览器恢复的历史会话；首次使用时仍需在 dsh Web 中把该路径
-添加为 Workspace。留空（`null`）即目标账户家目录。只收绝对路径或 `~`、`~/…`
+dsh Web 的 Workspace，也不会替换浏览器恢复的历史会话。目录生效且实例连通后，可在主机详情的
+「dsh Workspace」中显式点击「登记启动目录为 Workspace」；Center 只通过本机映射调用 dsh Web
+官方 `workspace.create` API，重复登记是幂等的，不修改远端 dsh CLI 或 `HOME`。dsh Web 自带的
+目录选择器仍按其自身规则从目标账户 `HOME` 开始。留空（`null`）即目标账户家目录。只收绝对
+路径或 `~`、`~/…`
 （`~` 由目标账户展开）；目录进不去时拉起会明确失败，不会悄悄退回家目录。
 
 ```bash

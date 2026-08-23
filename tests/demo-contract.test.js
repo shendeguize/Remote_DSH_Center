@@ -27,10 +27,12 @@ import {
   posixCksum as demoPosixCksum,
 } from '../site/demo/demo-manager.js';
 import { DEGRADED_ROUTES, ROUTE_IDS, dispatch, matchRoute } from '../site/demo/demo-routes.js';
+import { createApiRouter } from '../site/demo/demo-shim.js';
 import {
   accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
   managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
   localHostCreateResponse, settingsReadResponse, settingsWriteResponse, syncConfigResponse,
+  workspaceRegisterResponse,
 } from './contract/schemas.js';
 
 /** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
@@ -104,6 +106,37 @@ const req = (manager, method, pathname, options = {}) => {
   });
 };
 
+const fetchReq = (manager, method, path, options = {}) => createApiRouter(
+  manager,
+  { latencyMs: 0 },
+)(`http://demo.test${path}`, {
+  method,
+  ...(Object.hasOwn(options, 'body') ? { body: options.body } : {}),
+});
+
+async function fetchJson(manager, method, path, options) {
+  const response = await fetchReq(manager, method, path, options);
+  return { response, body: await response.json() };
+}
+
+function assertDemoError(fn, { status, code, label, message }) {
+  const err = grab(fn);
+  assert.ok(err instanceof FakeApiError, label);
+  assert.equal(err.status, status, label);
+  assert.equal(err.code, code, label);
+  if (message) assert.match(err.message, message, label);
+  assertShape(
+    errorBody,
+    {
+      error: err.message,
+      code: err.code,
+      ...(err.detail ? { detail: err.detail } : {}),
+    },
+    `${label} 错误体`,
+  );
+  return err;
+}
+
 // ── 本机文案覆盖 ─────────────────────────────────────────────────────────
 
 test('setup 本机不可用态使用本机文案，远端文案保持原样', () => {
@@ -137,8 +170,8 @@ test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () =>
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 18 个真实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 18, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 19 个真实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 19, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -159,6 +192,7 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['GET', '/api/hosts/gpu-a100/log', 'log'],
     ['GET', '/api/hosts/gpu-a100/dsh-settings', 'dsh-settings-get'],
     ['PUT', '/api/hosts/gpu-a100/dsh-settings', 'dsh-settings-put'],
+    ['POST', '/api/hosts/gpu-a100/dsh-workspace', 'dsh-workspace'],
     ['PUT', '/api/hosts/gpu-a100/config', 'host-config-put'],
     ['POST', '/api/manager/restart', 'manager-restart'],
     ['POST', '/api/manager/shutdown', 'manager-shutdown'],
@@ -190,6 +224,12 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
   assert.equal(malformed.status, 400);
   assert.equal(malformed.code, 'VALIDATION');
   assert.match(malformed.message, /URL 编码/u);
+
+  assert.equal(
+    matchRoute('POST', '/api/hosts/gpu-a100/dsh-workspace/'),
+    null,
+    'Workspace 登记尾斜杠不得 normalize',
+  );
 });
 
 // ── 读端点：逐个过契约 ────────────────────────────────────────────────────
@@ -878,6 +918,334 @@ test('PUT dsh-settings 严格校验 UTF-8 字节上限、surrogate、CAS body �
   const missingHost = grab(() => req(manager, 'GET', '/api/hosts/not-present/dsh-settings'));
   assert.equal(missingHost.status, 404);
   assert.equal(missingHost.code, 'NOT_FOUND');
+});
+
+test('POST dsh-workspace：按当前 CWD 幂等登记，响应过契约且不污染可观察状态', () => {
+  const r = rig();
+  const route = '/api/hosts/gpu-a100/dsh-workspace';
+  const before = {
+    hosts: r.manager.hosts(),
+    config: r.manager.config(),
+    revision: r.manager.revision,
+    frames: structuredClone(r.frames),
+  };
+
+  assert.equal(r.manager.getHost('gpu-a100').web.cwd, '/root/work/train', 'root 的 ~ 必须展开到 /root');
+  const created = req(r.manager, 'POST', route, { body: {} });
+  assert.equal(created.status, 200);
+  assertShape(workspaceRegisterResponse, created.json, 'demo POST dsh-workspace created');
+  assert.deepEqual(created.json, {
+    created: true,
+    workspaceId: created.json.workspaceId,
+    title: 'train',
+    path: '/root/work/train',
+  });
+
+  const repeated = req(r.manager, 'POST', route, { body: {} });
+  assert.equal(repeated.status, 200);
+  assertShape(workspaceRegisterResponse, repeated.json, 'demo POST dsh-workspace repeated');
+  assert.deepEqual(repeated.json, {
+    ...created.json,
+    created: false,
+  }, '同一当前 CWD 必须返回稳定的 id/title/path');
+
+  assert.deepEqual(r.manager.hosts(), before.hosts, '登记不得改变 HostView');
+  assert.deepEqual(r.manager.config(), before.config, '登记不得改变 config');
+  assert.equal(r.manager.revision, before.revision, '登记不得改变 revision');
+  assert.deepEqual(r.frames, before.frames, '登记不得产生 SSE 或日志帧');
+  const visibleState = JSON.stringify({
+    hosts: r.manager.hosts(),
+    config: r.manager.config(),
+    frames: r.frames,
+  });
+  assert.equal(visibleState.includes(created.json.workspaceId), false, '私有 registry 不得泄漏到状态面');
+});
+
+test('POST dsh-workspace fetch shim：setup/query/host/body 按生产顺序校验且隐藏 JSON 解析细节', async () => {
+  const gated = rig({ setupCompleted: false });
+  const setupMalformed = await fetchJson(
+    gated.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace',
+    { body: '{not-json' },
+  );
+  assert.equal(setupMalformed.response.status, 409);
+  assert.equal(setupMalformed.body.code, 'SETUP_REQUIRED');
+
+  const active = rig();
+  const queryBadHost = await fetchJson(
+    active.manager,
+    'POST',
+    '/api/hosts/%/dsh-workspace?path=attack',
+    { body: '{not-json' },
+  );
+  assert.equal(queryBadHost.response.status, 400);
+  assert.equal(queryBadHost.body.code, 'VALIDATION');
+  assert.match(queryBadHost.body.error, /query/u);
+  assert.doesNotMatch(queryBadHost.body.error, /URL 编码|SyntaxError|JSON\.parse/u);
+
+  const missingHost = await fetchJson(
+    active.manager,
+    'POST',
+    '/api/hosts/not-present/dsh-workspace',
+    { body: '{not-json' },
+  );
+  assert.equal(missingHost.response.status, 404);
+  assert.equal(missingHost.body.code, 'NOT_FOUND');
+
+  const malformed = await fetchJson(
+    active.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace',
+    { body: '{not-json' },
+  );
+  assert.equal(malformed.response.status, 400);
+  assert.equal(malformed.body.code, 'VALIDATION');
+  assert.doesNotMatch(malformed.body.error, /SyntaxError|JSON\.parse|position \d+/u);
+
+  const trailing = await fetchJson(
+    gated.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace/?path=attack',
+    { body: '{not-json' },
+  );
+  assert.equal(trailing.response.status, 404);
+  assert.equal(trailing.body.code, 'NOT_FOUND');
+});
+
+test('POST dsh-workspace：严格拒绝请求路径注入并保持 host/body 校验优先级', () => {
+  const r = rig();
+  const route = '/api/hosts/gpu-a100/dsh-workspace';
+  const before = {
+    hosts: r.manager.hosts(),
+    config: r.manager.config(),
+    revision: r.manager.revision,
+    frames: structuredClone(r.frames),
+  };
+
+  for (const [body, label] of [
+    [undefined, '缺少 body'],
+    [null, 'null body'],
+    [[], '数组 body'],
+    [{ path: '/tmp/attack' }, 'path 注入'],
+    [{ workdir: '/tmp/attack' }, 'workdir 注入'],
+    [{ extra: true }, '未知字段'],
+  ]) {
+    assertDemoError(
+      () => req(r.manager, 'POST', route, { body }),
+      { status: 400, code: 'VALIDATION', label },
+    );
+  }
+
+  assertDemoError(
+    () => req(r.manager, 'POST', '/api/hosts/not-present/dsh-workspace', {
+      body: { path: '/tmp/attack' },
+    }),
+    {
+      status: 404,
+      code: 'NOT_FOUND',
+      label: '未知主机优先于 body 校验',
+    },
+  );
+  assertDemoError(
+    () => req(r.manager, 'POST', route, {
+      query: 'path=%2Ftmp%2Fattack',
+      body: {},
+    }),
+    {
+      status: 400,
+      code: 'VALIDATION',
+      label: 'query 注入',
+      message: /query/u,
+    },
+  );
+  assertDemoError(
+    () => req(r.manager, 'POST', `${route}/`, { body: {} }),
+    {
+      status: 404,
+      code: 'NOT_FOUND',
+      label: '尾斜杠',
+    },
+  );
+  assertDemoError(
+    () => req(r.manager, 'POST', '/api/hosts/%/dsh-workspace', { body: {} }),
+    {
+      status: 400,
+      code: 'VALIDATION',
+      label: '非法 host URL 编码',
+      message: /URL 编码/u,
+    },
+  );
+
+  assert.deepEqual(r.manager.hosts(), before.hosts);
+  assert.deepEqual(r.manager.config(), before.config);
+  assert.equal(r.manager.revision, before.revision);
+  assert.deepEqual(r.frames, before.frames);
+});
+
+test('POST dsh-workspace：要求运行态、已配置且已应用的 workdir 与绝对 CWD', async () => {
+  const wrongPhase = rig();
+  assertDemoError(
+    () => req(wrongPhase.manager, 'POST', '/api/hosts/gpu-4090-daily/dsh-workspace', { body: {} }),
+    {
+      status: 409,
+      code: 'PHASE_CONFLICT',
+      label: '非运行态',
+      message: /running\/degraded/u,
+    },
+  );
+
+  const noWorkdir = rig();
+  noWorkdir.manager.saveHostConfig('gpu-a100', { workdir: null });
+  assertDemoError(
+    () => req(noWorkdir.manager, 'POST', '/api/hosts/gpu-a100/dsh-workspace', { body: {} }),
+    {
+      status: 400,
+      code: 'WORKSPACE_WORKDIR_REQUIRED',
+      label: '未配置 workdir',
+      message: /配置启动目录/u,
+    },
+  );
+
+  const pending = rig();
+  pending.manager.saveHostConfig('gpu-a100', { workdir: '/root/work/next' });
+  assertDemoError(
+    () => req(pending.manager, 'POST', '/api/hosts/gpu-a100/dsh-workspace', { body: {} }),
+    {
+      status: 409,
+      code: 'PHASE_CONFLICT',
+      label: 'workdir 尚未应用',
+      message: /尚未应用.*重启/u,
+    },
+  );
+
+  for (const [workdir, status, code, label] of [
+    ['', 409, 'WORKSPACE_CWD_UNAVAILABLE', 'CWD 不可用'],
+    ['relative/project', 422, 'WORKSPACE_INVALID_PATH', 'CWD 非绝对路径'],
+  ]) {
+    const current = rig();
+    req(current.manager, 'POST', '/api/hosts/gpu-a100/stop');
+    await current.settle();
+    current.manager.saveHostConfig('gpu-a100', { workdir });
+    req(current.manager, 'POST', '/api/hosts/gpu-a100/start');
+    await current.settle();
+    assertDemoError(
+      () => req(current.manager, 'POST', '/api/hosts/gpu-a100/dsh-workspace', { body: {} }),
+      { status, code, label },
+    );
+  }
+
+  const canonical = rig();
+  req(canonical.manager, 'POST', '/api/hosts/gpu-a100/stop');
+  await canonical.settle();
+  canonical.manager.saveHostConfig('gpu-a100', { workdir: '/root/work/./train/../train/' });
+  req(canonical.manager, 'POST', '/api/hosts/gpu-a100/start');
+  await canonical.settle();
+  const normalized = req(
+    canonical.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace',
+    { body: {} },
+  ).json;
+  assert.equal(normalized.path, '/root/work/train');
+  assert.equal(normalized.title, 'train');
+
+  req(canonical.manager, 'POST', '/api/hosts/gpu-a100/stop');
+  await canonical.settle();
+  canonical.manager.saveHostConfig('gpu-a100', { workdir: '/root/work/train' });
+  req(canonical.manager, 'POST', '/api/hosts/gpu-a100/start');
+  await canonical.settle();
+  const sameCanonicalCwd = req(
+    canonical.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace',
+    { body: {} },
+  ).json;
+  assert.equal(sameCanonicalCwd.created, false);
+  assert.equal(sameCanonicalCwd.workspaceId, normalized.workspaceId);
+});
+
+test('POST dsh-workspace fetch shim：同路径按主机隔离，reset 清空 registry', async () => {
+  const r = rig();
+  r.manager.saveHostConfig('gpu-4090-daily', { workdir: '/root/work/train' });
+  r.manager.startHost('gpu-4090-daily');
+  await r.settle();
+
+  const aRoute = '/api/hosts/gpu-a100/dsh-workspace';
+  const bRoute = '/api/hosts/gpu-4090-daily/dsh-workspace';
+  const firstA = await fetchJson(r.manager, 'POST', aRoute, { body: '{}' });
+  const firstB = await fetchJson(r.manager, 'POST', bRoute, { body: '{}' });
+  assert.equal(firstA.response.status, 200);
+  assert.equal(firstB.response.status, 200);
+  assert.equal(firstA.body.created, true);
+  assert.equal(firstB.body.created, true);
+  assert.equal(firstA.body.path, '/root/work/train');
+  assert.equal(firstB.body.path, firstA.body.path);
+  assert.notEqual(firstB.body.workspaceId, firstA.body.workspaceId);
+
+  const repeatedA = await fetchJson(r.manager, 'POST', aRoute, { body: '{}' });
+  const repeatedB = await fetchJson(r.manager, 'POST', bRoute, { body: '{}' });
+  assert.equal(repeatedA.body.created, false);
+  assert.equal(repeatedB.body.created, false);
+  assert.equal(repeatedA.body.workspaceId, firstA.body.workspaceId);
+  assert.equal(repeatedB.body.workspaceId, firstB.body.workspaceId);
+
+  r.manager.reset();
+  const afterReset = await fetchJson(r.manager, 'POST', aRoute, { body: '{}' });
+  assertShape(workspaceRegisterResponse, afterReset.body, 'demo POST dsh-workspace after reset');
+  assert.equal(afterReset.body.created, true);
+  assert.equal(afterReset.body.path, firstA.body.path);
+  assert.notEqual(afterReset.body.workspaceId, firstA.body.workspaceId);
+});
+
+test('POST dsh-workspace：根目录沿用上游空 title', async () => {
+  const r = rig();
+  r.manager.stopHost('gpu-a100');
+  await r.settle();
+  r.manager.saveHostConfig('gpu-a100', { workdir: '/' });
+  r.manager.startHost('gpu-a100');
+  await r.settle();
+
+  const result = await fetchJson(
+    r.manager,
+    'POST',
+    '/api/hosts/gpu-a100/dsh-workspace',
+    { body: '{}' },
+  );
+  assert.equal(result.response.status, 200);
+  assertShape(workspaceRegisterResponse, result.body, 'demo root Workspace');
+  assert.equal(result.body.path, '/');
+  assert.equal(result.body.title, '');
+});
+
+test('POST dsh-workspace：setup gate 先于 query、host decode 与 body，尾斜杠仍为 404', () => {
+  const { manager } = rig({ setupCompleted: false });
+  for (const [pathname, options, label] of [
+    ['/api/hosts/gpu-a100/dsh-workspace', { query: 'path=attack', body: { path: '/tmp/attack' } }, 'query/body'],
+    ['/api/hosts/%/dsh-workspace', { body: { path: '/tmp/attack' } }, 'host decode'],
+    ['/api/hosts/not-present/dsh-workspace', { body: { path: '/tmp/attack' } }, 'host/body'],
+  ]) {
+    assertDemoError(
+      () => req(manager, 'POST', pathname, options),
+      {
+        status: 409,
+        code: 'SETUP_REQUIRED',
+        label: `setup gate ${label}`,
+      },
+    );
+  }
+
+  assertDemoError(
+    () => req(manager, 'POST', '/api/hosts/gpu-a100/dsh-workspace/', {
+      query: 'path=attack',
+      body: { path: '/tmp/attack' },
+    }),
+    {
+      status: 404,
+      code: 'NOT_FOUND',
+      label: 'setup 下尾斜杠不匹配生产路由',
+    },
+  );
 });
 
 test('PUT /api/hosts/:name/config：回传 HostView，且拒收 localPort 与未知键', () => {

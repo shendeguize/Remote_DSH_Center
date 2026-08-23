@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { validate } from '../../src/lib/validate.js';
 import {
   accepted, assertSseStream, errorBody, hostView, managerInfo, operationDone,
+  workspaceRegisterResponse,
 } from './schemas.js';
 
 const HOST_VIEW = {
@@ -135,6 +136,41 @@ test('202 受理体：accepted 必须为 true，operationId 必须是 uuid v4 �
   assert.equal(validate(accepted, { accepted: true, operationId: crypto.randomUUID(), host: null }).ok, true);
   assert.equal(validate(accepted, { accepted: false, operationId: crypto.randomUUID(), host: null }).ok, false);
   assert.equal(validate(accepted, { accepted: true, operationId: 'not-a-uuid', host: null }).ok, false);
+});
+
+test('Workspace 登记响应只接受最小 Center 输出，并允许根路径空标题', () => {
+  const created = {
+    created: true,
+    workspaceId: 'workspace-1',
+    title: 'proj',
+    path: '/root/proj',
+  };
+  assert.deepEqual(validate(workspaceRegisterResponse, created), { ok: true, errors: [] });
+  assert.equal(validate(workspaceRegisterResponse, { ...created, created: false }).ok, true);
+  assert.deepEqual(
+    validate(workspaceRegisterResponse, { ...created, title: '', path: '/' }),
+    { ok: true, errors: [] },
+    'dsh rc.8 对根路径返回空 title，Center 必须原样消费',
+  );
+
+  const withUnknown = { ...created, sessionIds: [] };
+  const unknownResult = validate(workspaceRegisterResponse, withUnknown);
+  assert.equal(unknownResult.ok, false);
+  assert.ok(unknownResult.errors.some((error) => error.includes('sessionIds: unknown key')));
+
+  for (const badPath of ['root/proj', './proj', 'C:\\proj', '/root/\0proj']) {
+    assert.equal(
+      validate(workspaceRegisterResponse, { ...created, path: badPath }).ok,
+      false,
+      `应拒绝路径 ${JSON.stringify(badPath)}`,
+    );
+  }
+  assert.equal(
+    validate(workspaceRegisterResponse, { ...created, workspaceId: '' }).ok,
+    false,
+    'workspaceId 不得为空',
+  );
+  assert.equal(validate(workspaceRegisterResponse, { ...created, title: null }).ok, false);
 });
 
 test('时间戳必须是 ISO-8601 UTC 毫秒形态', () => {

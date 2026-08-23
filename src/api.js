@@ -16,12 +16,14 @@ import {
   createConfigSyncPreview,
   requireConfigSyncPreview,
 } from './config-sync.js';
+import { registerDshWorkspace } from './dsh-workspace.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import {
   assertValid,
   defaultsPatchSchema,
   dshSettingsPutSchema,
+  dshWorkspaceCreateSchema,
   hostConfigPatchSchema,
   localHostCreateSchema,
   setupBodySchema,
@@ -39,6 +41,7 @@ import * as tunnel from './tunnel.js';
 
 const MAX_BODY_BYTES = 1_048_576;
 const SETTINGS_MAX_BODY_BYTES = 6 * SETTINGS_MAX_BYTES + 4096;
+const DSH_WORKSPACE_MAX_BODY_BYTES = 256;
 /**
  * 超限之后还愿意替对面读完的上限（issue #89）。
  * 超一点点多半是「值填大了」，读完再回 400，对面能看到那句人话；
@@ -107,6 +110,7 @@ function readJsonBody(req, {
   fatalUtf8 = false,
   overLimitCode = 'VALIDATION',
   redactParseError = false,
+  requireBody = false,
 } = {}) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -148,7 +152,13 @@ function readJsonBody(req, {
         return;
       }
       text = text.trim();
-      if (text === '') return resolve({});
+      if (text === '') {
+        if (requireBody) {
+          reject(new DshError('VALIDATION', '请求体必须是空 JSON 对象 {}'));
+          return;
+        }
+        return resolve({});
+      }
       try {
         const parsed = JSON.parse(text);
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -513,6 +523,40 @@ export function createHandler({ managerCtl }) {
       sendJson(res, 200, result);
     }],
 
+    ['POST', /^\/api\/hosts\/([^/]+)\/dsh-workspace$/, async (req, res, [name], url) => {
+      rejectQuery(req, url);
+      const view = requireHost(decodeSettingsHost(name));
+      const body = await readJsonBody(req, {
+        maxBytes: DSH_WORKSPACE_MAX_BODY_BYTES,
+        fatalUtf8: true,
+        redactParseError: true,
+        requireBody: true,
+      });
+      assertValid(dshWorkspaceCreateSchema, body, 'Workspace 登记请求体必须是空 JSON 对象');
+
+      const controller = new AbortController();
+      const abortRequest = () => controller.abort();
+      const abortResponse = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      req.once('aborted', abortRequest);
+      res.once('close', abortResponse);
+      try {
+        const result = await registerDshWorkspace(view.name, {
+          resolveView: store.getHostView,
+          fetchImpl: globalThis.fetch,
+          signal: controller.signal,
+        });
+        if (!res.destroyed) sendJson(res, 200, result);
+      } catch (error) {
+        if (controller.signal.aborted && (req.aborted || res.destroyed)) return;
+        throw error;
+      } finally {
+        req.off('aborted', abortRequest);
+        res.off('close', abortResponse);
+      }
+    }],
+
     ['PUT', /^\/api\/hosts\/([^/]+)\/config$/, async (req, res, [name]) => {
       const view = requireHost(decodeURIComponent(name));
       const body = await readJsonBody(req);
@@ -677,4 +721,5 @@ export {
   SETUP_ALLOWED,
   MAX_BODY_BYTES,
   SETTINGS_MAX_BODY_BYTES,
+  DSH_WORKSPACE_MAX_BODY_BYTES,
 };

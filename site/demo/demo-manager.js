@@ -332,6 +332,24 @@ function validHostName(value) {
     && !value.startsWith('-');
 }
 
+function isAbsolutePath(value) {
+  return typeof value === 'string' && value.startsWith('/') && !value.includes('\0');
+}
+
+function canonicalWorkspacePath(value) {
+  const parts = [];
+  for (const part of value.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
+function workspaceTitle(path) {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
 function assertSyncRequest(request) {
   if (request === null || typeof request !== 'object' || Array.isArray(request)) {
     throw new FakeApiError(400, 'VALIDATION', '批量配置同步请求体须为对象');
@@ -391,6 +409,8 @@ export function createFakeManager({
   const meta = new Map();
   /** settings 正文只驻留在此私有 Map，不进入 HostView/config/SSE。 */
   const settingsFiles = new Map();
+  /** 每台主机的 dsh storage 独立；Workspace 在主机内按当前实测 CWD 幂等登记。 */
+  const dshWorkspaces = new Map();
   const pendingTimers = new Set();
 
   let revision = 0;
@@ -528,6 +548,11 @@ export function createFakeManager({
   function attachRunning(host, seed, { ageMs = 0 } = {}) {
     const localPort = host.local ? host.effectiveRemotePort : allocateLocalPort(host.name);
     const remotePort = host.effectiveRemotePort;
+    const home = host.local
+      ? '/Users/demo'
+      : host.sshInfo.user === 'root'
+        ? '/root'
+        : `/home/${host.sshInfo.user}`;
     host.web = {
       pid: seed.pid ?? (nextPid += 1),
       port: remotePort,
@@ -537,7 +562,7 @@ export function createFakeManager({
       startedAt: iso(now() - ageMs),
       workdir: host.config.workdir,
       cwd: host.config.workdir
-        ? host.config.workdir.replace(/^~/, host.local ? '/Users/demo' : `/home/${host.sshInfo.user}`)
+        ? host.config.workdir.replace(/^~/, home)
         : null,
     };
     host.tunnel = { localPort, connected: true, reconnectAttempt: 0, suspendedReason: null };
@@ -587,6 +612,7 @@ export function createFakeManager({
     hosts.clear();
     meta.clear();
     settingsFiles.clear();
+    dshWorkspaces.clear();
     logs = [];
     revision = 0;
     previewSessionSalt = randomBytes(32);
@@ -1035,6 +1061,67 @@ export function createFakeManager({
     };
   }
 
+  function registerDshWorkspace(name) {
+    gate();
+    const host = need(name);
+    if (!['running', 'degraded'].includes(host.phase)) {
+      throw new FakeApiError(
+        409,
+        'PHASE_CONFLICT',
+        '登记 dsh Workspace 要求主机处于 running/degraded',
+      );
+    }
+
+    const configuredWorkdir = host.config?.workdir ?? null;
+    if (configuredWorkdir === null) {
+      throw new FakeApiError(
+        400,
+        'WORKSPACE_WORKDIR_REQUIRED',
+        '请先为主机配置启动目录并重启 dsh web，再登记 Workspace',
+      );
+    }
+    if (host.web?.workdir !== configuredWorkdir) {
+      throw new FakeApiError(
+        409,
+        'PHASE_CONFLICT',
+        '启动目录尚未应用到当前实例，请重启此主机的 dsh web 后再登记',
+      );
+    }
+
+    const cwd = host.web?.cwd;
+    if (cwd === null || cwd === undefined || cwd === '') {
+      throw new FakeApiError(
+        409,
+        'WORKSPACE_CWD_UNAVAILABLE',
+        '当前 dsh web 的实际工作目录不可用，请重启后再试',
+      );
+    }
+    if (!isAbsolutePath(cwd)) {
+      throw new FakeApiError(
+        422,
+        'WORKSPACE_INVALID_PATH',
+        '当前 dsh web 返回的工作目录不是绝对路径，无法登记',
+      );
+    }
+
+    const path = canonicalWorkspacePath(cwd);
+    let hostWorkspaces = dshWorkspaces.get(name);
+    if (!hostWorkspaces) {
+      hostWorkspaces = new Map();
+      dshWorkspaces.set(name, hostWorkspaces);
+    }
+    const existing = hostWorkspaces.get(path);
+    if (existing) return { created: false, ...existing };
+
+    const workspace = {
+      workspaceId: uuid(),
+      title: workspaceTitle(path),
+      path,
+    };
+    hostWorkspaces.set(path, workspace);
+    return { created: true, ...workspace };
+  }
+
   const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject']);
 
   function saveHostConfig(name, patch) {
@@ -1194,6 +1281,7 @@ export function createFakeManager({
     hosts: () => ({ revision, hosts: listHosts() }),
     config: () => clone(config),
     getHost: (name) => (hosts.has(name) ? clone(hosts.get(name)) : null),
+    requireHost: (name) => clone(need(name)),
     // 长动作
     probeAll,
     probeHost,
@@ -1205,6 +1293,7 @@ export function createFakeManager({
     hostLog,
     readDshSettings,
     writeDshSettings,
+    registerDshWorkspace,
     saveHostConfig,
     saveDefaults,
     reload,

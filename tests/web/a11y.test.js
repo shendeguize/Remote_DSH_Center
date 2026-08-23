@@ -173,6 +173,26 @@ test('键盘链路：表格行回车进主机 → Esc 关抽屉 → 焦点回到
   assert.equal(dom.document.activeElement, row, '焦点回到触发它的行');
 });
 
+test('抽屉注入配置内的 dsh Workspace 使用 h4 子标题层级', async (t) => {
+  const { dom } = await mount(t, { hosts: [running('gpu-1')] });
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const injectionHeading = drawer.querySelectorAll('h3')
+    .find((node) => node.textContent === '注入配置');
+  const workspaceHeading = drawer.querySelectorAll('h4')
+    .find((node) => node.textContent === 'dsh Workspace');
+
+  assert.ok(injectionHeading, '注入配置应保留 h3 区段标题');
+  assert.ok(workspaceHeading, '嵌套的 dsh Workspace 应使用 h4');
+  assert.equal(
+    workspaceHeading.closest('.config-section').parentNode,
+    injectionHeading.closest('.config-section'),
+    'dsh Workspace 必须是注入配置的语义子区，不能伪装成同级 h3',
+  );
+});
+
 /**
  * 回归（issue #28）：抽屉的 Esc 原来只绑在抽屉元素上，焦点一 Tab 出去就收不到——
  * 真 Chrome 里 25 次 Tab 有 17 次落在抽屉外，于是纯键盘用户关不掉它。

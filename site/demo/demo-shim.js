@@ -9,7 +9,6 @@
  * manager 自身的 restart/shutdown 在浏览器里没有对应物，降级为明确的 409 提示。
  */
 
-import * as machine from './lib/machine.js';
 import { createFakeManager, DEFAULT_TIMING, FakeApiError } from './demo-manager.js';
 import { dispatch } from './demo-routes.js';
 import { mountDemoBar } from './demo-bar.js';
@@ -19,6 +18,7 @@ const LATENCY_MS = 90;
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
+const WORKSPACE_REQUEST_PATH_RE = /^\/api\/hosts\/[^/]+\/dsh-workspace(?:\/+)?$/u;
 
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
@@ -33,7 +33,10 @@ function errorResponse(err) {
 }
 
 /** fetch 替身：解析 URL → 交给路由表 → 把结果包成 Response。 */
-function createApiRouter(manager) {
+export function createApiRouter(manager, {
+  latencyMs = LATENCY_MS,
+  baseUrl = globalThis.location?.href ?? 'http://127.0.0.1/',
+} = {}) {
   return async function route(input, init = {}) {
     const method = (init.method ?? 'GET').toUpperCase();
     const requestUrl = String(typeof input === 'string' ? input : input.url);
@@ -41,10 +44,14 @@ function createApiRouter(manager) {
     const fragmentDelimiter = requestUrl.indexOf('#');
     const hasQueryDelimiter = queryDelimiter !== -1
       && (fragmentDelimiter === -1 || queryDelimiter < fragmentDelimiter);
-    const url = new URL(requestUrl, globalThis.location.href);
-    const body = init.body === undefined || init.body === null ? undefined : JSON.parse(init.body);
+    const url = new URL(requestUrl, baseUrl);
+    const workspaceRequest = method === 'POST' && WORKSPACE_REQUEST_PATH_RE.test(url.pathname);
+    const rawBody = workspaceRequest && init.body !== null ? init.body : undefined;
+    const body = workspaceRequest || init.body === undefined || init.body === null
+      ? undefined
+      : JSON.parse(init.body);
 
-    await sleep(LATENCY_MS);
+    await sleep(latencyMs);
 
     try {
       const res = dispatch(manager, {
@@ -53,6 +60,7 @@ function createApiRouter(manager) {
         query: url.searchParams,
         hasQueryDelimiter,
         body,
+        rawBody,
       });
       if (res.text !== undefined) return new Response(res.text, { status: res.status, headers: TEXT_HEADERS });
       return jsonResponse(res.json, res.status);
@@ -134,10 +142,11 @@ export async function installDemo({ win = globalThis } = {}) {
     }
     : DEFAULT_TIMING;
 
+  const machine = await import('./lib/machine.js');
   const manager = createFakeManager({ machine, timing, setupCompleted: !wantSetup });
 
   const originalFetch = win.fetch.bind(win);
-  const apiRouter = createApiRouter(manager);
+  const apiRouter = createApiRouter(manager, { baseUrl: win.location.href });
   win.fetch = (input, init) => {
     const href = typeof input === 'string' ? input : input?.url ?? '';
     let pathname;

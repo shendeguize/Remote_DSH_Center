@@ -1292,6 +1292,236 @@ test('settings 解析脱敏不改变其他 API 的既有 PROTO_PARSE detail', as
   assert.equal(toast.detail, raw);
 });
 
+test('Workspace 登记：严格 POST 编码 URL/空对象，同步结算且区分新建与已有', async (t) => {
+  const replies = [
+    {
+      created: true,
+      workspaceId: 'workspace-new',
+      title: 'project',
+      path: '/srv/project',
+    },
+    {
+      created: false,
+      workspaceId: 'workspace-existing',
+      title: 'project',
+      path: '/srv/project',
+    },
+  ];
+  const h = harness(t, { responder: () => res(200, replies.shift()) });
+
+  const created = await h.actions.registerDshWorkspace('gpu/a b');
+  const existing = await h.actions.registerDshWorkspace('gpu/a b');
+
+  assert.deepEqual(h.calls, [
+    {
+      path: '/api/hosts/gpu%2Fa%20b/dsh-workspace',
+      method: 'POST',
+      body: {},
+    },
+    {
+      path: '/api/hosts/gpu%2Fa%20b/dsh-workspace',
+      method: 'POST',
+      body: {},
+    },
+  ]);
+  assert.equal(created.created, true);
+  assert.equal(existing.created, false);
+  assert.equal(h.store.isPending('workspace:register', 'gpu/a b'), false);
+  assert.deepEqual(
+    h.store.state.toasts.map((toast) => toast.summary),
+    [
+      'gpu/a b 已登记启动目录为 dsh Workspace',
+      'gpu/a b 的启动目录已是 dsh Workspace',
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(h.store.state.toasts), /\/srv\/project|workspace-new|workspace-existing/,
+    '全局 toast 不得携带响应 path/id，强制关闭后的迟到成功仍需安全');
+});
+
+test('Workspace 登记 pending 去重、canWrite 闸门与 store 超时契约', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = () => resolve(res(200, {
+      created: true,
+      workspaceId: 'workspace-1',
+      title: 'project',
+      path: '/srv/project',
+    }));
+  });
+  const h = harness(t, { responder: () => gate });
+
+  const request = h.actions.registerDshWorkspace('gpu-1');
+  assert.equal(h.store.isPending('workspace:register', 'gpu-1'), true);
+  assert.equal(await h.actions.registerDshWorkspace('gpu-1'), null, '同主机 pending 不得重复提交');
+  assert.equal(h.calls.length, 1);
+
+  release();
+  await request;
+  assert.equal(h.store.isPending('workspace:register', 'gpu-1'), false);
+
+  h.store.setConnection({ sse: 'reconnecting', everOpened: true });
+  const blocked = await h.actions.registerDshWorkspace('gpu-1');
+  assert.equal(blocked, null);
+  assert.equal(h.calls.length, 1, '断联时不得发第二个登记请求');
+  assert.match(h.store.state.toasts.at(-1).summary, /失联/);
+});
+
+test('Workspace 登记请求 20 秒超时会释放 pending，并只呈现固定安全错误', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const original = globalThis.fetch;
+  let aborted = false;
+  globalThis.fetch = async (path, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener('abort', () => {
+      aborted = true;
+      const error = new Error('unsafe timeout /private/workspace/path');
+      error.name = 'AbortError';
+      reject(error);
+    }, { once: true });
+  });
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  const store = createStore();
+  store.setConnection({ sse: 'open' });
+  const actions = createActions({ store, confirm: async () => true, navigate: () => {} });
+  const errors = [];
+  const request = actions.registerDshWorkspace('gpu-1', {
+    onError: (error) => errors.push(error),
+  });
+
+  assert.equal(store.isPending('workspace:register', 'gpu-1'), true);
+  t.mock.timers.tick(19_999);
+  assert.equal(aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(aborted, true);
+  assert.equal(await request, null);
+  assert.equal(store.isPending('workspace:register', 'gpu-1'), false);
+  assert.equal(errors[0].code, 'WORKSPACE_REGISTER_TIMEOUT');
+  assert.equal(errors[0].status, 0);
+  assert.equal(errors[0].summary, 'dsh Workspace 登记超时；可安全重试');
+  assert.equal(errors[0].detail, null);
+  assert.doesNotMatch(JSON.stringify({ errors, toasts: store.state.toasts }), /private|unsafe/);
+});
+
+test('Workspace API 错误只呈现 allowlist 固定文案，不泄露非 ok 或畸形响应', async (t) => {
+  const cases = [
+    {
+      name: 'busy',
+      response: res(409, {
+        error: 'unsafe busy error /private/server/path',
+        code: 'WORKSPACE_BUSY',
+        detail: 'unsafe busy detail',
+      }),
+      code: 'WORKSPACE_BUSY',
+      status: 409,
+      summary: '该主机已有 dsh Workspace 登记正在进行，请稍后重试',
+    },
+    {
+      name: 'workdir-required',
+      response: res(400, {
+        error: 'unsafe required error /private/server/path',
+        code: 'WORKSPACE_WORKDIR_REQUIRED',
+        detail: 'unsafe workdir detail',
+      }),
+      code: 'WORKSPACE_WORKDIR_REQUIRED',
+      status: 400,
+      summary: '请先配置启动目录并重启 dsh web 后再登记',
+    },
+    {
+      name: 'cwd-unavailable',
+      response: res(409, {
+        error: 'unsafe cwd error /private/server/path',
+        code: 'WORKSPACE_CWD_UNAVAILABLE',
+        detail: 'unsafe cwd detail',
+      }),
+      code: 'WORKSPACE_CWD_UNAVAILABLE',
+      status: 409,
+      summary: '当前 dsh web 的实际工作目录不可用，请重启后重试',
+    },
+    {
+      name: 'invalid-path',
+      response: res(422, {
+        error: 'unsafe path error /private/server/path',
+        code: 'WORKSPACE_INVALID_PATH',
+        detail: 'unsafe path detail',
+      }),
+      code: 'WORKSPACE_INVALID_PATH',
+      status: 422,
+      summary: '当前 dsh web 的实际工作目录不是绝对路径，无法登记',
+    },
+    {
+      name: 'register-failed',
+      response: res(502, {
+        error: 'unsafe workspace error /private/server/path',
+        code: 'WORKSPACE_REGISTER_FAILED',
+        detail: 'unsafe detail token=secret',
+      }),
+      code: 'WORKSPACE_REGISTER_FAILED',
+      status: 502,
+      summary: 'dsh Workspace 登记失败，请稍后重试',
+    },
+    {
+      name: 'timeout',
+      response: res(504, {
+        error: 'unsafe timeout error /private/server/path',
+        code: 'WORKSPACE_REGISTER_TIMEOUT',
+        detail: 'unsafe timeout detail',
+      }),
+      code: 'WORKSPACE_REGISTER_TIMEOUT',
+      status: 504,
+      summary: 'dsh Workspace 登记超时；可安全重试',
+    },
+    {
+      name: 'unknown',
+      response: res(500, {
+        error: 'unknown unsafe workspace error',
+        code: 'UNKNOWN_WORKSPACE_SECRET',
+        detail: '/private/unknown/path',
+      }),
+      code: 'INTERNAL',
+      status: 500,
+      summary: 'dsh Workspace 请求失败（HTTP 500）',
+    },
+    {
+      name: 'plain',
+      response: res(503, undefined, { text: 'plain unsafe /private/plain/path' }),
+      code: 'INTERNAL',
+      status: 503,
+      summary: 'dsh Workspace 请求失败（HTTP 503）',
+    },
+    {
+      name: 'parse',
+      response: res(200, undefined, { text: '{"path":"/private/malformed"' }),
+      code: 'PROTO_PARSE',
+      status: 200,
+      summary: 'dsh Workspace 响应无法解析，请重试',
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async (st) => {
+      const h = harness(st, { responder: () => item.response });
+      const errors = [];
+      const out = await h.actions.registerDshWorkspace('gpu-1', {
+        onError: (error) => errors.push(error),
+      });
+
+      assert.equal(out, null);
+      assert.equal(h.store.isPending('workspace:register', 'gpu-1'), false);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].code, item.code);
+      assert.equal(errors[0].status, item.status);
+      assert.equal(errors[0].summary, item.summary);
+      assert.equal(errors[0].detail, null);
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        /unsafe|secret|\/private|UNKNOWN_WORKSPACE_SECRET/,
+      );
+    });
+  }
+});
+
 test('打开主机走路由，不存在则提示', async (t) => {
   const h = harness(t, { responder: () => res(200, {}) });
   seed(h.store);

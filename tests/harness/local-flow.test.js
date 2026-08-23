@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { createHarness } from './index.js';
 import { newFactoryConfig, newHostConfig } from '../../src/defaults.js';
+import { registerDshWorkspace } from '../../src/dsh-workspace.js';
 import * as bus from '../../src/lib/bus.js';
 import * as ssh from '../../src/lib/ssh.js';
 import * as launcher from '../../src/launcher.js';
@@ -23,7 +24,7 @@ const FAST_WAIT = (ms) => new Promise((resolve) => {
   timer.unref?.();
 });
 
-function configFor(port) {
+function configFor(port, { workdir = null } = {}) {
   const config = newFactoryConfig();
   config.setupCompleted = true;
   config.defaults.remoteWebPort = port;
@@ -33,6 +34,7 @@ function configFor(port) {
     local: true,
     localPort: null,
     remoteWebPort: port,
+    workdir,
   };
   return config;
 }
@@ -48,11 +50,11 @@ async function freePort() {
   return port;
 }
 
-async function localFixture(t) {
+async function localFixture(t, opts = {}) {
   const port = await freePort();
   const harness = createHarness({
     local: LOCAL_HOST,
-    config: configFor(port),
+    config: configFor(port, opts),
   });
   const restore = harness.activate();
 
@@ -94,8 +96,9 @@ async function localFixture(t) {
   };
 }
 
-async function startLocal(t) {
-  const fixture = await localFixture(t);
+async function startLocal(t, opts = {}) {
+  const fixture = await localFixture(t, opts);
+  if (opts.faults) fixture.harness.faults(LOCAL_HOST, opts.faults);
   const probed = await probeHost(LOCAL_HOST);
   assert.equal(probed.phase, 'ready');
   assert.equal(store.getPhase(LOCAL_HOST), 'ready');
@@ -182,6 +185,34 @@ test('本机全链：probe → launch → direct HTTP/HostView → stop', async 
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { ok: true, label: LOCAL_HOST });
 
+  const describeRpcId = 'local-home-describe';
+  const described = await fetch(`${view.mappedUrl}api/host.describe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: describeRpcId,
+      method: 'host.describe',
+      payload: {},
+    }),
+  });
+  assert.equal(described.status, 200);
+  assert.deepEqual(await described.json(), {
+    type: 'server-response',
+    rpcId: describeRpcId,
+    result: {
+      ok: true,
+      value: { cwd: harness.localHomeDir },
+    },
+  }, 'workdir=null 时 fake host.describe 返回本机隔离 HOME');
+
+  const oversizedRpc = await fetch(`${view.mappedUrl}api/host.describe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'x'.repeat((64 * 1024) + 1),
+  });
+  assert.equal(oversizedRpc.status, 413, 'fake RPC 请求体必须有 64 KiB 上限');
+
   assert.equal(portPoolTouches(), 0, '本机启动完全跳过映射端口池');
   assert.equal(store.getConfig().hosts[LOCAL_HOST].localPort, null, 'config 不持久化实际 web 端口');
   const kinds = harness.transportCalls().map((call) => call.kind);
@@ -200,6 +231,58 @@ test('本机全链：probe → launch → direct HTTP/HostView → stop', async 
   assert.equal(ready.mappedUrl, null);
   assert.deepEqual(harness.liveProcesses(LOCAL_HOST), []);
   assert.equal(store.getConfig().hosts[LOCAL_HOST].localPort, null);
+  assertLocalTransportOnly(harness);
+});
+
+test('本机 Workspace 登记：Darwin 无 /proc 时经 host.describe 登记根路径', async (t) => {
+  const { harness, view } = await startLocal(t, {
+    workdir: '/',
+    faults: { noProcCwd: true },
+  });
+  assert.equal(view.config.workdir, '/');
+  assert.equal(view.web.workdir, '/');
+  assert.equal(view.web.cwd, null, '模拟 Darwin：VERIFY 无 /proc cwd，只保留 null');
+  assert.equal(tunnel.status(LOCAL_HOST).direct, true);
+  assert.equal(tunnel._childPid(LOCAL_HOST), null);
+
+  const requests = [];
+  const registered = await registerDshWorkspace(LOCAL_HOST, {
+    resolveView: store.getHostView,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, envelope: JSON.parse(init.body) });
+      return globalThis.fetch(url, init);
+    },
+  });
+
+  assert.deepEqual(
+    requests.map(({ url }) => url),
+    [
+      `${view.mappedUrl}api/host.describe`,
+      `${view.mappedUrl}api/workspace.create`,
+    ],
+    'CWD 回退与登记都必须复用本机 direct mapped URL',
+  );
+  assert.deepEqual(
+    requests.map(({ envelope }) => ({
+      method: envelope.method,
+      payload: envelope.payload,
+    })),
+    [
+      { method: 'host.describe', payload: {} },
+      { method: 'workspace.create', payload: { path: '/' } },
+    ],
+  );
+  assert.deepEqual(registered, {
+    created: true,
+    workspaceId: registered.workspaceId,
+    title: '',
+    path: '/',
+  });
+  assert.ok(registered.workspaceId);
+  assertLocalTransportOnly(harness);
+
+  await launcher.stop(LOCAL_HOST);
+  assert.equal(tunnel.status(LOCAL_HOST), null);
   assertLocalTransportOnly(harness);
 });
 

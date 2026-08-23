@@ -5,7 +5,7 @@
  * （tests/demo-contract.test.js）。它不碰 DOM、不碰全局，只做「解析 URL → 调引擎 →
  * 返回 {status, json|text}」，把 Response 的包装留给 demo-shim.js。
  *
- * 端点集合取自 13_api_schema.md §2/§3：18 个真实现，
+ * 端点集合取自 13_api_schema.md §2/§3：19 个真实现，
  * 外加 manager 自身的 restart/shutdown 两个降级提示（浏览器里没有进程可操作）。
  */
 
@@ -32,6 +32,7 @@ const TABLE = Object.freeze([
   ['GET', /^\/api\/hosts\/([^/]+)\/log$/, 'log'],
   ['GET', /^\/api\/hosts\/([^/]+)\/dsh-settings$/, 'dsh-settings-get'],
   ['PUT', /^\/api\/hosts\/([^/]+)\/dsh-settings$/, 'dsh-settings-put'],
+  ['POST', /^\/api\/hosts\/([^/]+)\/dsh-workspace$/, 'dsh-workspace'],
   ['PUT', /^\/api\/hosts\/([^/]+)\/config$/, 'host-config-put'],
 ]);
 
@@ -43,6 +44,8 @@ export const DEGRADED_ROUTES = Object.freeze(['manager-restart', 'manager-shutdo
 
 const SETTINGS_TRAILING_SLASH_RE = /^\/api\/hosts\/[^/]+\/dsh-settings\/+$/u;
 const SETTINGS_PATH_RE = /^\/api\/hosts\/[^/]+\/dsh-settings$/u;
+const WORKSPACE_TRAILING_SLASH_RE = /^\/api\/hosts\/[^/]+\/dsh-workspace\/+$/u;
+const WORKSPACE_PATH_RE = /^\/api\/hosts\/[^/]+\/dsh-workspace$/u;
 
 /**
  * @param {string} method
@@ -56,6 +59,7 @@ export function matchRoute(method, pathname) {
   ) {
     return null;
   }
+  if (method === 'POST' && WORKSPACE_TRAILING_SLASH_RE.test(pathname)) return null;
   const p = pathname.replace(/\/+$/, '') || '/';
   for (const [verb, re, route] of TABLE) {
     if (verb !== method) continue;
@@ -85,6 +89,33 @@ function rejectQuery(query, hasQueryDelimiter) {
   }
 }
 
+function assertEmptyWorkspaceBody(body) {
+  if (
+    body === null
+    || typeof body !== 'object'
+    || Array.isArray(body)
+    || Object.keys(body).length !== 0
+  ) {
+    throw new FakeApiError(
+      400,
+      'VALIDATION',
+      'Workspace 登记请求体必须是空 JSON 对象',
+    );
+  }
+}
+
+function parseWorkspaceBody(rawBody) {
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    throw new FakeApiError(
+      400,
+      'VALIDATION',
+      'Workspace 登记请求体不是合法 JSON',
+    );
+  }
+}
+
 /**
  * 派发一次请求。
  *
@@ -95,6 +126,7 @@ function rejectQuery(query, hasQueryDelimiter) {
  *   query?:URLSearchParams,
  *   hasQueryDelimiter?:boolean,
  *   body?:any,
+ *   rawBody?:any,
  * }} req
  * @returns {{status:number, json?:any, text?:string}}
  * @throws {FakeApiError} 由调用方翻成 §1.1 错误体
@@ -105,13 +137,20 @@ export function dispatch(manager, {
   query = new URLSearchParams(),
   hasQueryDelimiter = false,
   body = undefined,
+  rawBody = undefined,
 }) {
   if (
-    (method === 'GET' || method === 'PUT')
-    && SETTINGS_PATH_RE.test(pathname)
+    (
+      ((method === 'GET' || method === 'PUT') && SETTINGS_PATH_RE.test(pathname))
+      || (method === 'POST' && WORKSPACE_PATH_RE.test(pathname))
+    )
     && manager.managerInfo().setupGateActive
   ) {
     throw new FakeApiError(409, 'SETUP_REQUIRED', '首次配置尚未完成，该接口暂不可用');
+  }
+  if (method === 'POST' && WORKSPACE_PATH_RE.test(pathname)) {
+    // 与产品 handler 一致：query 在 host decode 与请求体读取之前拒绝。
+    rejectQuery(query, hasQueryDelimiter);
   }
   const hit = matchRoute(method, pathname);
   if (!hit) throw new FakeApiError(404, 'NOT_FOUND', `demo 未实现的端点：${method} ${pathname}`);
@@ -141,6 +180,12 @@ export function dispatch(manager, {
     case 'dsh-settings-put':
       rejectQuery(query, hasQueryDelimiter);
       return { status: 200, json: manager.writeDshSettings(hit.name, body) };
+    case 'dsh-workspace': {
+      const host = manager.requireHost(hit.name);
+      const requestBody = rawBody === undefined ? body : parseWorkspaceBody(rawBody);
+      assertEmptyWorkspaceBody(requestBody);
+      return { status: 200, json: manager.registerDshWorkspace(host.name) };
+    }
     case 'host-config-put': return { status: 200, json: manager.saveHostConfig(hit.name, body) };
     case 'defaults-put': return { status: 200, json: manager.saveDefaults(body ?? {}) };
     case 'reload': return { status: 200, json: manager.reload() };

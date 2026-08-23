@@ -34,7 +34,7 @@ export const V = {
       }
       for (const [key, schema] of Object.entries(shape)) {
         const child = path ? `${path}.${key}` : key;
-        if (!(key in value)) {
+        if (!Object.hasOwn(value, key)) {
           if (!optionalSet.has(key)) fail(errs, child, 'required');
           continue;
         }
@@ -307,6 +307,9 @@ export const localHostCreateSchema = V.obj(
   },
   { optional: ['name'] },
 );
+
+/** POST /api/hosts/:name/dsh-workspace：路径只取后端 HostView，正文必须是空对象。 */
+export const dshWorkspaceCreateSchema = V.obj({});
 
 /**
  * POST /api/hosts/sync-config：重复、源混入目标与存在性留给 config-sync 给人话。

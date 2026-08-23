@@ -239,7 +239,15 @@ function replyLaunch(name, body, { home }) {
     };
   });
 
-  const args = [FAKE_WEB, '--port', portTok, '--label', name];
+  const args = [
+    FAKE_WEB,
+    '--port',
+    portTok,
+    '--label',
+    name,
+    '--cwd',
+    workdir ?? home,
+  ];
   const owner = process.env.DSHC_HARNESS_OWNER_PID;
   if (owner) args.push('--owner-pid', owner);
   if (forceBindErr) args.push('--force-bind-error');

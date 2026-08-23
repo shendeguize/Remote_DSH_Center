@@ -230,10 +230,14 @@ from the configured range, fixed across restarts. A local host uses its actual w
 Each host may also set a **working directory** (`hosts.<host>.workdir`) — the process
 working directory of the target `dsh web`, the fallback for a new Session with no explicit
 Workspace/cwd, and where `AGENTS.md` is loaded from. It does not register that path as a dsh Web
-Workspace or replace a historical Session restored by the browser; add the path as a Workspace
-in dsh Web on first use. Empty (`null`) means the target account's home directory. Only absolute
-paths or `~`, `~/…` are accepted (`~` is expanded by that account); if the directory cannot be
-entered, the start fails loudly instead of silently falling back to home.
+Workspace or replace a historical Session restored by the browser. Once the directory has taken
+effect and the instance is connected, open the host drawer's **dsh Workspace** section and click
+**Register launch directory as Workspace**. Center calls dsh Web's official `workspace.create`
+API through the local mapping; repeated registration is idempotent and does not modify the remote
+dsh CLI or `HOME`. dsh Web's own directory picker still starts at the target account's `HOME`
+according to its upstream behavior. Empty (`null`) means that home directory. Only absolute paths
+or `~`, `~/…` are accepted (`~` is expanded by that account); if the directory cannot be entered,
+the start fails loudly instead of silently falling back to home.
 
 ```bash
 dshc config set hosts.gpu-1.workdir '~/projects/foo'   # empty string or null clears it back to home

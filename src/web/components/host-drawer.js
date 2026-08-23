@@ -24,7 +24,7 @@ import { HOST_WEB_RESTART_NOTICE } from '../actions.js';
 import { hostMappingSummary, hostPhaseMeta } from '../host-presentation.js';
 
 const LOG_LINES = 200;
-const REMOTE_CONFIG_NOTE = 'dsh web 的“打开配置文件”发生在目标主机；目标主机没有桌面环境时，请使用下方“dsh 配置文件”编辑器，无需通过 SSH。';
+const REMOTE_CONFIG_NOTE = 'dsh Web 在目标主机运行；没有桌面环境也不影响内嵌页面。需要编辑 settings.yaml 时可直接使用下方“dsh 配置文件”编辑器，无需通过 SSH。';
 const DRAFT_FIELDS = ['enabled', 'remoteWebPort', 'workdir', 'env', 'extraArgs', 'patches'];
 const SETTINGS_UNKNOWN_CODES = new Set([
   'SSH_TIMEOUT',
@@ -76,6 +76,65 @@ const LIVE_PHASES = ['running', 'degraded'];
 export function workdirPending(host) {
   if (!LIVE_PHASES.includes(host?.phase) || !host?.web) return false;
   return (host.web.workdir ?? null) !== (host.config?.workdir ?? null);
+}
+
+export function workspaceRegistrationState(host, {
+  canWrite = true,
+  pending = false,
+} = {}) {
+  if (pending) {
+    return { enabled: false, message: '正在登记启动目录…', tone: null };
+  }
+  const savedWorkdir = host?.config?.workdir ?? null;
+  if (savedWorkdir === null) {
+    return { enabled: false, message: '请先配置并保存启动目录。', tone: 'warn' };
+  }
+  if (!LIVE_PHASES.includes(host?.phase) || !host.web || !host.mappedUrl) {
+    return {
+      enabled: false,
+      message: 'dsh web 实例未连接；连接后才能登记 Workspace。',
+      tone: 'warn',
+    };
+  }
+  if (host.tunnel?.connected !== true) {
+    return {
+      enabled: false,
+      message: 'dsh web 隧道未连接；连接后才能登记 Workspace。',
+      tone: 'warn',
+    };
+  }
+  if ((host.web.workdir ?? null) !== savedWorkdir) {
+    return {
+      enabled: false,
+      message: '请重启 dsh web，使当前实例应用已保存的启动目录。',
+      tone: 'warn',
+    };
+  }
+  if (
+    host.web.cwd != null
+    && (typeof host.web.cwd !== 'string' || !host.web.cwd.startsWith('/'))
+  ) {
+    return {
+      enabled: false,
+      message: 'dsh web 实际 CWD 不是绝对路径，无法登记 Workspace。',
+      tone: 'warn',
+    };
+  }
+  if (!canWrite) {
+    return { enabled: false, message: 'manager 失联，登记已暂停。', tone: 'warn' };
+  }
+  if (host.web.cwd == null) {
+    return {
+      enabled: true,
+      message: '实际 CWD 尚未上报；登记时将从 dsh Web 查询。',
+      tone: null,
+    };
+  }
+  return {
+    enabled: true,
+    message: '可登记已保存且当前实例已应用的启动目录。',
+    tone: null,
+  };
 }
 
 function comparableField(draft, key) {
@@ -167,10 +226,31 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const workdir = field(
     '启动目录（进程 CWD）',
     input('text', '', { placeholder: '~（家目录，默认）', spellcheck: 'false' }),
-    { hint: '这是 dsh web 进程的 CWD；新会话未显式选择 Workspace 时会回落到这里。它不会自动登记 Workspace，也不会替换浏览器恢复的历史 Session。' },
+    { hint: '这是 dsh web 进程的 CWD；保存后需在下次拉起或重启时生效。新会话使用或恢复哪个 Workspace 由 dsh Web 自身决定。' },
   );
   const workdirBadge = el('span.pending-badge', { hidden: true, text: HOST_WEB_RESTART_NOTICE });
   workdir.root.querySelector('label').append(workdirBadge);
+  const workspaceExplanation = el('p.section-note', {
+    text: '已保存的启动目录可通过 dsh Web 官方 API 显式登记为 Workspace；此操作不修改 dsh CLI，也不改变 HOME，dsh Web 的目录选择器仍从 HOME 开始。',
+  });
+  const workspaceHint = el('p.field-hint');
+  const workspaceStatus = el('p.dsh-settings-status', {
+    role: 'status',
+    'aria-live': 'polite',
+  });
+  const workspaceRegisterBtn = button('登记启动目录为 Workspace', {
+    variant: 'primary',
+    compact: false,
+    disabled: true,
+    onClick: () => registerWorkspace(),
+  });
+  const workspaceSection = el('section.config-section', {}, [
+    el('h4', { text: 'dsh Workspace' }),
+    workspaceExplanation,
+    workspaceHint,
+    workspaceStatus,
+    el('div.dsh-settings-actions', {}, [workspaceRegisterBtn]),
+  ]);
   const remoteConfigNote = el('p.section-note.remote-config-note', { hidden: true });
   const env = field('环境变量（每行 KEY=VALUE）', input('textarea', '', { rows: '4', spellcheck: 'false' }));
   const extraArgs = field('追加参数（每行一项，不做 shell 拆词）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
@@ -286,6 +366,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       el('p.section-note', { text: '本区改动保存后在下次拉起时生效，不影响正在跑的实例。' }),
       remoteConfigNote,
       workdir.root,
+      workspaceSection,
       env.root,
       extraArgs.root,
       patches.root,
@@ -402,6 +483,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     saveBtn.disabled = !dirty || current.conflicts.length > 0
       || !store.canWrite() || saving;
     cancelBtn.disabled = !dirty || saving;
+    syncWorkspaceControls();
     syncSettingsControls();
   }
 
@@ -423,6 +505,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     }
     restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     clearSettingsSession(current);
+    clearWorkspaceSession();
     current = {
       name, config: host.config, draft: draftOf(host.config), conflicts: [],
       settings: {
@@ -476,6 +559,10 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       setSettingsStatus('保存正在进行，完成后再关闭；关闭不会取消写入。', 'warn');
       return;
     }
+    if (current && store.isPending('workspace:register', current.name)) {
+      setWorkspaceStatus('登记正在进行，完成后再关闭；关闭不会取消请求。', 'warn');
+      return;
+    }
     // 连按两下 Esc 不该弹出两个「放弃未保存的修改？」
     if (closing) return;
     closing = true;
@@ -508,6 +595,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     scrim.hidden = true;
     setBackgroundInert(false);
     clearSettingsSession(current);
+    clearWorkspaceSession();
     current = null;
     store.setDrawer({ open: false, host: null, dirty: false });
     const focusTarget = isUsableFocusTarget(restoreFocus)
@@ -532,6 +620,77 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       return brand;
     }
     return isUsableFocusTarget(document.body) ? document.body : null;
+  }
+
+  // ── dsh Workspace ───────────────────────────────────────────────────
+
+  function setWorkspaceStatus(message, tone = null) {
+    workspaceStatus.textContent = message ?? '';
+    if (tone) workspaceStatus.dataset.tone = tone;
+    else delete workspaceStatus.dataset.tone;
+  }
+
+  function clearWorkspaceSession() {
+    workspaceHint.textContent = '';
+    setWorkspaceStatus('');
+    workspaceRegisterBtn.disabled = true;
+  }
+
+  function syncWorkspaceControls() {
+    if (!current) return;
+    const host = store.getHost(current.name);
+    if (!host) {
+      clearWorkspaceSession();
+      return;
+    }
+    const pending = store.isPending('workspace:register', current.name);
+    const availability = workspaceRegistrationState(host, {
+      canWrite: store.canWrite(),
+      pending,
+    });
+    workspaceRegisterBtn.disabled = !availability.enabled;
+    setWorkspaceStatus(availability.message, availability.tone);
+
+    if (!isDirty(current.draft, current.config)) {
+      workspaceHint.textContent = '';
+      return;
+    }
+    const savedDraft = draftOf(current.config);
+    const workdirDraftChanged = !fieldEqual(current.draft, savedDraft, 'workdir');
+    workspaceHint.textContent = workdirDraftChanged
+      ? '当前启动目录草稿尚未保存；登记仍使用已保存且当前实例已应用的目录。如要登记草稿值，请先保存并重启 dsh web。'
+      : '主机配置有未保存修改；登记仍只使用已保存且当前实例已应用的启动目录。若修改启动目录，请先保存并重启 dsh web。';
+  }
+
+  async function registerWorkspace() {
+    const session = current;
+    if (!session) return;
+    const host = store.getHost(session.name);
+    const availability = workspaceRegistrationState(host, {
+      canWrite: store.canWrite(),
+      pending: store.isPending('workspace:register', session.name),
+    });
+    if (!availability.enabled) {
+      syncWorkspaceControls();
+      return;
+    }
+
+    setWorkspaceStatus('正在登记启动目录…');
+    const body = await actions.registerDshWorkspace(session.name, {
+      onError: (error) => {
+        if (current === session) {
+          setWorkspaceStatus(error?.summary || 'dsh Workspace 登记失败，请稍后重试。', 'error');
+        }
+      },
+    });
+    if (current !== session || !body) return;
+
+    const path = typeof body.path === 'string' ? `：${body.path}` : '';
+    setWorkspaceStatus(
+      body.created
+        ? `已登记启动目录为 Workspace${path}`
+        : `该启动目录已经登记为 Workspace${path}`,
+    );
   }
 
   // ── dsh settings 文件 ────────────────────────────────────────────────
@@ -873,6 +1032,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       for (const off of offs) off();
       document.removeEventListener('keydown', onDocKeyDown);
       clearSettingsSession(current);
+      clearWorkspaceSession();
       current = null;
     },
   };

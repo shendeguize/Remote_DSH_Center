@@ -12,6 +12,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 
 import {
+  DSH_WORKSPACE_MAX_BODY_BYTES,
   MAX_BODY_BYTES,
   SETTINGS_MAX_BODY_BYTES,
   SETUP_ALLOWED,
@@ -20,7 +21,11 @@ import {
 } from '../src/api.js';
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { logEvent, _resetForTest } from '../src/lib/bus.js';
-import { dshSettingsPutSchema, validate } from '../src/lib/validate.js';
+import {
+  dshSettingsPutSchema,
+  dshWorkspaceCreateSchema,
+  validate,
+} from '../src/lib/validate.js';
 import { posixCksum, SETTINGS_MAX_BYTES } from '../src/settings-file.js';
 import * as store from '../src/store.js';
 import { bootServer } from './integration/helpers.js';
@@ -194,6 +199,306 @@ test('settings PUT schema：双字段必填，拒绝 path/未知键与非法 che
   for (const body of invalidBodies) {
     assert.equal(validate(dshSettingsPutSchema, body).ok, false, JSON.stringify(body));
   }
+});
+
+test('Workspace 登记 schema：只接受自有键为空的对象', () => {
+  assert.equal(validate(dshWorkspaceCreateSchema, {}).ok, true);
+  assert.equal(validate(dshWorkspaceCreateSchema, { path: '/tmp/forbidden' }).ok, false);
+  assert.equal(validate(dshWorkspaceCreateSchema, { workdir: '/tmp/forbidden' }).ok, false);
+
+  const inherited = Object.create({ path: '/tmp/inherited' });
+  assert.equal(
+    validate(dshWorkspaceCreateSchema, inherited).ok,
+    true,
+    'schema 只按 Object.hasOwn 处理 JSON 对象自有键',
+  );
+});
+
+function makeWorkspaceHostRunning(name = 'gpu-1', workdir = '/srv/project') {
+  store.setPhase(name, 'ready', 'workspace-api-test');
+  store.setPhase(name, 'starting', 'workspace-api-test');
+  store.setPhase(name, 'running', 'workspace-api-test');
+  store.mutateHostState(name, (entry) => {
+    entry.web = {
+      pid: 1234,
+      port: 8899,
+      startedByUs: true,
+      cmdFingerprint: 'dsh web --port 8899',
+      log: 'dsh-web.log',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      workdir,
+      cwd: workdir,
+    };
+    entry.tunnel = { localPort: 17701 };
+  });
+  store.setTunnelStatusProvider((host) => (host === name
+    ? {
+      localPort: 17701,
+      connected: true,
+      reconnectAttempt: 0,
+      suspendedReason: null,
+    }
+    : null));
+}
+
+function workspaceRpcResponse(rpcId, overrides = {}) {
+  return new Response(JSON.stringify({
+    type: 'server-response',
+    rpcId,
+    result: {
+      ok: true,
+      value: {
+        workspace: {
+          workspaceId: 'workspace-api-1',
+          path: '/srv/project',
+          title: 'project',
+          sessionIds: ['session-secret-not-forwarded'],
+          createdAt: '2026-08-24T00:00:00.000Z',
+          updatedAt: '2026-08-24T00:00:00.000Z',
+        },
+        created: true,
+      },
+    },
+    ...overrides,
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+test('POST dsh-workspace：严格路由/query/body/host 前置失败均不访问上游', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    throw new Error('must not fetch');
+  });
+
+  const cases = [
+    ['POST', '/api/hosts/gpu-1/dsh-workspace?path=%2Ftmp%2Fattack', {}, 400, 'VALIDATION'],
+    ['POST', '/api/hosts/gpu-1/dsh-workspace', { path: '/tmp/attack' }, 400, 'VALIDATION'],
+    ['POST', '/api/hosts/gpu-1/dsh-workspace', { workdir: '/tmp/attack' }, 400, 'VALIDATION'],
+    ['POST', '/api/hosts/gpu-1/dsh-workspace', undefined, 400, 'VALIDATION'],
+    ['POST', '/api/hosts/gpu-1/dsh-workspace/', {}, 404, 'NOT_FOUND'],
+    ['POST', '/api/hosts/%/dsh-workspace', {}, 400, 'VALIDATION'],
+    ['POST', '/api/hosts/missing/dsh-workspace', {}, 404, 'NOT_FOUND'],
+  ];
+
+  for (const [method, route, body, status, code] of cases) {
+    // eslint-disable-next-line no-await-in-loop -- 每种边界都要确认没有任何上游访问
+    const response = await ctx.api(method, route, body);
+    assert.equal(response.status, status, `${method} ${route}: ${response.text}`);
+    assert.equal(response.json.code, code);
+    assert.equal(fetchCalls, 0);
+  }
+
+  const malformed = await rawRequest(
+    ctx.base,
+    'POST',
+    '/api/hosts/gpu-1/dsh-workspace',
+    '{"path":"/private/secret"',
+  );
+  assert.equal(malformed.status, 400, malformed.text);
+  assert.equal(malformed.json.code, 'VALIDATION');
+  assert.doesNotMatch(malformed.text, /private|secret/u);
+  assert.equal(fetchCalls, 0);
+
+  const secret = 'WORKSPACE_BODY_SECRET_6f3a';
+  assert.ok(DSH_WORKSPACE_MAX_BODY_BYTES <= 256);
+  const oversizedBody = JSON.stringify({
+    padding: `${secret}${'x'.repeat(DSH_WORKSPACE_MAX_BODY_BYTES)}`,
+  });
+  assert.ok(Buffer.byteLength(oversizedBody) > DSH_WORKSPACE_MAX_BODY_BYTES);
+
+  const oversized = await rawRequest(
+    ctx.base,
+    'POST',
+    '/api/hosts/gpu-1/dsh-workspace',
+    oversizedBody,
+  );
+  assert.equal(oversized.status, 400, oversized.text);
+  assert.equal(oversized.json.code, 'VALIDATION');
+  assert.match(oversized.json.error, new RegExp(String(DSH_WORKSPACE_MAX_BODY_BYTES), 'u'));
+  assert.doesNotMatch(oversized.text, new RegExp(secret, 'u'));
+
+  const queryFirst = await rawRequest(
+    ctx.base,
+    'POST',
+    '/api/hosts/gpu-1/dsh-workspace?unused=1',
+    oversizedBody,
+  );
+  assert.equal(queryFirst.status, 400, queryFirst.text);
+  assert.match(queryFirst.json.error, /query/u);
+  assert.doesNotMatch(queryFirst.json.error, /字节上限/u);
+
+  const hostFirst = await rawRequest(
+    ctx.base,
+    'POST',
+    '/api/hosts/missing/dsh-workspace',
+    oversizedBody,
+  );
+  assert.equal(hostFirst.status, 404, hostFirst.text);
+  assert.equal(hostFirst.json.code, 'NOT_FOUND');
+  assert.equal(fetchCalls, 0);
+});
+
+test('POST dsh-workspace：setup gate 保持阻断且不访问上游', async (t) => {
+  const ctx = await bootServer(t, {
+    setupCompleted: false,
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    throw new Error('must not fetch');
+  });
+
+  const response = await ctx.api('POST', '/api/hosts/gpu-1/dsh-workspace', {});
+  assert.equal(response.status, 409, response.text);
+  assert.equal(response.json.code, 'SETUP_REQUIRED');
+  assert.equal(fetchCalls, 0);
+});
+
+test('POST dsh-workspace：经 HostView.mappedUrl 调官方 RPC 并返回最小安全结果', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  makeWorkspaceHostRunning();
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const envelope = JSON.parse(init.body);
+    requests.push({ url, init, envelope });
+    return workspaceRpcResponse(envelope.rpcId);
+  });
+
+  const response = await ctx.api('POST', '/api/hosts/gpu-1/dsh-workspace', {});
+  assert.equal(response.status, 200, response.text);
+  assert.deepEqual(response.json, {
+    created: true,
+    workspaceId: 'workspace-api-1',
+    title: 'project',
+    path: '/srv/project',
+  });
+  assert.equal(response.headers['cache-control'], 'no-store');
+  assert.equal(requests.length, 1, '已有绝对 CWD 时只发送 workspace.create');
+  const [request] = requests;
+  assert.equal(request.url, 'http://127.0.0.1:17701/api/workspace.create');
+  assert.deepEqual(request.envelope, {
+    type: 'client-request',
+    rpcId: request.envelope.rpcId,
+    method: 'workspace.create',
+    payload: { path: '/srv/project' },
+  });
+  assert.equal(Object.hasOwn(response.json, 'sessionIds'), false);
+  assert.equal(Object.hasOwn(response.json, 'createdAt'), false);
+});
+
+test('POST dsh-workspace：degraded 但映射断开时快败且不 fetch', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  makeWorkspaceHostRunning();
+  store.setPhase('gpu-1', 'degraded', 'workspace-api-disconnected-test');
+  store.setTunnelStatusProvider(() => ({
+    localPort: 17701,
+    connected: false,
+    reconnectAttempt: 1,
+    suspendedReason: null,
+  }));
+  let fetchCalls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    fetchCalls += 1;
+    throw new Error('must not fetch released mapped port');
+  });
+
+  const response = await ctx.api('POST', '/api/hosts/gpu-1/dsh-workspace', {});
+  assert.equal(response.status, 409, response.text);
+  assert.equal(response.json.code, 'PHASE_CONFLICT');
+  assert.equal(fetchCalls, 0);
+});
+
+test('POST dsh-workspace：上游 domain 错误经 HTTP 边界保持脱敏', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  makeWorkspaceHostRunning();
+  const secret = 'UPSTREAM_WORKSPACE_SECRET_/private/project';
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    const { rpcId } = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      type: 'server-response',
+      rpcId,
+      result: {
+        ok: false,
+        error: {
+          code: 'workspace-invalid-path',
+          message: secret,
+          details: { path: secret },
+        },
+      },
+    }), { status: 200 });
+  });
+
+  const response = await ctx.api('POST', '/api/hosts/gpu-1/dsh-workspace', {});
+  assert.equal(response.status, 422, response.text);
+  assert.equal(response.json.code, 'WORKSPACE_INVALID_PATH');
+  assert.equal(Object.hasOwn(response.json, 'detail'), false);
+  assert.doesNotMatch(response.text, /UPSTREAM_WORKSPACE_SECRET|private/u);
+});
+
+test('POST dsh-workspace：客户端断开会 abort 上游并释放 admission slot', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hostConfig: { 'gpu-1': { workdir: '/srv/project' } },
+  });
+  makeWorkspaceHostRunning();
+  let fetchCalls = 0;
+  let markStarted;
+  let markAborted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const aborted = new Promise((resolve) => { markAborted = resolve; });
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) {
+      markStarted();
+      if (init.signal.aborted) markAborted();
+      else init.signal.addEventListener('abort', markAborted, { once: true });
+      return new Promise(() => {});
+    }
+    return workspaceRpcResponse(JSON.parse(init.body).rpcId);
+  });
+
+  const url = new URL('/api/hosts/gpu-1/dsh-workspace', ctx.base);
+  const client = http.request({
+    host: url.hostname,
+    port: url.port,
+    path: url.pathname,
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-length': 2,
+    },
+  });
+  client.on('error', () => {});
+  client.end('{}');
+  await started;
+  client.destroy();
+  await Promise.race([
+    aborted,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('上游 fetch 未随客户端断开而 abort')), 1_000);
+      timer.unref?.();
+    }),
+  ]);
+
+  const retry = await ctx.api('POST', '/api/hosts/gpu-1/dsh-workspace', {});
+  assert.equal(retry.status, 200, retry.text);
+  assert.equal(retry.json.created, true);
+  assert.equal(fetchCalls, 2);
 });
 
 test('settings REST contract：read 条件形状与 write 不回显 content', () => {

@@ -48,6 +48,46 @@ function settingsControls(drawer) {
   };
 }
 
+function workspaceControls(drawer) {
+  const heading = drawer.querySelectorAll('h4')
+    .find((node) => node.textContent === 'dsh Workspace');
+  const section = heading?.closest('.config-section') ?? null;
+  const buttons = section?.querySelectorAll('button') ?? [];
+  return {
+    heading,
+    section,
+    explanation: section?.querySelector('.section-note') ?? null,
+    hint: section?.querySelector('.field-hint') ?? null,
+    status: section?.querySelector('.dsh-settings-status') ?? null,
+    register: buttons.find((node) => node.textContent === '登记启动目录为 Workspace') ?? null,
+  };
+}
+
+function workspaceHost(name = 'gpu-1', patch = {}) {
+  const base = running(name);
+  const workdir = '/srv/project';
+  return {
+    ...base,
+    ...patch,
+    config: {
+      ...base.config,
+      workdir,
+      ...(patch.config ?? {}),
+    },
+    web: patch.web === null ? null : {
+      ...base.web,
+      workdir,
+      cwd: workdir,
+      ...(patch.web ?? {}),
+    },
+    tunnel: patch.tunnel === null ? null : {
+      ...base.tunnel,
+      connected: true,
+      ...(patch.tunnel ?? {}),
+    },
+  };
+}
+
 function response(status, body) {
   return {
     ok: status < 400,
@@ -1865,6 +1905,239 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
 });
 
+test('dsh Workspace 子区只用已保存/已应用目录，dirty 草稿需先保存重启', async (t) => {
+  const replies = [
+    {
+      created: true,
+      workspaceId: 'workspace-new',
+      title: 'project',
+      path: '/srv/project',
+    },
+    {
+      created: false,
+      workspaceId: 'workspace-existing',
+      title: 'project',
+      path: '/srv/project',
+    },
+  ];
+  const { app, dom, calls } = await mount(t, {
+    hosts: [workspaceHost()],
+    responder: ({ path, method }) => (
+      path === '/api/hosts/gpu-1/dsh-workspace' && method === 'POST'
+        ? response(200, replies.shift())
+        : null
+    ),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = workspaceControls(drawer);
+  assert.ok(controls.section, '启动目录旁应有明确的 dsh Workspace 子区');
+  assert.match(
+    controls.explanation.textContent,
+    /已保存的启动目录.*dsh Web 官方 API.*不修改 dsh CLI.*不改变 HOME.*目录选择器仍从 HOME/,
+  );
+  assert.equal(controls.status.getAttribute('aria-live'), 'polite');
+  assert.equal(controls.register.disabled, false);
+  assert.match(controls.status.textContent, /可登记已保存且当前实例已应用的启动目录/);
+  assert.doesNotMatch(
+    drawer.querySelector('input[type="text"]').closest('.field').querySelector('.field-hint').textContent,
+    /自动登记/,
+    '旧 workdir 文案不能再把是否登记混作启动目录自身行为',
+  );
+
+  const workdir = drawer.querySelector('input[type="text"]');
+  workdir.value = '/srv/unsaved-draft';
+  drawer.querySelector('.drawer-form').dispatchEvent({ type: 'input' });
+  assert.equal(app.store.getHost('gpu-1').config.workdir, '/srv/project');
+  assert.equal(controls.register.disabled, false, 'dirty 草稿不能改变基于 saved/applied host 的按钮闸门');
+  assert.match(controls.hint.textContent, /草稿尚未保存.*仍使用已保存.*先保存并重启 dsh web/);
+
+  controls.register.click();
+  await flush();
+  let registrationCalls = calls.filter((call) => call.path.endsWith('/dsh-workspace'));
+  assert.deepEqual(registrationCalls[0], {
+    path: '/api/hosts/gpu-1/dsh-workspace',
+    method: 'POST',
+    body: {},
+  });
+  assert.match(controls.status.textContent, /已登记.*\/srv\/project/);
+  assert.doesNotMatch(controls.status.textContent, /unsaved-draft/);
+
+  controls.register.click();
+  await flush();
+  registrationCalls = calls.filter((call) => call.path.endsWith('/dsh-workspace'));
+  assert.equal(registrationCalls.length, 2);
+  assert.match(controls.status.textContent, /已经登记.*\/srv\/project/);
+  assert.equal(app.store.state.toasts.at(-1).summary, 'gpu-1 的启动目录已是 dsh Workspace');
+});
+
+test('dsh Workspace 按钮实时覆盖配置、应用、CWD、连接与可写闸门', async (t) => {
+  const { app, dom, es } = await mount(t, { hosts: [workspaceHost()] });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const controls = workspaceControls(dom.app.querySelector('.host-drawer'));
+
+  let revision = 2;
+  es().send('host-changed', {
+    revision,
+    host: workspaceHost('gpu-1', { web: { cwd: null } }),
+  });
+  revision += 1;
+  await flush();
+  assert.equal(controls.register.disabled, false, 'CWD 为空时应由后端向 dsh Web 查询，不能前端误禁用');
+  assert.match(controls.status.textContent, /实际 CWD.*从 dsh Web 查询/);
+
+  const cases = [
+    [
+      workspaceHost('gpu-1', {
+        config: { workdir: null },
+        web: { workdir: null, cwd: '/home/me' },
+      }),
+      /请先配置并保存启动目录/,
+    ],
+    [
+      workspaceHost('gpu-1', {
+        config: { workdir: '/srv/new' },
+        web: { workdir: '/srv/old', cwd: '/srv/old' },
+      }),
+      /请重启 dsh web.*应用已保存的启动目录/,
+    ],
+    [
+      workspaceHost('gpu-1', { web: { cwd: 'srv/project' } }),
+      /实际 CWD 不是绝对路径/,
+    ],
+    [
+      workspaceHost('gpu-1', { mappedUrl: null }),
+      /实例未连接/,
+    ],
+    [
+      workspaceHost('gpu-1', {
+        phase: 'degraded',
+        tunnel: { connected: false },
+      }),
+      /隧道未连接/,
+    ],
+    [
+      workspaceHost('gpu-1', { phase: 'ready', mappedUrl: null, web: null }),
+      /实例未连接/,
+    ],
+  ];
+
+  for (const [host, message] of cases) {
+    es().send('host-changed', { revision, host });
+    revision += 1;
+    await flush();
+    assert.equal(controls.register.disabled, true);
+    assert.match(controls.status.textContent, message);
+  }
+
+  es().send('host-changed', { revision, host: workspaceHost() });
+  await flush();
+  assert.equal(controls.register.disabled, false);
+  app.store.setConnection({ sse: 'reconnecting', everOpened: true });
+  assert.equal(controls.register.disabled, true);
+  assert.match(controls.status.textContent, /manager 失联.*登记已暂停/);
+});
+
+test('Workspace 登记 pending 阻止重复入口与 close/Esc/scrim，created:false 正确结算', async (t) => {
+  const registration = deferred();
+  const { app, dom } = await mount(t, {
+    hosts: [workspaceHost()],
+    responder: ({ path }) => (path.endsWith('/dsh-workspace') ? registration.promise : null),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = workspaceControls(drawer);
+
+  controls.register.click();
+  assert.equal(app.store.isPending('workspace:register', 'gpu-1'), true);
+  assert.equal(controls.register.disabled, true);
+  assert.match(controls.status.textContent, /正在登记/);
+
+  drawer.querySelector('.drawer-close').click();
+  drawer.dispatchEvent({
+    type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {},
+  });
+  dom.app.querySelector('.drawer-scrim').click();
+  await flush();
+  assert.equal(drawer.hidden, false, '登记中 close/Esc/scrim 都不得关闭');
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, false);
+  assert.match(controls.status.textContent, /登记正在进行.*完成后再关闭.*不会取消请求/);
+
+  registration.resolve(response(200, {
+    created: false,
+    workspaceId: 'workspace-existing',
+    title: 'project',
+    path: '/srv/project',
+  }));
+  await flush();
+  assert.equal(app.store.isPending('workspace:register', 'gpu-1'), false);
+  assert.equal(controls.register.disabled, false);
+  assert.match(controls.status.textContent, /已经登记.*\/srv\/project/);
+});
+
+test('Workspace 登记中主机移除安全关闭；迟到成功/错误不回写 DOM 或泄露 path', async (t) => {
+  for (const outcome of ['success', 'error']) {
+    await t.test(outcome, async (st) => {
+      const registration = deferred();
+      const { app, dom, es } = await mount(st, {
+        hash: '#/manage',
+        hosts: [workspaceHost()],
+        responder: ({ path }) => (path.endsWith('/dsh-workspace') ? registration.promise : null),
+      });
+      dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+      await flush();
+      const drawer = dom.app.querySelector('.host-drawer');
+      const controls = workspaceControls(drawer);
+      controls.register.click();
+      assert.equal(app.store.isPending('workspace:register', 'gpu-1'), true);
+
+      es().send('snapshot', {
+        revision: 2,
+        manager: MANAGER_INFO,
+        defaults: DEFAULTS,
+        hosts: [],
+        logs: [],
+      });
+      await flush();
+      assert.equal(drawer.hidden, true);
+      assert.equal(controls.status.textContent, '');
+
+      const unsafePath = '/private/late-response/secret-workspace';
+      registration.resolve(outcome === 'success'
+        ? response(200, {
+          created: true,
+          workspaceId: 'secret-workspace-id',
+          title: 'secret-workspace-title',
+          path: unsafePath,
+        })
+        : response(502, {
+          code: 'WORKSPACE_REGISTER_FAILED',
+          error: `unsafe error ${unsafePath}`,
+          detail: 'unsafe detail secret-workspace-id',
+        }));
+      await flush();
+
+      const toast = app.store.state.toasts.at(-1);
+      assert.equal(toast.level, outcome === 'success' ? 'success' : 'error');
+      assert.equal(
+        toast.summary,
+        outcome === 'success'
+          ? 'gpu-1 已登记启动目录为 dsh Workspace'
+          : 'dsh Workspace 登记失败，请稍后重试',
+      );
+      assert.equal(toast.detail, null);
+      assert.doesNotMatch(
+        `${controls.status.textContent} ${dom.app.querySelector('.toast-region').textContent}`,
+        /late-response|secret-workspace|unsafe detail/,
+      );
+    });
+  }
+});
+
 test('dsh 配置文件入口默认不加载；existing 原文往返且 PUT 不回传 path', async (t) => {
   const original = '\ufeffprovider: ark\r\nsecret: "a\\0b"\r\nnul: \0\r\n';
   const edited = `${original}enabled: true\r\n`;
@@ -2930,14 +3203,14 @@ test('抽屉里的启动目录：改值只提交 workdir，非法值就地报错
   assert.match(workdirField.querySelector('label').textContent, /^启动目录（进程 CWD）/);
   assert.equal(
     workdirField.querySelector('.field-hint').textContent,
-    '这是 dsh web 进程的 CWD；新会话未显式选择 Workspace 时会回落到这里。它不会自动登记 Workspace，也不会替换浏览器恢复的历史 Session。',
+    '这是 dsh web 进程的 CWD；保存后需在下次拉起或重启时生效。新会话使用或恢复哪个 Workspace 由 dsh Web 自身决定。',
   );
   assert.doesNotMatch(workdirField.textContent, /默认 workspace 根|加载 AGENTS\.md/);
   const remoteConfigNote = drawer.querySelector('.remote-config-note');
   assert.equal(remoteConfigNote.hidden, false);
   assert.equal(
     remoteConfigNote.textContent,
-    'dsh web 的“打开配置文件”发生在目标主机；目标主机没有桌面环境时，请使用下方“dsh 配置文件”编辑器，无需通过 SSH。',
+    'dsh Web 在目标主机运行；没有桌面环境也不影响内嵌页面。需要编辑 settings.yaml 时可直接使用下方“dsh 配置文件”编辑器，无需通过 SSH。',
   );
   const form = drawer.querySelector('.drawer-form');
   const save = drawer.querySelectorAll('.btn').find((b) => b.textContent === '保存');

@@ -104,6 +104,22 @@ export const hostView = V.obj({
 
 export const hostsList = V.obj({ revision, hosts: V.arr(hostView) });
 
+const absolutePosixPath = V.all(
+  V.str({ min: 1 }),
+  V.custom(
+    (value) => typeof value !== 'string'
+      || (value.startsWith('/') && !value.includes('\0'))
+      || 'expected absolute POSIX path',
+  ),
+);
+
+export const workspaceRegisterResponse = V.obj({
+  created: V.bool(),
+  workspaceId: V.str({ min: 1 }),
+  title: V.str(),
+  path: absolutePosixPath,
+});
+
 const defaultsView = V.obj({
   remoteWebPort: port,
   localPortRange: V.tuple([V.int({ min: 1024, max: 65535 }), V.int({ min: 1024, max: 65535 })]),

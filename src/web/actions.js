@@ -290,6 +290,25 @@ export function createActions({ store, confirm, navigate }) {
     });
   }
 
+  async function registerDshWorkspace(name, { onError } = {}) {
+    const res = await guarded({
+      action: 'workspace:register',
+      host: name,
+      settleOnResolve: true,
+      onError,
+      run: () => api.registerDshWorkspace(name),
+    });
+    if (res) {
+      store.addToast({
+        level: 'success',
+        summary: res.created
+          ? `${name} 已登记启动目录为 dsh Workspace`
+          : `${name} 的启动目录已是 dsh Workspace`,
+      });
+    }
+    return res;
+  }
+
   async function saveDefaults(patch) {
     const res = await guarded({
       action: 'defaults:save',
@@ -377,6 +396,7 @@ export function createActions({ store, confirm, navigate }) {
     syncConfig,
     loadDshSettings,
     saveDshSettings,
+    registerDshWorkspace,
     saveDefaults,
     reload,
     restartManager,

@@ -34,17 +34,48 @@ const SETTINGS_MUTATION_UNCERTAIN_CODES = new Set([
   'PROTO_PARSE',
   'INTERNAL',
 ]);
+const WORKSPACE_ERROR_MESSAGES = Object.freeze({
+  WORKSPACE_BUSY: '该主机已有 dsh Workspace 登记正在进行，请稍后重试',
+  WORKSPACE_WORKDIR_REQUIRED: '请先配置启动目录并重启 dsh web 后再登记',
+  WORKSPACE_CWD_UNAVAILABLE: '当前 dsh web 的实际工作目录不可用，请重启后重试',
+  WORKSPACE_INVALID_PATH: '当前 dsh web 的实际工作目录不是绝对路径，无法登记',
+  WORKSPACE_REGISTER_FAILED: 'dsh Workspace 登记失败，请稍后重试',
+  WORKSPACE_REGISTER_TIMEOUT: 'dsh Workspace 登记超时；可安全重试',
+  NOT_FOUND: '目标主机不存在或已被删除',
+  PHASE_CONFLICT: '主机状态已变化，请确认 dsh web 已连接且启动目录已应用',
+  VALIDATION: 'dsh Workspace 请求无效，请检查启动目录后重试',
+  PROTO_PARSE: 'dsh Workspace 响应无法解析，请重试',
+  INTERNAL: 'dsh Workspace 登记失败，请稍后重试',
+});
+const SETTINGS_REDACTION = Object.freeze({
+  messages: SETTINGS_ERROR_MESSAGES,
+  mutationUnknownMessage: SETTINGS_MUTATION_UNKNOWN_MESSAGE,
+  mutationUncertainCodes: SETTINGS_MUTATION_UNCERTAIN_CODES,
+  timeoutCode: 'SSH_TIMEOUT',
+  timeoutMessage: SETTINGS_ERROR_MESSAGES.SSH_TIMEOUT,
+  internalMessage: SETTINGS_ERROR_MESSAGES.INTERNAL,
+  parseMessage: '响应不是合法 JSON',
+  httpFallback: (status) => `dsh 配置请求失败（HTTP ${status}）`,
+});
+const WORKSPACE_REDACTION = Object.freeze({
+  messages: WORKSPACE_ERROR_MESSAGES,
+  timeoutCode: 'WORKSPACE_REGISTER_TIMEOUT',
+  timeoutMessage: WORKSPACE_ERROR_MESSAGES.WORKSPACE_REGISTER_TIMEOUT,
+  internalMessage: WORKSPACE_ERROR_MESSAGES.INTERNAL,
+  parseMessage: WORKSPACE_ERROR_MESSAGES.PROTO_PARSE,
+  httpFallback: (status) => `dsh Workspace 请求失败（HTTP ${status}）`,
+});
 
-function safeSettingsHttpError(rawCode, status, mutationResultUnknown) {
+function safeRedactedHttpError(rawCode, status, redaction, mutationResultUnknown) {
   const known = typeof rawCode === 'string'
-    && Object.hasOwn(SETTINGS_ERROR_MESSAGES, rawCode);
+    && Object.hasOwn(redaction.messages, rawCode);
   const code = known ? rawCode : 'INTERNAL';
   const message = mutationResultUnknown
-    && (!known || SETTINGS_MUTATION_UNCERTAIN_CODES.has(code))
-    ? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+    && (!known || redaction.mutationUncertainCodes?.has(code))
+    ? redaction.mutationUnknownMessage
     : (known
-      ? SETTINGS_ERROR_MESSAGES[code]
-      : `dsh 配置请求失败（HTTP ${status}）`);
+      ? redaction.messages[code]
+      : redaction.httpFallback(status));
   return { code, message };
 }
 
@@ -64,6 +95,7 @@ async function call(method, path, {
   as = 'json',
   redactParseError = false,
   redactErrorResponse = false,
+  redaction = null,
   mutationResultUnknown = false,
 } = {}) {
   const controller = new AbortController();
@@ -84,11 +116,13 @@ async function call(method, path, {
     if (!aborted && res && !redactErrorResponse) throw err;
     throw new ApiError({
       status: 0,
-      code: aborted ? 'SSH_TIMEOUT' : 'INTERNAL',
+      code: aborted ? (redaction?.timeoutCode ?? 'SSH_TIMEOUT') : 'INTERNAL',
       message: mutationResultUnknown
-        ? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+        ? redaction?.mutationUnknownMessage ?? SETTINGS_MUTATION_UNKNOWN_MESSAGE
         : redactErrorResponse
-        ? (aborted ? SETTINGS_ERROR_MESSAGES.SSH_TIMEOUT : SETTINGS_ERROR_MESSAGES.INTERNAL)
+        ? (aborted
+          ? redaction?.timeoutMessage ?? SETTINGS_ERROR_MESSAGES.SSH_TIMEOUT
+          : redaction?.internalMessage ?? SETTINGS_ERROR_MESSAGES.INTERNAL)
         : (aborted ? `请求超时（${method} ${path}）` : `无法连接 manager：${err.message}`),
       detail: null,
     });
@@ -105,7 +139,12 @@ async function call(method, path, {
     }
     const rawCode = typeof payload?.code === 'string' ? payload.code : undefined;
     const safeError = redactErrorResponse
-      ? safeSettingsHttpError(rawCode, res.status, mutationResultUnknown)
+      ? safeRedactedHttpError(
+        rawCode,
+        res.status,
+        redaction ?? SETTINGS_REDACTION,
+        mutationResultUnknown,
+      )
       : null;
     throw new ApiError({
       status: res.status,
@@ -123,7 +162,9 @@ async function call(method, path, {
     throw new ApiError({
       status: res.status,
       code: 'PROTO_PARSE',
-      message: mutationResultUnknown ? SETTINGS_MUTATION_UNKNOWN_MESSAGE : '响应不是合法 JSON',
+      message: mutationResultUnknown
+        ? redaction?.mutationUnknownMessage ?? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+        : redaction?.parseMessage ?? '响应不是合法 JSON',
       detail: null,
     });
   }
@@ -133,7 +174,9 @@ async function call(method, path, {
     throw new ApiError({
       status: res.status,
       code: 'PROTO_PARSE',
-      message: mutationResultUnknown ? SETTINGS_MUTATION_UNKNOWN_MESSAGE : '响应不是合法 JSON',
+      message: mutationResultUnknown
+        ? redaction?.mutationUnknownMessage ?? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+        : redaction?.parseMessage ?? '响应不是合法 JSON',
       detail: redactParseError ? null : text,
     });
   }
@@ -171,6 +214,7 @@ export const api = {
     timeoutMs: SETTINGS_TIMEOUT_MS,
     redactParseError: true,
     redactErrorResponse: true,
+    redaction: SETTINGS_REDACTION,
   }),
   saveDshSettings: (name, { content, baseChecksum }) => call(
     'PUT',
@@ -180,9 +224,17 @@ export const api = {
       timeoutMs: SETTINGS_TIMEOUT_MS,
       redactParseError: true,
       redactErrorResponse: true,
+      redaction: SETTINGS_REDACTION,
       mutationResultUnknown: true,
     },
   ),
+  registerDshWorkspace: (name) => call('POST', `/api/hosts/${enc(name)}/dsh-workspace`, {
+    body: {},
+    timeoutMs: 20_000,
+    redactParseError: true,
+    redactErrorResponse: true,
+    redaction: WORKSPACE_REDACTION,
+  }),
   saveHostConfig: (name, patch) => call('PUT', `/api/hosts/${enc(name)}/config`, { body: patch }),
   saveDefaults: (patch) => call('PUT', '/api/config/defaults', { body: patch }),
   reload: () => call('POST', '/api/reload'),

@@ -1,5 +1,5 @@
 /**
- * 假 dsh web（14 §1.3）：`node fake-dsh-web.js --port N [--die-after MS]`。
+ * 假 dsh web（14 §1.3）：`node fake-dsh-web.js --port N [--cwd PATH] [--die-after MS]`。
  *
  * 行为对齐真机实测事实（README 可行性结论 1）：
  * - 绑定成功后 stdout 输出 `dsh web: http://127.0.0.1:<port>`（可被 POLL 协议解析）
@@ -7,10 +7,14 @@
  * - `/` 返回 200 极简页；供隧道转发目标与 monitor TCP 探活使用
  */
 
+import { randomUUID } from 'node:crypto';
 import http from 'node:http';
+import path from 'node:path';
 
 /** 孤儿自查间隔：既要够快让开发机不攒残骸，又不至于把 CPU 耗在轮询上。 */
 const ORPHAN_CHECK_MS = 500;
+/** 测试 RPC 也必须有正文上限，避免垫片本身成为无界内存入口。 */
+const RPC_REQUEST_MAX_BYTES = 64 * 1024;
 
 const argv = process.argv.slice(2);
 function flag(name, fallback = null) {
@@ -21,8 +25,10 @@ function flag(name, fallback = null) {
 const port = Number(flag('port', '0'));
 const dieAfter = flag('die-after') === null ? null : Number(flag('die-after'));
 const label = flag('label', 'fake-dsh-web');
+const launchCwd = flag('cwd', process.cwd());
 const forceBindError = argv.includes('--force-bind-error');
 const failStart = argv.includes('--fail-start');
+const workspaces = new Map();
 
 if (forceBindError) {
   // 端口占用故障注入（scenario bind-busy-*）：文案与真 node 栈一致，POLL 的 BIND_ERR 据此判定
@@ -35,10 +41,204 @@ if (failStart) {
   process.exit(2);
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function sendJson(res, status, body, headers = {}) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(payload),
+    ...headers,
+  });
+  res.end(payload);
+}
+
+function validWorkspaceRequest(body) {
+  return hasExactKeys(body, ['type', 'rpcId', 'method', 'payload'])
+    && body.type === 'client-request'
+    && typeof body.rpcId === 'string'
+    && body.rpcId.length > 0
+    && body.method === 'workspace.create'
+    && hasExactKeys(body.payload, ['path']);
+}
+
+function validHostDescribeRequest(body) {
+  return hasExactKeys(body, ['type', 'rpcId', 'method', 'payload'])
+    && body.type === 'client-request'
+    && typeof body.rpcId === 'string'
+    && body.rpcId.length > 0
+    && body.method === 'host.describe'
+    && hasExactKeys(body.payload, []);
+}
+
+function absolutePosixPath(value) {
+  return typeof value === 'string'
+    && !value.includes('\0')
+    && path.posix.isAbsolute(value);
+}
+
+function workspaceFor(workspacePath) {
+  const existing = workspaces.get(workspacePath);
+  if (existing) return { workspace: existing, created: false };
+
+  const now = new Date().toISOString();
+  const workspace = {
+    workspaceId: `workspace-${randomUUID()}`,
+    path: workspacePath,
+    title: path.posix.basename(workspacePath),
+    sessionIds: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  workspaces.set(workspacePath, workspace);
+  return { workspace, created: true };
+}
+
+async function readRpcRequest(req) {
+  const declared = req.headers['content-length'];
+  if (
+    declared !== undefined
+    && (!/^(?:0|[1-9][0-9]*)$/u.test(declared)
+      || Number(declared) > RPC_REQUEST_MAX_BYTES)
+  ) {
+    req.resume();
+    return { error: 413 };
+  }
+
+  const chunks = [];
+  let total = 0;
+  let tooLarge = false;
+  for await (const chunk of req) {
+    total += chunk.byteLength;
+    if (total > RPC_REQUEST_MAX_BYTES) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(chunk);
+  }
+  if (tooLarge) return { error: 413 };
+
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+  } catch {
+    return { error: 400 };
+  }
+  try {
+    return { value: JSON.parse(text) };
+  } catch {
+    return { error: 400 };
+  }
+}
+
+async function handleWorkspaceCreate(req, res) {
+  if (req.method !== 'POST') {
+    req.resume();
+    sendJson(res, 405, { error: 'method not allowed' }, { allow: 'POST' });
+    return;
+  }
+  if (!/^application\/json(?:\s*;.*)?$/iu.test(req.headers['content-type'] ?? '')) {
+    req.resume();
+    sendJson(res, 415, { error: 'application/json required' });
+    return;
+  }
+
+  const parsed = await readRpcRequest(req);
+  if (parsed.error) {
+    sendJson(res, parsed.error, { error: 'invalid request body' });
+    return;
+  }
+  if (!validWorkspaceRequest(parsed.value)) {
+    sendJson(res, 400, { error: 'invalid workspace.create request' });
+    return;
+  }
+
+  const { rpcId, payload } = parsed.value;
+  if (!absolutePosixPath(payload.path)) {
+    sendJson(res, 200, {
+      type: 'server-response',
+      rpcId,
+      result: {
+        ok: false,
+        error: {
+          code: 'workspace-invalid-path',
+          message: 'Workspace path must be an absolute POSIX path',
+        },
+      },
+    });
+    return;
+  }
+
+  sendJson(res, 200, {
+    type: 'server-response',
+    rpcId,
+    result: {
+      ok: true,
+      value: workspaceFor(payload.path),
+    },
+  });
+}
+
+async function handleHostDescribe(req, res) {
+  if (req.method !== 'POST') {
+    req.resume();
+    sendJson(res, 405, { error: 'method not allowed' }, { allow: 'POST' });
+    return;
+  }
+  if (!/^application\/json(?:\s*;.*)?$/iu.test(req.headers['content-type'] ?? '')) {
+    req.resume();
+    sendJson(res, 415, { error: 'application/json required' });
+    return;
+  }
+
+  const parsed = await readRpcRequest(req);
+  if (parsed.error) {
+    sendJson(res, parsed.error, { error: 'invalid request body' });
+    return;
+  }
+  if (!validHostDescribeRequest(parsed.value)) {
+    sendJson(res, 400, { error: 'invalid host.describe request' });
+    return;
+  }
+
+  sendJson(res, 200, {
+    type: 'server-response',
+    rpcId: parsed.value.rpcId,
+    result: {
+      ok: true,
+      value: { cwd: launchCwd },
+    },
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === '/api/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, label }));
+    return;
+  }
+  if (req.url === '/api/workspace.create') {
+    handleWorkspaceCreate(req, res).catch(() => {
+      if (!res.headersSent) sendJson(res, 400, { error: 'invalid request body' });
+      else res.destroy();
+    });
+    return;
+  }
+  if (req.url === '/api/host.describe') {
+    handleHostDescribe(req, res).catch(() => {
+      if (!res.headersSent) sendJson(res, 400, { error: 'invalid request body' });
+      else res.destroy();
+    });
     return;
   }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
