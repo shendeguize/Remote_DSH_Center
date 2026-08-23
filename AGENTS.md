@@ -50,9 +50,10 @@ src/defaults.js   第 0 层：零依赖出厂常量表
 ## 改完必做
 
 ```bash
-npm run check          # 四关闸门；只跑某几关：npm run check -- --only tests
+npm run check          # 六关：lint → 测试/覆盖率 → 浏览器 → 站点/文档 → 打包 → CLI
 ```
 
+- lint 告警必须可见且不超过当前 107 条基线；工具细则见 CONTRIBUTING。
 - 新代码路径要有用例；修复类**先写红的回归用例再修**。
 - 覆盖率三档门槛：`src/lib/**` ≥ 90%、`src/*.js` ≥ 75%、`src/web/`（非 components）
   ≥ 80%。碰了哪条路径，回写 `tests/COVERAGE_MATRIX.md`。

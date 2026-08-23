@@ -35,8 +35,13 @@ agent 的一屏速查见 [AGENTS.md](AGENTS.md)（那边只放指针，不复制
 开 PR 前本地先过闸门：
 
 ```bash
-npm run check          # 四关：测试+覆盖率 → 真浏览器 → 打包清单 → CLI 入口
+npm run check          # 六关：lint → 测试/覆盖率 → 真浏览器 → 站点/文档 → 打包 → CLI
 ```
+
+第一关由 `scripts/lint.mjs` 下载脚本内固定版本的 oxlint 单文件二进制；下载物与
+`.local/tools/` 中的缓存均核对固定 SHA-256 后才使用。告警完整显示，当前 107 条基线
+就是上限，新增一条即红。oxlint 不进入 `package.json` 依赖，开发与 CI 都不用
+`npm install`。
 
 CI 跑的是同一条命令，但按事件分平台（成本管控——同一套闸门 × 两平台 × 「PR 一次 +
 合入 main 又一次」= 每个 PR 四遍，其中最贵的 macOS 两遍）：

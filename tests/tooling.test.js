@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,10 +14,13 @@ import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 
 import { isMainEntry } from '../src/lib/entry.js';
 import { parseVersion } from '../src/lib/semver.js';
-import { PACK_RULES, selectStages, summarize, verifyPackFiles } from '../scripts/check.mjs';
+import {
+  PACK_RULES, STAGES as CHECK_STAGES, selectStages, summarize, verifyPackFiles,
+} from '../scripts/check.mjs';
 import { countDeclaredTests, parseTapCensus, shortfall } from '../scripts/coverage-gate.mjs';
 import {
   NODE_RUNTIME_VERSION, makeBundleInfo, nodeDistUrl, nodeShasumsUrl, nodeTarballName,
@@ -25,6 +29,12 @@ import {
 import {
   isBrokenPipe, linkPlan, linkTarget, pathHint, prefixInPath, silenceBrokenPipe,
 } from '../scripts/install.mjs';
+import {
+  OXLINT_MAX_ARCHIVE_BYTES, OXLINT_MAX_REDIRECTS, OXLINT_MAX_WARNINGS, OXLINT_VERSION,
+  accountDownloadBytes, cachedBinaryIsTrusted, decodeOxlintArchive, downloadResponsePolicy,
+  extractOxlintFromTar, installCachedOxlint, oxlintArgs, oxlintAssetName, oxlintDigests,
+  oxlintDownloadUrl, oxlintPlatform, oxlintReleaseTag,
+} from '../scripts/lint.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import {
   evaluateS12, findChrome, findSecretInDomSnapshot, snapshotDomObservables,
@@ -218,15 +228,308 @@ test('打包白名单含 scripts/install.mjs：发布包里要靠它摘链/装�
 
 // ── 统一闸门 ─────────────────────────────────────────────────────────────
 
-const STAGES = [{ id: 'tests' }, { id: 'ui' }, { id: 'pack' }, { id: 'cli' }];
-
 test('selectStages：only / skip 组合，打错字要报错', () => {
-  assert.deepEqual(selectStages(STAGES).map((s) => s.id), ['tests', 'ui', 'pack', 'cli']);
-  assert.deepEqual(selectStages(STAGES, { only: 'pack,cli' }).map((s) => s.id), ['pack', 'cli']);
-  assert.deepEqual(selectStages(STAGES, { skip: 'ui' }).map((s) => s.id), ['tests', 'pack', 'cli']);
-  assert.deepEqual(selectStages(STAGES, { only: 'tests,ui', skip: 'ui' }).map((s) => s.id), ['tests']);
-  assert.throws(() => selectStages(STAGES, { only: 'uii' }), /未知关卡：uii/);
-  assert.throws(() => selectStages(STAGES, { skip: 'browser' }), /未知关卡：browser/);
+  assert.deepEqual(
+    selectStages(CHECK_STAGES).map((s) => s.id),
+    ['lint', 'tests', 'ui', 'site', 'pack', 'cli'],
+    'lint 必须是统一闸门第一关',
+  );
+  assert.deepEqual(selectStages(CHECK_STAGES, { only: 'pack,cli' }).map((s) => s.id), ['pack', 'cli']);
+  assert.deepEqual(
+    selectStages(CHECK_STAGES, { skip: 'lint,ui' }).map((s) => s.id),
+    ['tests', 'site', 'pack', 'cli'],
+  );
+  assert.deepEqual(
+    selectStages(CHECK_STAGES, { only: 'lint,tests,ui', skip: 'ui' }).map((s) => s.id),
+    ['lint', 'tests'],
+  );
+  assert.throws(() => selectStages(CHECK_STAGES, { only: 'uii' }), /未知关卡：uii/);
+  assert.throws(() => selectStages(CHECK_STAGES, { skip: 'browser' }), /未知关卡：browser/);
+});
+
+test('oxlint 固定版本、平台资产与 Release URL 逐字对应', () => {
+  assert.equal(OXLINT_VERSION, '1.79.0');
+  assert.equal(oxlintReleaseTag(), 'apps_v1.79.0');
+
+  assert.equal(oxlintPlatform('darwin', 'arm64'), 'aarch64-apple-darwin');
+  assert.equal(oxlintAssetName('darwin', 'arm64'), 'oxlint-aarch64-apple-darwin.tar.gz');
+  assert.equal(oxlintPlatform('darwin', 'x64'), 'x86_64-apple-darwin');
+  assert.equal(oxlintAssetName('darwin', 'x64'), 'oxlint-x86_64-apple-darwin.tar.gz');
+  assert.equal(oxlintPlatform('linux', 'x64'), 'x86_64-unknown-linux-gnu');
+  assert.equal(oxlintAssetName('linux', 'x64'), 'oxlint-x86_64-unknown-linux-gnu.tar.gz');
+
+  assert.equal(
+    oxlintDownloadUrl({ platform: 'linux', arch: 'x64' }),
+    'https://github.com/oxc-project/oxc/releases/download/'
+      + 'apps_v1.79.0/oxlint-x86_64-unknown-linux-gnu.tar.gz',
+  );
+  assert.throws(() => oxlintPlatform('win32', 'x64'), /当前平台没有可用的 oxlint 1\.79\.0/);
+  assert.throws(() => oxlintReleaseTag('v1.79.0'), /版本号形状不对/);
+});
+
+test('oxlint 三个平台同时固定归档与二进制摘要', () => {
+  const expected = [
+    ['darwin', 'arm64',
+      '930e3656277ca6ad135fe7bda18e1f64886e0f8d0755df8b19cd6b499f12931b',
+      '47eb5d3eaa12e2d0257708bee5150f99e6c82dc57ab6f8e6b31012a0d57aa8b1'],
+    ['darwin', 'x64',
+      'debd377ff3e7929743c440c6f23546a99658f7b0271725718c45197ace49bc5a',
+      '2d4cbde77aead322f8f7e15de53b92c345c2c945c14db7a3f8e07472bb71ce8a'],
+    ['linux', 'x64',
+      'c7ddeff22c8d5ebd23648ff0917dd67a85178d86937acc3300ff4e974faaa042',
+      '0e3409b31befa3a12a3332c9e222d13704cacc6427f90fbea68b8614aeedd6e1'],
+  ];
+  for (const [platform, arch, archiveSha256, binarySha256] of expected) {
+    assert.deepEqual(oxlintDigests(platform, arch), { archiveSha256, binarySha256 });
+    assert.match(archiveSha256, /^[a-f0-9]{64}$/);
+    assert.match(binarySha256, /^[a-f0-9]{64}$/);
+  }
+});
+
+test('oxlint 参数展示并严格限制当前 107 条警告', () => {
+  assert.equal(OXLINT_MAX_WARNINGS, 107);
+  assert.deepEqual(
+    oxlintArgs(),
+    ['--max-warnings=107', 'src', 'scripts', 'tests', 'site'],
+  );
+  assert.deepEqual(oxlintArgs(['src']), ['--max-warnings=107', 'src']);
+});
+
+function tarEntry(name, body = Buffer.alloc(0), {
+  type = '0',
+  sizeField = `${body.length.toString(8).padStart(11, '0')}\0`,
+} = {}) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, 'utf8');
+  header.write('0000755\0', 100, 8, 'ascii');
+  header.write('0000000\0', 108, 8, 'ascii');
+  header.write('0000000\0', 116, 8, 'ascii');
+  header.write(sizeField, 124, 12, 'ascii');
+  header.write('00000000000\0', 136, 12, 'ascii');
+  header.fill(32, 148, 156);
+  header[156] = type.charCodeAt(0);
+  header.write('ustar\0', 257, 6, 'ascii');
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+  const padding = Buffer.alloc(Math.ceil(body.length / 512) * 512 - body.length);
+  return Buffer.concat([header, body, padding]);
+}
+
+const tarArchive = (...entries) => Buffer.concat([...entries, Buffer.alloc(1_024)]);
+
+function oxlintFixture(binary = Buffer.from('#!/bin/sh\nexit 0\n')) {
+  const asset = 'oxlint-test-fixture.tar.gz';
+  const entry = asset.slice(0, -'.tar.gz'.length);
+  const compressed = gzipSync(tarArchive(tarEntry(entry, binary)));
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  return {
+    asset,
+    binary,
+    compressed,
+    archiveSha256: digest(compressed),
+    binarySha256: digest(binary),
+  };
+}
+
+test('oxlint tar 提取只接收指定普通文件，并核对 tar 头', () => {
+  const body = Buffer.from('fake oxlint');
+  const archive = tarArchive(tarEntry('oxlint-aarch64-apple-darwin', body));
+
+  assert.deepEqual(
+    extractOxlintFromTar(archive, 'oxlint-aarch64-apple-darwin'),
+    body,
+  );
+  assert.throws(() => extractOxlintFromTar(archive, 'oxlint'), /找不到 oxlint 可执行文件/);
+
+  const damaged = Buffer.from(archive);
+  damaged[0] ^= 1;
+  assert.throws(() => extractOxlintFromTar(damaged, 'oxlint-aarch64-apple-darwin'), /校验和不匹配/);
+});
+
+test('oxlint tar 拒绝越界路径、链接、重复项与畸形项', () => {
+  const body = Buffer.from('binary');
+  for (const unsafe of ['../oxlint', '/tmp/oxlint']) {
+    assert.throws(
+      () => extractOxlintFromTar(tarArchive(tarEntry(unsafe, body)), 'oxlint'),
+      /不安全路径/,
+    );
+  }
+  assert.throws(
+    () => extractOxlintFromTar(tarArchive(tarEntry('oxlint', Buffer.alloc(0), { type: '2' }))),
+    /不是普通文件/,
+  );
+  assert.throws(
+    () => extractOxlintFromTar(
+      tarArchive(tarEntry('oxlint', body), tarEntry('oxlint', body)),
+    ),
+    /多个 oxlint 文件/,
+  );
+  assert.throws(
+    () => extractOxlintFromTar(
+      tarArchive(tarEntry('oxlint', body, { sizeField: 'not-octal\0' })),
+    ),
+    /大小 字段损坏/,
+  );
+  assert.throws(
+    () => extractOxlintFromTar(tarEntry('oxlint', body)),
+    /结束标记缺失/,
+  );
+  assert.throws(
+    () => extractOxlintFromTar(Buffer.concat([tarEntry('oxlint', body), Buffer.alloc(512)])),
+    /结束标记损坏/,
+  );
+  assert.throws(
+    () => extractOxlintFromTar(Buffer.concat([
+      tarArchive(tarEntry('oxlint', body)), Buffer.from([1]),
+    ])),
+    /结束标记损坏/,
+  );
+});
+
+test('oxlint gzip 解码走完整 tar 路径，损坏 gzip 明确拒绝', () => {
+  const fixture = oxlintFixture();
+  assert.deepEqual(
+    decodeOxlintArchive(fixture.compressed, 'oxlint-test-fixture'),
+    fixture.binary,
+  );
+  assert.throws(
+    () => decodeOxlintArchive(Buffer.from('not a gzip archive'), 'oxlint-test-fixture'),
+    /gzip 解压失败/,
+  );
+});
+
+test('oxlint 缓存只信可执行普通文件与固定摘要', async (t) => {
+  const dir = tmpdir(t);
+  const binary = path.join(dir, 'oxlint');
+  const bytes = Buffer.from('trusted binary');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  fs.writeFileSync(binary, bytes, { mode: 0o755 });
+
+  assert.equal(await cachedBinaryIsTrusted(binary, digest), true);
+  assert.equal(await cachedBinaryIsTrusted(binary, '0'.repeat(64)), false, '摘要不符必须拒绝');
+
+  fs.chmodSync(binary, 0o644);
+  assert.equal(await cachedBinaryIsTrusted(binary, digest), false, '不可执行文件不能命中缓存');
+  fs.chmodSync(binary, 0o755);
+
+  const link = path.join(dir, 'linked-oxlint');
+  fs.symlinkSync(binary, link);
+  assert.equal(await cachedBinaryIsTrusted(link, digest), false, '即使目标摘要正确，软链也必须拒绝');
+  assert.equal(await cachedBinaryIsTrusted(dir, digest), false, '目录不是普通文件');
+
+  fs.writeFileSync(binary, 'corrupted', { mode: 0o755 });
+  assert.equal(await cachedBinaryIsTrusted(binary, digest), false, '缓存内容被替换后不能继续命中');
+});
+
+test('oxlint 安装最终校验分别拒绝归档摘要与二进制摘要不符', async (t) => {
+  const root = tmpdir(t);
+  const fixture = oxlintFixture();
+  const fetchArchive = (destination) => fs.promises.writeFile(destination, fixture.compressed);
+
+  const archiveMismatchDir = path.join(root, 'archive-mismatch');
+  await assert.rejects(
+    () => installCachedOxlint({
+      targetDir: archiveMismatchDir,
+      asset: fixture.asset,
+      archiveSha256: '0'.repeat(64),
+      binarySha256: fixture.binarySha256,
+      fetchArchive,
+    }),
+    /下载校验失败/,
+  );
+  assert.equal(fs.existsSync(path.join(archiveMismatchDir, 'oxlint')), false);
+
+  const binaryMismatchDir = path.join(root, 'binary-mismatch');
+  await assert.rejects(
+    () => installCachedOxlint({
+      targetDir: binaryMismatchDir,
+      asset: fixture.asset,
+      archiveSha256: fixture.archiveSha256,
+      binarySha256: '0'.repeat(64),
+      fetchArchive,
+    }),
+    /二进制校验失败/,
+  );
+  assert.equal(fs.existsSync(path.join(binaryMismatchDir, 'oxlint')), false);
+});
+
+test('oxlint 无效缓存离线重装成功，随后可信缓存直接复用', async (t) => {
+  const root = tmpdir(t);
+  const targetDir = path.join(root, 'cache');
+  const binaryPath = path.join(targetDir, 'oxlint');
+  const fixture = oxlintFixture();
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.writeFileSync(binaryPath, 'tampered cache', { mode: 0o755 });
+
+  let fetches = 0;
+  const fetchArchive = async (destination) => {
+    fetches += 1;
+    await fs.promises.writeFile(destination, fixture.compressed);
+  };
+  const installed = await installCachedOxlint({
+    targetDir,
+    asset: fixture.asset,
+    archiveSha256: fixture.archiveSha256,
+    binarySha256: fixture.binarySha256,
+    fetchArchive,
+  });
+  assert.deepEqual(installed, { binaryPath, reused: false });
+  assert.equal(fetches, 1);
+  assert.deepEqual(fs.readFileSync(binaryPath), fixture.binary);
+  assert.equal(await cachedBinaryIsTrusted(binaryPath, fixture.binarySha256), true);
+
+  const reused = await installCachedOxlint({
+    targetDir,
+    asset: fixture.asset,
+    archiveSha256: fixture.archiveSha256,
+    binarySha256: fixture.binarySha256,
+    fetchArchive,
+  });
+  assert.deepEqual(reused, { binaryPath, reused: true });
+  assert.equal(fetches, 1, '可信缓存命中后不得再次取归档');
+});
+
+test('oxlint HTTPS 响应、重定向与体积策略在网络外可判定', () => {
+  const url = 'https://github.com/oxc-project/oxc/releases/download/tag/asset';
+  assert.deepEqual(
+    downloadResponsePolicy({ url, status: 200, contentLength: '123' }),
+    { kind: 'download', declaredBytes: 123 },
+  );
+  assert.deepEqual(
+    downloadResponsePolicy({ url, status: 302, location: '/objects/asset', redirectsLeft: 2 }),
+    { kind: 'redirect', url: 'https://github.com/objects/asset', redirectsLeft: 1 },
+  );
+  assert.throws(
+    () => downloadResponsePolicy({ url, status: 302, location: 'http://example.com/asset' }),
+    /拒绝非 HTTPS/,
+  );
+  assert.throws(
+    () => downloadResponsePolicy({ url, status: 302, location: 'https://[' }),
+    /无效重定向地址/,
+  );
+  assert.throws(
+    () => downloadResponsePolicy({ url, status: 302, location: null }),
+    /无地址/,
+  );
+  assert.throws(
+    () => downloadResponsePolicy({
+      url, status: 302, location: 'https://example.com/asset', redirectsLeft: 0,
+    }),
+    new RegExp(`超过 ${OXLINT_MAX_REDIRECTS} 次`),
+  );
+  assert.throws(() => downloadResponsePolicy({ url, status: 404 }), /HTTPS 404/);
+  assert.throws(
+    () => downloadResponsePolicy({
+      url, status: 200, contentLength: String(OXLINT_MAX_ARCHIVE_BYTES + 1),
+    }),
+    /体积异常/,
+  );
+  assert.throws(
+    () => downloadResponsePolicy({ url, status: 200, contentLength: 'not-a-number' }),
+    /响应头无效/,
+  );
+  assert.equal(accountDownloadBytes(OXLINT_MAX_ARCHIVE_BYTES - 1, 1), OXLINT_MAX_ARCHIVE_BYTES);
+  assert.throws(() => accountDownloadBytes(OXLINT_MAX_ARCHIVE_BYTES, 1), /超过/);
 });
 
 test('verifyPackFiles：该进的都在、tests 与 .local 不许混进去', () => {

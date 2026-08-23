@@ -1,0 +1,21 @@
+{
+  "categories": {
+    "correctness": "warn",
+    "suspicious": "off",
+    "perf": "off"
+  },
+  "rules": {
+    "no-debugger": "error",
+    "no-dupe-keys": "error",
+    "no-func-assign": "error",
+    "no-self-assign": "error",
+    "no-unreachable": "error",
+    "no-unsafe-finally": "error",
+    "valid-typeof": "error",
+    "no-await-in-loop": "warn"
+  },
+  "ignorePatterns": [
+    ".local/**",
+    "_site/**"
+  ]
+}

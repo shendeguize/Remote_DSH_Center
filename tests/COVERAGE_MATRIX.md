@@ -4,7 +4,7 @@
 「仅真机」列出 IT 编号；逐项结论记在本机的验收记录里（设计语料与验收记录不入库，
 复跑方式见下方命令）。
 
-- 一条命令跑全：`npm run check`（测试+覆盖率 → 真浏览器 → 打包产物 → CLI 入口）
+- 一条命令跑全：`npm run check`（lint → 测试/覆盖率 → 真浏览器 → 站点/文档 → 打包 → CLI）
 - 全量单测与集成：`npm test`
 - 覆盖率门槛核对：`npm run coverage:gate`
 - 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，覆盖 Hub / 管理页 / iframe）
@@ -318,8 +318,10 @@
 |---|---|
 | 入口判定认软链（装到 PATH 的 dshc 是软链，判错就静默退 0） | `tests/tooling.test.js`（`isMainEntry` + 真软链跑 `dshc --help`） |
 | 安装脚本不覆盖非本仓库的 dshc、PATH 缺失时当场提示 | 同上（`linkPlan` / `prefixInPath` / `pathHint`） |
-| 闸门关卡选择与摘要、`--only/--skip` 打错字要报错 | 同上（`selectStages` / `summarize`） |
-| 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check --only pack` |
+| 闸门六关顺序固定为 lint → tests → ui → site → pack → cli；关卡选择与摘要、`--only/--skip` 打错字要报错 | 同上（真实 `CHECK_STAGES` / `selectStages` / `summarize`） |
+| `scripts/lint.mjs` 固定 oxlint 版本、平台资产与 Release URL；下载归档和缓存二进制均核对固定 SHA-256，tar 只提取指定普通文件 | `tests/tooling.test.js`（`oxlintDigests` / `cachedBinaryIsTrusted` / `extractOxlintFromTar`），执行入口 `npm run check -- --only lint` |
+| oxlint 告警完整显示并以当前 107 条基线为上限，新增告警即红 | `tests/tooling.test.js`（`OXLINT_MAX_WARNINGS` / `oxlintArgs`） |
+| 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check -- --only pack` |
 | Chrome 查找跨平台（显式指定优先，缺了可跳过） | 同上（`findChrome`） |
 
 ## 8.2 版本自证与自更新（补丁集 0.1.0）
@@ -391,19 +393,18 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 
 ## 9. 门槛核对结果（最近一次完整 `npm run check`）
 
-最近一次完整闸门为 **1135/1135** 通过，55 个 `src/**/*.js` 均有 lcov 记录；
-真浏览器 Chrome 检查 **26/26** 通过。
+最近一次完整闸门为 **1145/1145** 通过，每个 `src/**/*.js` 均有 lcov 记录；
+真浏览器 Chrome 检查通过。
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---:|---:|---|
-| `src/**`（overall） | 15902/16518（96.27%） | ≥ 95% | 达标 |
-| `src/lib/**` | 2291/2339（97.95%） | ≥ 90% | 达标 |
-| `src/*.js` | 7064/7543（93.65%） | ≥ 75% | 达标 |
-| `src/web/`（不含 components） | 2424/2441（99.30%） | ≥ 80% | 达标 |
-| `src/web/components/**` | 4123/4195（98.28%） | 仅报告 | 不单独设卡，仍计入 overall |
+| `src/**`（overall） | 96.26% | ≥ 95% | 达标 |
+| `src/lib/**` | 最近一次完整闸门通过 | ≥ 90% | 达标 |
+| `src/*.js` | 最近一次完整闸门通过 | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 最近一次完整闸门通过 | ≥ 80% | 达标 |
+| `src/web/components/**` | 仅报告 | 仅报告 | 不单独设卡，仍计入 overall |
 
-全仓 branch 为 4363/4900（89.04%），function 为 1295/1379（93.91%）；
-两者仅诊断，不参与门槛。
+全仓 branch 与 function 仅诊断，不参与门槛。
 
 ## 10. 功能矩阵口径与豁免
 

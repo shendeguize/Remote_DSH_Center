@@ -2,7 +2,8 @@
 /**
  * 统一质量闸门：一条命令跑完发版前该跑的所有东西，给一份摘要与一个退出码。
  *
- * 分五关，任一关红就整体红（退出码 1）：
+ * 分六关，任一关红就整体红（退出码 1）：
+ *   lint      oxlint 静态检查（固定版本，本机缓存，不进 npm 依赖）
  *   tests     全量测试 + 覆盖率总闸与分档门槛（架构护栏用例也在这一关里）
  *   ui        真浏览器冒烟（无头 Chrome + CDP）；没装 Chrome 则跳过，除非 --require-browser
  *   site      站点构建 + 无头 demo 冒烟 + 双语 README 链接与命令核对
@@ -108,7 +109,16 @@ function run(cmd, args, { capture = false } = {}) {
 
 const node = (script, args = [], opts) => run(process.execPath, [path.join(REPO, 'scripts', script), ...args], opts);
 
-const STAGES = [
+export const STAGES = [
+  {
+    id: 'lint',
+    label: 'oxlint 静态检查',
+    async run() {
+      const res = await node('lint.mjs');
+      if (res.code !== 0) throw new Error('静态检查未过（详见上方输出）');
+      return 'src + scripts + tests + site';
+    },
+  },
   {
     id: 'tests',
     label: '全量测试 + 覆盖率门槛',
