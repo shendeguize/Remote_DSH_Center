@@ -164,6 +164,8 @@ jobs:
             "$RUNNER_TEMP/bin/dshc" version --json > "$RUNNER_TEMP/version.json"
           cat "$RUNNER_TEMP/version.json"
 
+          # 以下 ${...} 是 JavaScript 模板字面量；单引号特意阻止 shell 展开
+          # shellcheck disable=SC2016
           node -e '
             const fs = require("node:fs");
             const info = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
