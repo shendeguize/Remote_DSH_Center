@@ -192,6 +192,52 @@ gh repo view shendeguize/Remote_DSH_Center \
   --jq '{description, homepage: .homepageUrl, topics: ((.repositoryTopics // []) | map(.name) | sort)}'
 ```
 
+安全开关使用各自受支持的 API；下面的应用命令只提交列出的字段，可重复执行，
+不会顺带打开其他付费或实验功能。只读核验命令不修改线上设置：
+
+```bash
+# SEC-5：应用 secret scanning 与 push protection
+gh api -X PATCH repos/:owner/:repo \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  -F 'security_and_analysis[secret_scanning][status]=enabled' \
+  -F 'security_and_analysis[secret_scanning_push_protection][status]=enabled' \
+  --silent
+
+# SEC-5：只读核验
+gh api repos/:owner/:repo \
+  --jq '{secret_scanning: .security_and_analysis.secret_scanning.status, push_protection: .security_and_analysis.secret_scanning_push_protection.status}'
+
+# SEC-6：应用 private vulnerability reporting
+gh api -X PUT repos/:owner/:repo/private-vulnerability-reporting --silent
+
+# SEC-6：只读核验
+gh api repos/:owner/:repo/private-vulnerability-reporting --jq '{enabled}'
+
+# SEC-4：应用 CodeQL default setup（JavaScript/TypeScript，default query suite）
+gh api -X PATCH repos/:owner/:repo/code-scanning/default-setup \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  -f 'state=configured' \
+  -f 'query_suite=default' \
+  -f 'languages[]=javascript-typescript' \
+  --silent
+
+# SEC-4：只读核验
+gh api repos/:owner/:repo/code-scanning/default-setup \
+  --jq '{state, languages, query_suite, updated_at, schedule}'
+```
+
+> **2026-08-24 线上核验（时点记录）**：description 为
+> `One-page local manager and CLI for local and remote dsh web instances, with SSH tunnels for remote hosts.`，
+> homepage 为 `https://shendeguize.github.io/Remote_DSH_Center/`，topics 为
+> `dashboard`、`dsh`、`ssh-tunnel`；secret scanning 与 push protection 均为
+> `enabled`，private vulnerability reporting 为 `enabled`；CodeQL default setup
+> 为 `configured`、`query_suite=default`、`schedule=weekly`，API 返回的 languages
+> 为 `javascript`、`javascript-typescript`、`typescript`，首次 setup run 已
+> `success`。这是当日只读核验结果，不会随线上设置自动更新；判断当前状态必须重跑上面的
+> 只读核验命令。
+
 其余 online-only 仓库设置的期望状态如下（应用时使用
 `gh api -X PATCH repos/:owner/:repo` 或对应端点）：
 
@@ -207,6 +253,7 @@ gh repo view shendeguize/Remote_DSH_Center \
 | fork PR 跑 workflow | 需批准 | public 仓库防算力白嫖与 secrets 探测 |
 | secret scanning + push protection | 开 | [SECURITY.md](SECURITY.md) 要求保护并脱敏本机配置、日志与 SSH 数据 |
 | private vulnerability reporting | 开 | 提供 [SECURITY.md](SECURITY.md) 指定的私密漏洞报告通道 |
+| CodeQL default setup | JavaScript/TypeScript，default query suite | 不另加 workflow，以 GitHub 托管的默认配置持续扫描入库代码，补足 [SECURITY.md](SECURITY.md) 的报告与处置通道 |
 
 ## 本地环境
 
