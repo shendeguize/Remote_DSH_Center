@@ -306,9 +306,12 @@ npm run check -- --only tests      # 只跑某几关；--skip ui / --require-bro
 ```bash
 npm test              # 单测 + 假远端集成 + CLI 端到端 + 前端逻辑/挂载 + 工具链 + install.sh
 npm run coverage      # 覆盖率报告
-npm run coverage:gate # 三档门槛核对（lib ≥90%、模块层 ≥75%、web 逻辑 ≥80%）
+npm run coverage:gate # src/** 总行覆盖 ≥95% + 分档下限（lib ≥90%、模块层 ≥75%、web 逻辑 ≥80%）
 npm run ui:smoke      # 真浏览器（无头 Chrome + CDP）：布局/焦点/减少动效/真 iframe
 ```
+
+覆盖闸门还要求每个 `src/**/*.js` 都有 lcov 记录，缺一个就失败；branch/function 只作诊断，
+不参与门槛。
 
 站点与在线 demo：
 

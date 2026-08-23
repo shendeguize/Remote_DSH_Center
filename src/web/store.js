@@ -27,7 +27,7 @@ export function pendingKey(action, host = null) {
 
 function initialState() {
   return {
-    manager: { info: null, setupCompleted: null },
+    manager: { info: null, configuredPort: null, setupCompleted: null },
     defaults: null,
     hosts: new Map(),
     // 「主机集合已经从后端到过一次」——用来区分「这台不存在」与「还没同步」。
@@ -72,6 +72,11 @@ export function createStore(preset = {}) {
     emit('manager:changed', info);
   };
 
+  const setManagerConfig = (manager) => {
+    state.manager.configuredPort = manager?.port ?? null;
+    emit('manager-config:changed', state.manager.configuredPort);
+  };
+
   const setDefaults = (defaults) => {
     state.defaults = defaults ?? null;
     emit('defaults:changed', state.defaults);
@@ -99,7 +104,17 @@ export function createStore(preset = {}) {
   const applySnapshot = (frame) => {
     state.revision = frame.revision;
     state.hosts = new Map(frame.hosts.map((h) => [h.name, stamp(h)]));
-    if (frame.manager) setManagerInfo(frame.manager);
+    const hasManager = frame.manager != null;
+    const hasConfiguredPort = Object.hasOwn(frame, 'configuredPort');
+    // 先同时落状态再通知：订阅任一 manager 事件的组件都不能看到 runtime 已新、
+    // configuredPort 仍旧的半帧状态。旧后端没有 configuredPort 时保留已知值。
+    if (hasManager) {
+      state.manager.info = frame.manager;
+      state.manager.setupCompleted = frame.manager.setupCompleted ?? null;
+    }
+    if (hasConfiguredPort) state.manager.configuredPort = frame.configuredPort ?? null;
+    if (hasManager) emit('manager:changed', frame.manager);
+    if (hasConfiguredPort) emit('manager-config:changed', state.manager.configuredPort);
     if (frame.defaults !== undefined) setDefaults(frame.defaults);
     if (Array.isArray(frame.logs)) {
       state.events = frame.logs.slice(-EVENT_BUFFER_LIMIT).map(toEvent);
@@ -133,12 +148,11 @@ export function createStore(preset = {}) {
   };
 
   const applyConfigChanged = (frame) => {
-    if (frame.revision > state.revision) state.revision = frame.revision;
-    setDefaults(frame.defaults);
-    if (frame.manager && state.manager.info) {
-      state.manager.info = { ...state.manager.info, ...frame.manager };
-      emit('manager:changed', state.manager.info);
-    }
+    if (frame.revision <= state.revision) return false;
+    state.revision = frame.revision;
+    if (frame.defaults !== undefined) setDefaults(frame.defaults);
+    if (frame.manager !== undefined) setManagerConfig(frame.manager);
+    return true;
   };
 
   // ── 事件流（环形缓冲 50） ─────────────────────────────────────────────
@@ -167,11 +181,12 @@ export function createStore(preset = {}) {
 
   /**
    * 写操作是否可用（10 §3.2）。禁写只针对「曾连上又断了」——首屏还在建连时不该
-   * 把按钮全灰，否则页面刚打开的一瞬什么都点不了。
+   * 把按钮全灰，否则页面刚打开的一瞬什么都点不了。重连后必须等全量 snapshot
+   * 清掉 resyncing，旧页面状态尚未校准时不能提前放开写操作。
    */
   const canWrite = () => {
-    const { sse, everOpened } = state.connection;
-    if (sse === 'open') return true;
+    const { sse, everOpened, resyncing } = state.connection;
+    if (sse === 'open') return !resyncing;
     return !everOpened && sse !== 'offline';
   };
 
@@ -281,6 +296,7 @@ export function createStore(preset = {}) {
     on,
     emit,
     setManagerInfo,
+    setManagerConfig,
     setDefaults,
     mergeFetchedHosts,
     applySnapshot,

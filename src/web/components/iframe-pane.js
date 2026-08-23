@@ -5,6 +5,7 @@
  * degraded 往返不 reload、crashed 恢复只 reload 一次、localPort 变化必须重建。
  */
 
+import { isHostActionAllowed } from '../host-rules.js';
 import { ACTION_LABEL, button, el, phaseMeta } from '../utils.js';
 
 /** 有 iframe 意义的三态之外都不该留着 pane。 */
@@ -61,14 +62,26 @@ export function overlayFor(host, { startPending = false } = {}) {
   if (startPending && host.phase === 'ready') return startingOverlay(host);
   const local = host.local === true;
   switch (host.phase) {
-    case 'degraded':
+    case 'degraded': {
+      const canReconnect = isHostActionAllowed(host, 'reconnect');
       return {
         title: local ? '本机页面连接中断，manager 正在恢复' : '隧道断开，manager 正在重连',
-        body: host.tunnel?.suspendedReason ? '重连已暂停，需人工处理。' : '页面内容仍是上次加载的快照。',
-        action: 'reconnect',
+        body: host.tunnel?.suspendedReason
+          ? '重连已暂停，需人工处理。'
+          : canReconnect
+            ? '页面内容仍是上次加载的快照。'
+            : '页面内容仍是上次加载的快照；请回管理台手动处理。',
+        action: canReconnect ? 'reconnect' : null,
       };
-    case 'crashed':
-      return { title: local ? '本机 dsh web 已退出' : '远端 dsh web 已退出', body: '重启后页面会自动重新载入。', action: 'restart' };
+    }
+    case 'crashed': {
+      const canRestart = isHostActionAllowed(host, 'restart');
+      return {
+        title: local ? '本机 dsh web 已退出' : '远端 dsh web 已退出',
+        body: canRestart ? '重启后页面会自动重新载入。' : '该实例不是本工具拉起的，请回管理台手动处理。',
+        action: canRestart ? 'restart' : null,
+      };
+    }
     case 'starting':
       return startingOverlay(host);
     case 'running':

@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { newFactoryConfig, newHostConfig, resolvePaths } from '../src/defaults.js';
-import { reopenSsh } from '../src/lib/ssh.js';
+import { _resetQueues, reopenSsh } from '../src/lib/ssh.js';
 import * as launcher from '../src/launcher.js';
 import * as monitor from '../src/monitor.js';
 import * as store from '../src/store.js';
@@ -50,6 +50,17 @@ async function unusedPort() {
   const { server, port } = await listenHttp();
   await closeServer(server);
   return port;
+}
+
+async function waitUntil(predicate, label, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // eslint-disable-next-line no-await-in-loop -- 等待子进程生命周期收敛
+    if (await predicate()) return;
+    if (Date.now() >= deadline) throw new Error(`等待「${label}」超时`);
+    // eslint-disable-next-line no-await-in-loop -- 同上
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+  }
 }
 
 /**
@@ -130,6 +141,76 @@ async function localRuntime(t, { port, alive = true }) {
     calls() {
       if (!fs.existsSync(callsFile)) return [];
       return fs.readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+    },
+  };
+}
+
+async function remoteTunnelRuntime(t, { port }) {
+  await tunnel.closeAll();
+  tunnel._reset();
+  store._reset();
+  _resetQueues();
+  reopenSsh();
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-tunnel-remote-'));
+  const callsFile = path.join(dir, 'starts.log');
+  const runner = path.join(dir, 'tunnel.mjs');
+  fs.writeFileSync(runner, [
+    "import fs from 'node:fs';",
+    "import net from 'node:net';",
+    'const args = process.argv.slice(2);',
+    `fs.appendFileSync(${JSON.stringify(callsFile)}, 'start\\n');`,
+    "const forward = args[args.indexOf('-L') + 1];",
+    "const localPort = Number(forward.split(':')[1]);",
+    'const server = net.createServer((socket) => socket.destroy());',
+    "server.listen(localPort, '127.0.0.1');",
+    "process.on('SIGUSR1', () => process.exit(255));",
+    "process.on('SIGTERM', () => process.exit(0));",
+  ].join('\n'));
+
+  const savedSsh = process.env.DSHC_SSH_BIN;
+  process.env.DSHC_SSH_BIN = `${process.execPath} ${runner}`;
+  const config = newFactoryConfig();
+  config.setupCompleted = true;
+  config.hosts['gpu-1'] = { ...newHostConfig(), localPort: port };
+  fs.writeFileSync(path.join(dir, 'config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  fs.writeFileSync(path.join(dir, 'state.json'), `${JSON.stringify({
+    hosts: {
+      'gpu-1': {
+        phase: 'running',
+        probe: null,
+        web: {
+          pid: 43210,
+          port: 19001,
+          startedByUs: true,
+          cmdFingerprint: FINGERPRINT,
+          log: 'web-19001.log',
+          startedAt: new Date(0).toISOString(),
+        },
+        tunnel: null,
+        patchSync: { files: {} },
+        manualInstances: [],
+      },
+    },
+  }, null, 2)}\n`);
+  await store.init({ pathsOverride: resolvePaths({ DSHC_HOME: dir }, os.homedir()) });
+  store.setTunnelStatusProvider(tunnel.status);
+
+  t.after(async () => {
+    await tunnel.closeAll();
+    tunnel._reset();
+    store._reset();
+    _resetQueues();
+    reopenSsh();
+    if (savedSsh === undefined) delete process.env.DSHC_SSH_BIN;
+    else process.env.DSHC_SSH_BIN = savedSsh;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  return {
+    starts() {
+      if (!fs.existsSync(callsFile)) return 0;
+      return fs.readFileSync(callsFile, 'utf8').trim().split('\n').filter(Boolean).length;
     },
   };
 }
@@ -299,6 +380,69 @@ test('direct reconnect/restartChild 稳定拒绝且不改变运行条目', async
   await tunnel.closeAll();
   tunnel._reset();
   store._reset();
+});
+
+test('requestReconnect：无活动隧道时返回稳定 NOT_FOUND，不新建无主资源', async () => {
+  await tunnel.closeAll();
+  tunnel._reset();
+
+  await assert.rejects(
+    () => tunnel.requestReconnect('missing'),
+    (err) => err?.code === 'NOT_FOUND' && /当前无隧道可重连/.test(err.message),
+  );
+  assert.equal(tunnel.status('missing'), null);
+  assert.equal(tunnel._childPid('missing'), null);
+});
+
+test('remote open：子进程端口冲突退出时分类并清除失败条目', async (t) => {
+  await tunnel.closeAll();
+  tunnel._reset();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-tunnel-exit-'));
+  const runner = path.join(dir, 'exit.mjs');
+  fs.writeFileSync(runner, "process.stderr.write('bind: Address already in use\\n'); process.exit(255);\n");
+  const savedSsh = process.env.DSHC_SSH_BIN;
+  process.env.DSHC_SSH_BIN = `${process.execPath} ${runner}`;
+  t.after(async () => {
+    await tunnel.closeAll();
+    tunnel._reset();
+    if (savedSsh === undefined) delete process.env.DSHC_SSH_BIN;
+    else process.env.DSHC_SSH_BIN = savedSsh;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const port = await unusedPort();
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await assert.rejects(
+      () => tunnel.open('gpu-1', { localPort: port, remotePort: 19001 }),
+      (err) => err?.code === 'TUNNEL_PORT_BUSY' && /已被占用/.test(err.message),
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+  assert.equal(tunnel.status('gpu-1'), null, '失败 open 必须删除内存条目');
+  assert.equal(tunnel._childPid('gpu-1'), null, '退出子进程不得残留 pid');
+});
+
+test('意外退出已排重连时显式 close 会取消计时器并收净条目', async (t) => {
+  const port = await unusedPort();
+  const fixture = await remoteTunnelRuntime(t, { port });
+  await tunnel.open('gpu-1', { localPort: port, remotePort: 19001 });
+  const childPid = tunnel._childPid('gpu-1');
+  assert.ok(childPid);
+
+  process.kill(childPid, 'SIGUSR1');
+  await waitUntil(
+    () => tunnel.status('gpu-1')?.connected === false,
+    '意外退出进入 degraded/待重连',
+  );
+  assert.equal(store.getPhase('gpu-1'), 'degraded');
+  assert.equal(fixture.starts(), 1);
+
+  await tunnel.close('gpu-1');
+  assert.equal(tunnel.status('gpu-1'), null);
+  assert.equal(tunnel._childPid('gpu-1'), null);
+  assert.equal(fixture.starts(), 1, '显式关闭不得再冒出新的隧道子进程');
 });
 
 test('recoverOne：本机 VERIFY 成功后按 web.port 重建 direct，不分配映射端口', async (t) => {

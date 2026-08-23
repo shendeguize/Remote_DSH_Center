@@ -5,11 +5,13 @@
  * 前端只做即时提示，落盘对错以后端 400 VALIDATION 为准。
  */
 
-export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PORT_MIN = 1;
-const PORT_MAX = 65_535;
+import { BINDABLE_PORT_MIN, PORT_MAX, PORT_MIN } from './setup-schema.js';
 
-export function parsePort(raw, { field = 'port', allowEmpty = false } = {}) {
+export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function parsePort(raw, {
+  field = 'port', allowEmpty = false, min = PORT_MIN, max = PORT_MAX,
+} = {}) {
   const s = String(raw ?? '').trim();
   if (s === '') {
     if (allowEmpty) return { ok: true, value: null };
@@ -17,15 +19,15 @@ export function parsePort(raw, { field = 'port', allowEmpty = false } = {}) {
   }
   if (!/^\d+$/.test(s)) return { ok: false, error: `${field} 必须是整数` };
   const n = Number(s);
-  if (n < PORT_MIN || n > PORT_MAX) return { ok: false, error: `${field} 须在 ${PORT_MIN}–${PORT_MAX} 之间` };
+  if (n < min || n > max) return { ok: false, error: `${field} 须在 ${min}–${max} 之间` };
   return { ok: true, value: n };
 }
 
 /** 本机端口区间：需成对、有序，且宽度足够容纳预期主机数。 */
 export function parsePortRange(rawFrom, rawTo, { minWidth = 1 } = {}) {
-  const from = parsePort(rawFrom, { field: '区间起点' });
+  const from = parsePort(rawFrom, { field: '区间起点', min: BINDABLE_PORT_MIN });
   if (!from.ok) return from;
-  const to = parsePort(rawTo, { field: '区间终点' });
+  const to = parsePort(rawTo, { field: '区间终点', min: BINDABLE_PORT_MIN });
   if (!to.ok) return to;
   if (to.value < from.value) return { ok: false, error: '区间终点必须 ≥ 起点' };
   const width = to.value - from.value + 1;
@@ -95,7 +97,7 @@ export function validatePatches(list) {
 
 /**
  * 主机注入表单 → PUT /api/hosts/:name/config 请求体。
- * @param {{enabled:boolean, autoStart:boolean, remoteWebPort:string, workdir:string,
+ * @param {{enabled:boolean, remoteWebPort:string, workdir:string,
  *          env:string, extraArgs:string, patches:string}} raw
  */
 export function buildHostPatch(raw) {
@@ -117,7 +119,6 @@ export function buildHostPatch(raw) {
     ok: true,
     value: {
       enabled: Boolean(raw.enabled),
-      autoStart: Boolean(raw.autoStart),
       remoteWebPort: port.value,
       workdir: workdir.value,
       inject: { env: env.value, extraArgs: parseLines(raw.extraArgs), patches: patches.value },

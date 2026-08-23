@@ -6,13 +6,62 @@ import test from 'node:test';
 import {
   LAST_HOST_KEY,
   applyGuard,
+  attachRouter,
   canOpenHost,
   hostRoute,
+  navigate,
   parseRoute,
   readLastHost,
   rememberLastHost,
   rootRouteTarget,
 } from '../../src/web/router.js';
+
+function createHashWindow(initialHash = '') {
+  const listeners = new Map();
+  const replaceCalls = [];
+  let hash = initialHash;
+
+  const win = {
+    HashChangeEvent: class {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+    addEventListener(type, fn) {
+      const handlers = listeners.get(type) ?? new Set();
+      handlers.add(fn);
+      listeners.set(type, handlers);
+    },
+    removeEventListener(type, fn) {
+      listeners.get(type)?.delete(fn);
+    },
+    dispatchEvent(event) {
+      for (const fn of [...(listeners.get(event.type) ?? [])]) fn(event);
+      return true;
+    },
+    listenerCount(type) {
+      return listeners.get(type)?.size ?? 0;
+    },
+    replaceCalls,
+  };
+
+  win.location = {
+    get hash() {
+      return hash;
+    },
+    set hash(value) {
+      if (value === hash) return;
+      hash = value;
+      win.dispatchEvent(new win.HashChangeEvent('hashchange'));
+    },
+    replace(value) {
+      replaceCalls.push(value);
+      this.hash = value;
+    },
+  };
+
+  return win;
+}
 
 test('parseRoute 覆盖反转后的路由表', () => {
   assert.deepEqual(parseRoute(''), { kind: 'root', host: null, raw: '#/' });
@@ -90,9 +139,34 @@ test('根路由：lastHost 命中可开主机，否则落 hub', () => {
   assert.equal(rootRouteTarget(hosts, { getItem: () => null }), '#/hub');
 });
 
-test('根路由：lastHost 已禁用时不能恢复，即使旧运行态仍可开', () => {
-  const disabled = { name: 'gpu-1', phase: 'running', enabled: false };
-  assert.equal(rootRouteTarget([disabled], { getItem: () => 'gpu-1' }), '#/hub');
+test('根路由：lastHost 统一使用 config.enabled，缺失时才回退 legacy enabled', () => {
+  const cases = [
+    {
+      label: 'config 禁用覆盖 legacy 启用',
+      host: { name: 'config-disabled', phase: 'running', config: { enabled: false }, enabled: true },
+      expected: '#/hub',
+    },
+    {
+      label: 'config 启用覆盖 legacy 禁用',
+      host: { name: 'config-enabled', phase: 'running', config: { enabled: true }, enabled: false },
+      expected: '#/host/config-enabled',
+    },
+    {
+      label: '无 config 时回退 legacy 禁用',
+      host: { name: 'legacy-disabled', phase: 'running', enabled: false },
+      expected: '#/hub',
+    },
+    {
+      label: '无 config 时回退 legacy 启用',
+      host: { name: 'legacy-enabled', phase: 'running', enabled: true },
+      expected: '#/host/legacy-enabled',
+    },
+  ];
+
+  for (const current of cases) {
+    const storage = { getItem: () => current.host.name };
+    assert.equal(rootRouteTarget([current.host], storage), current.expected, current.label);
+  }
 });
 
 test('lastHost 存取失败静默降级', () => {
@@ -109,4 +183,41 @@ test('lastHost 存取失败静默降级', () => {
   };
   assert.equal(rememberLastHost('proj/gpu #1', storage), true);
   assert.equal(readLastHost(storage), 'proj/gpu #1');
+});
+
+test('attachRouter 立即回调、响应 hashchange，detach 后彻底解绑', () => {
+  const win = createHashWindow('#/hub');
+  const routes = [];
+  const detach = attachRouter((route) => routes.push(route), { win });
+
+  assert.deepEqual(routes, [{ kind: 'hub', host: null, raw: '#/hub' }], '绑定后立即交付当前路由');
+  assert.equal(win.listenerCount('hashchange'), 1);
+
+  win.location.hash = '#/host/gpu-1';
+  assert.deepEqual(routes.at(-1), { kind: 'host', host: 'gpu-1', raw: '#/host/gpu-1' });
+
+  detach();
+  assert.equal(win.listenerCount('hashchange'), 0, 'detach 必须释放监听器');
+  win.location.hash = '#/manage';
+  assert.equal(routes.length, 2, '解绑后 hash 变化不再回调');
+});
+
+test('navigate 对新 hash 依赖原生事件，对同 hash 显式补发事件', () => {
+  const win = createHashWindow('#/hub');
+  const observed = [];
+  win.addEventListener('hashchange', (event) => observed.push({ event, hash: win.location.hash }));
+
+  navigate('#/manage', { win });
+  assert.equal(win.location.hash, '#/manage');
+  assert.equal(observed.length, 1, '新 hash 由 location 变化触发一次');
+
+  navigate('#/manage', { win });
+  assert.equal(observed.length, 2, '同 hash 也必须显式通知路由层');
+  assert.ok(observed[1].event instanceof win.HashChangeEvent);
+  assert.equal(observed[1].hash, '#/manage');
+
+  navigate('#/setup', { win, replace: true });
+  assert.deepEqual(win.replaceCalls, ['#/setup']);
+  assert.equal(win.location.hash, '#/setup');
+  assert.equal(observed.length, 3, 'replace 到新 hash 同样触发路由更新');
 });

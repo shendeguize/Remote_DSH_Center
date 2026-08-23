@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  DASH, coalesce, dshSummary, fmtAgo, fmtClock, fmtDuration, isManaged, mappingSummary, phaseHint, phaseMeta,
-  rowActions, text,
+  DASH, coalesce, copyText, dshSummary, fmtAgo, fmtClock, fmtDuration, isManaged, mappingSummary, phaseHint,
+  phaseMeta, phaseBadge, rowActions, text,
 } from '../../src/web/utils.js';
+import { allowedHostActions } from '../../src/web/host-rules.js';
+import { installDom } from './dom-shim.js';
 
 const PHASES = ['running', 'degraded', 'crashed', 'ready', 'starting', 'no_dsh', 'unreachable', 'unknown'];
 
@@ -19,6 +21,21 @@ test('八态都有中文文案与非纯色标识（无障碍要求）', () => {
   // 后端将来新增 phase 时按原样显示，而不是变成看不懂的「—」
   assert.deepEqual(phaseMeta('weird'), { label: 'weird', tone: 'neutral', dot: 'none' });
   assert.equal(phaseMeta(undefined).label, '—');
+});
+
+test('phaseBadge 兼容 phase 字符串与展示 meta', (t) => {
+  const dom = installDom();
+  t.after(dom.restore);
+
+  const fromPhase = phaseBadge('running');
+  assert.equal(fromPhase.dataset.tone, 'running');
+  assert.equal(fromPhase.querySelector('.status-dot').dataset.dot, 'solid');
+  assert.equal(fromPhase.textContent, '运行中');
+
+  const fromMeta = phaseBadge({ label: '本机不可用', tone: 'neutral', dot: 'none' });
+  assert.equal(fromMeta.dataset.tone, 'neutral');
+  assert.equal(fromMeta.querySelector('.status-dot').dataset.dot, 'none');
+  assert.equal(fromMeta.textContent, '本机不可用');
 });
 
 test('phaseHint 呈现缺失原因与挂起原因', () => {
@@ -72,17 +89,42 @@ test('手动实例禁 stop/restart（不误杀契约）', () => {
   assert.equal(isManaged(managed), true);
 
   assert.deepEqual(rowActions(manual), ['open', 'probe']);
-  assert.deepEqual(rowActions(managed), ['open', 'restart', 'stop']);
+  assert.deepEqual(rowActions(managed), ['open', 'restart', 'stop', 'probe']);
 });
 
-test('rowActions 按 phase 裁剪', () => {
-  assert.deepEqual(rowActions({ phase: 'ready' }), ['start', 'probe']);
-  assert.deepEqual(rowActions({ phase: 'starting' }), [], '启动中不给任何动作');
-  assert.deepEqual(rowActions({ phase: 'degraded', web: { startedByUs: true } }), ['open', 'reconnect', 'stop']);
-  assert.deepEqual(rowActions({ phase: 'crashed', web: { startedByUs: true } }), ['start', 'open', 'probe']);
-  assert.deepEqual(rowActions({ phase: 'no_dsh' }), ['probe']);
-  assert.deepEqual(rowActions({ phase: 'unreachable' }), ['probe']);
-  assert.deepEqual(rowActions(null), ['probe']);
+test('rowActions 在八态与受管/手动实例上逐项复用共享矩阵', () => {
+  const ownerships = [
+    ['受管', true],
+    ['手动', false],
+  ];
+  for (const phase of PHASES) {
+    for (const [ownership, startedByUs] of ownerships) {
+      const host = { phase, web: { startedByUs } };
+      assert.deepEqual(
+        rowActions(host),
+        [...allowedHostActions(host)],
+        `${phase}/${ownership} 的行内动作必须与共享矩阵一致`,
+      );
+    }
+  }
+
+  const startingManaged = { phase: 'starting', web: { startedByUs: true } };
+  const startingManual = { phase: 'starting', web: { startedByUs: false } };
+  assert.deepEqual(rowActions(startingManaged), ['open', 'probe'], '后端不接受 starting stop，行内不得暴露');
+  assert.deepEqual(rowActions(startingManual), rowActions(startingManaged), 'starting 不按实例归属分叉');
+
+  const managedDegraded = rowActions({ phase: 'degraded', web: { startedByUs: true } });
+  assert.equal(managedDegraded.includes('restart'), true, '受管 degraded 可主动重启');
+  const manualDegraded = rowActions({ phase: 'degraded', web: { startedByUs: false } });
+  assert.deepEqual(
+    manualDegraded,
+    ['open', 'reconnect', 'probe'],
+    '手动 degraded 可重连，但不能关停或重启进程',
+  );
+
+  const crashed = rowActions({ phase: 'crashed', web: { startedByUs: true } });
+  assert.equal(crashed.includes('restart'), true, '受管 crashed 应重启');
+  assert.equal(crashed.includes('start'), false, '受管 crashed 不应走新拉起');
 });
 
 test('时间格式化', () => {
@@ -134,4 +176,76 @@ test('coalesce：没有 rAF 的环境退化成定时器，不至于永不重绘'
     if (saved === undefined) delete globalThis.requestAnimationFrame;
     else globalThis.requestAnimationFrame = saved;
   }
+});
+
+test('copyText 优先使用 clipboard，成功时不创建临时节点', async (t) => {
+  const dom = installDom();
+  t.after(dom.restore);
+  const copied = [];
+  let fallbackCalls = 0;
+  navigator.clipboard.writeText = async (value) => copied.push(value);
+  document.execCommand = () => {
+    fallbackCalls += 1;
+    return true;
+  };
+
+  const before = document.body.children.length;
+  assert.equal(await copyText('gpu-1 output'), true);
+  assert.deepEqual(copied, ['gpu-1 output']);
+  assert.equal(fallbackCalls, 0);
+  assert.equal(document.body.children.length, before);
+  assert.equal(document.body.querySelector('textarea'), null);
+});
+
+test('copyText 在 clipboard 抛错或缺失时回退，并始终移除 textarea', async (t) => {
+  const dom = installDom();
+  t.after(dom.restore);
+  const originalCreateElement = document.createElement.bind(document);
+  let selected = 0;
+  document.createElement = (tag) => {
+    const node = originalCreateElement(tag);
+    if (tag === 'textarea') {
+      node.select = () => {
+        selected += 1;
+      };
+    }
+    return node;
+  };
+
+  const cases = [
+    {
+      label: 'clipboard 拒绝',
+      installClipboard() {
+        navigator.clipboard = { writeText: async () => { throw new Error('permission denied'); } };
+      },
+    },
+    {
+      label: 'clipboard API 缺失',
+      installClipboard() {
+        delete navigator.clipboard;
+      },
+    },
+  ];
+
+  for (const current of cases) {
+    current.installClipboard();
+    const before = document.body.children.length;
+    let copiedByFallback = null;
+    document.execCommand = (command) => {
+      const textarea = document.body.querySelector('textarea');
+      assert.equal(command, 'copy', current.label);
+      assert.ok(textarea, `${current.label} 时复制节点必须已挂进 DOM`);
+      assert.equal(textarea.getAttribute('readonly'), '');
+      assert.equal(textarea.style.position, 'fixed');
+      assert.equal(textarea.style.opacity, '0');
+      copiedByFallback = textarea.value;
+      return true;
+    };
+
+    assert.equal(await copyText(`fallback: ${current.label}`), true, current.label);
+    assert.equal(copiedByFallback, `fallback: ${current.label}`);
+    assert.equal(document.body.children.length, before, `${current.label} 后不得残留节点`);
+    assert.equal(document.body.querySelector('textarea'), null, `${current.label} 后 textarea 必须移除`);
+  }
+  assert.equal(selected, cases.length, '每次 fallback 都必须选中临时 textarea');
 });

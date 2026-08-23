@@ -11,10 +11,13 @@ import {
   clampMenuPosition, hostFallbackPanelId, menuItems, nextTabIndex, overflowHosts, visibleTabs,
 } from '../../src/web/components/tabbar.js';
 import { hostPanelId } from '../../src/web/components/iframe-pane.js';
+import { isHostActionAllowed } from '../../src/web/host-rules.js';
 
 const host = (name, phase, patch = {}) => ({
   name, phase, enabled: true, local: false, mappedUrl: null, web: { pid: 1, startedByUs: true }, ...patch,
 });
+const PHASES = ['running', 'degraded', 'crashed', 'ready', 'starting', 'no_dsh', 'unreachable', 'unknown'];
+const MENU_HOST_ACTIONS = ['restart', 'stop', 'reconnect'];
 
 test('主标签：enabled 的 ready/starting/running/degraded/crashed 全部常驻', () => {
   const tabs = visibleTabs([
@@ -48,43 +51,54 @@ test('ready fallback panel id 对任意主机名稳定编码，且不占用 ifra
   assert.notEqual(hostFallbackPanelId(name), hostPanelId(name));
 });
 
-test('菜单项：受管 running 可重启/关停，重连禁用', () => {
-  const items = menuItems(host('a', 'running', { mappedUrl: 'http://127.0.0.1:1/' }));
-  const by = Object.fromEntries(items.map((i) => [i.action, i.enabled]));
-  assert.deepEqual(by, {
-    restart: true,
-    stop: true,
-    reconnect: false,
-    'copy-address': true,
-    'view-manage': true,
-    'open-new-window': true,
-  });
-  assert.equal(items.length, 6, '无效项禁用而非隐藏，位置要稳定');
+test('菜单写动作在八态与受管/手动实例上逐项复用共享矩阵', () => {
+  for (const phase of PHASES) {
+    for (const startedByUs of [true, false]) {
+      const current = host(`${phase}-${startedByUs}`, phase, { web: { pid: 9, startedByUs } });
+      const byAction = new Map(menuItems(current).map((item) => [item.action, item]));
+      for (const action of MENU_HOST_ACTIONS) {
+        assert.equal(
+          byAction.get(action)?.enabled,
+          isHostActionAllowed(current, action),
+          `${phase}/${startedByUs ? '受管' : '手动'} 的 ${action} 必须与共享矩阵一致`,
+        );
+      }
+    }
+  }
 });
 
-test('菜单项：degraded 才能重连；无映射地址不能复制', () => {
-  const by = Object.fromEntries(menuItems(host('a', 'degraded')).map((i) => [i.action, i.enabled]));
-  assert.equal(by.reconnect, true);
-  assert.equal(by['copy-address'], false);
+test('菜单允许手动 degraded 重连，且不向 starting 暴露 stop', () => {
+  const manualDegraded = Object.fromEntries(
+    menuItems(host('manual-degraded', 'degraded', {
+      web: { pid: 9, startedByUs: false },
+    })).map((item) => [item.action, item.enabled]),
+  );
+  assert.equal(manualDegraded.reconnect, true);
+  assert.equal(manualDegraded.restart, false);
+  assert.equal(manualDegraded.stop, false);
+
+  for (const startedByUs of [true, false]) {
+    const starting = Object.fromEntries(
+      menuItems(host(`starting-${startedByUs}`, 'starting', {
+        web: { pid: 9, startedByUs },
+      })).map((item) => [item.action, item.enabled]),
+    );
+    assert.equal(starting.stop, false);
+  }
 });
 
-test('菜单项：手动实例一律禁写（不误杀契约）', () => {
-  const manual = host('a', 'running', { web: { pid: 9, startedByUs: false }, mappedUrl: 'http://127.0.0.1:1/' });
-  const by = Object.fromEntries(menuItems(manual).map((i) => [i.action, i.enabled]));
-  assert.deepEqual(by, {
-    restart: false,
-    stop: false,
-    reconnect: false,
-    'copy-address': true,
-    'view-manage': true,
-    'open-new-window': true,
-  });
-});
+test('菜单辅助动作只按映射地址裁剪', () => {
+  const mapped = Object.fromEntries(menuItems(host('mapped', 'running', {
+    mappedUrl: 'http://127.0.0.1:1/',
+  })).map((item) => [item.action, item.enabled]));
+  const unmapped = Object.fromEntries(menuItems(host('unmapped', 'degraded')).map((item) => [item.action, item.enabled]));
 
-test('菜单项：crashed 可重启但不能关停', () => {
-  const by = Object.fromEntries(menuItems(host('a', 'crashed')).map((i) => [i.action, i.enabled]));
-  assert.equal(by.restart, true);
-  assert.equal(by.stop, false);
+  for (const action of ['copy-address', 'open-new-window']) {
+    assert.equal(mapped[action], true, `${action} 有映射地址时可用`);
+    assert.equal(unmapped[action], false, `${action} 无映射地址时禁用`);
+  }
+  assert.equal(mapped['view-manage'], true);
+  assert.equal(unmapped['view-manage'], true);
 });
 
 /**

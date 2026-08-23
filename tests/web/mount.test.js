@@ -24,6 +24,14 @@ function localHostView(name, patch = {}) {
   };
 }
 
+function drawerDetail(drawer, label) {
+  const detail = drawer.querySelector('.probe-detail');
+  const labels = detail.querySelectorAll('dt');
+  const values = detail.querySelectorAll('dd');
+  const index = labels.findIndex((node) => node.textContent === label);
+  return index < 0 ? null : values[index].textContent;
+}
+
 function installStorage(t, storage) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
@@ -56,6 +64,8 @@ test('首屏：拉 info/hosts/config，根路由落 hub 而不是管理台', asy
   assert.equal(defaults.querySelectorAll('input')[0].value, '8899');
 
   assert.equal(app.store.listHosts().length, 2);
+  assert.equal(app.store.state.manager.info.port, 7788);
+  assert.equal(app.store.state.manager.configuredPort, 7788);
   assert.equal(dom.window.location.hash, '#/hub');
   assert.equal(dom.app.querySelector('.view-hub').hidden, false);
   assert.match(dom.app.querySelector('.view-hub').textContent, /选择一台主机开始工作/);
@@ -101,7 +111,7 @@ test('添加本机：名称输入可留空，默认名冲突后可填自定义�
   assert.equal(dom.app.querySelector('.host-table tbody tr').dataset.host, 'workstation-local');
 });
 
-test('本机行使用直连与本机探测文案，不提 SSH 或远端', async (t) => {
+test('本机行使用共享状态、提示与直连映射语义', async (t) => {
   const missing = localHostView('workstation', {
     phase: 'no_dsh',
     probe: {
@@ -115,8 +125,8 @@ test('本机行使用直连与本机探测文案，不提 SSH 或远端', async 
   const { dom, es } = await mount(t, { hosts: [missing] });
   const row = () => dom.app.querySelector('.host-table tbody tr');
 
-  assert.match(row().textContent, /本机未安装 dsh/);
-  assert.doesNotMatch(row().textContent, /SSH|远端/);
+  assert.equal(row().querySelector('.phase-badge').textContent, '本机未安装或未配置');
+  assert.equal(row().querySelector('.phase-hint').textContent, '本机未安装 dsh');
 
   es().send('host-changed', {
     revision: 2,
@@ -128,19 +138,100 @@ test('本机行使用直连与本机探测文案，不提 SSH 或远端', async 
     }),
   });
   await flush();
-  assert.match(row().querySelector('.mapping-cell').textContent, /本机 19001/);
-  assert.doesNotMatch(row().querySelector('.mapping-cell').textContent, /远端/);
+  const mapping = row().querySelector('.mapping-cell');
+  assert.equal(mapping.querySelector('a').textContent, '本机 19001');
+  assert.equal(mapping.querySelector('small').textContent, '直连 dsh web');
 
   es().send('host-changed', {
     revision: 3,
     host: localHostView('workstation', {
       phase: 'unreachable',
-      probe: { ...hostView('workstation').probe, errorSummary: null },
+      probe: { ...hostView('workstation').probe, errorSummary: '本机探测 fixture 失败详情' },
     }),
   });
   await flush();
-  assert.match(row().textContent, /本机探测失败/);
-  assert.doesNotMatch(row().textContent, /SSH|远端/);
+  assert.equal(row().querySelector('.phase-badge').textContent, '本机不可用');
+  assert.equal(row().querySelector('.phase-hint').textContent, '本机探测 fixture 失败详情',
+    'errorSummary 是用户诊断信息，不能因本机身份被隐藏');
+});
+
+test('本机抽屉 badge 复用共享文案，不渗入 SSH/远端措辞', async (t) => {
+  const unavailable = localHostView('workstation', {
+    phase: 'unreachable',
+    probe: { ...hostView('workstation').probe, errorSummary: '本机命令执行失败' },
+  });
+  const { dom } = await mount(t, { hosts: [unavailable] });
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(drawer.querySelector('.drawer-badge .phase-badge').textContent, '本机不可用');
+  assert.doesNotMatch(drawer.textContent, /SSH|远端/);
+});
+
+test('本机抽屉映射只在 URL 与 tunnel.localPort 齐全时展示 URL', async (t) => {
+  const missingPort = localHostView('workstation', {
+    phase: 'running',
+    mappedUrl: 'http://127.0.0.1:19001/',
+    web: { pid: 999, port: 19001, startedByUs: true, startedAt: new Date().toISOString(), workdir: null },
+    tunnel: { localPort: null, connected: true, reconnectAttempt: 0, suspendedReason: null },
+  });
+  const { dom, es } = await mount(t, { hosts: [missingPort] });
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(drawerDetail(drawer, '本机映射'), '—', '缺 tunnel.localPort 时不得直接信 mappedUrl');
+
+  es().send('host-changed', {
+    revision: 2,
+    host: {
+      ...missingPort,
+      tunnel: { ...missingPort.tunnel, localPort: 19001 },
+    },
+  });
+  await flush();
+  assert.equal(drawerDetail(drawer, '本机映射'), missingPort.mappedUrl);
+});
+
+test('本机映射：Hub 与管理表只认同时确认的 mappedUrl 和 tunnel.localPort', async (t) => {
+  const localRunning = (name, mappedUrl, tunnelPort, configPort) => {
+    const base = localHostView(name);
+    return {
+      ...base,
+      phase: 'running',
+      mappedUrl,
+      config: { ...base.config, localPort: configPort },
+      web: {
+        pid: 999, port: 8899, startedByUs: true, startedAt: new Date().toISOString(), workdir: null,
+      },
+      tunnel: {
+        localPort: tunnelPort, connected: true, reconnectAttempt: 0, suspendedReason: null,
+      },
+    };
+  };
+  const confirmed = localRunning('local-confirmed', 'http://127.0.0.1:19001/', 19_001, 17_701);
+  const missingUrl = localRunning('local-missing-url', null, 19_002, 17_702);
+  const missingPort = localRunning('local-missing-port', 'http://127.0.0.1:19003/', null, 17_703);
+  const { dom } = await mount(t, { hosts: [confirmed, missingUrl, missingPort] });
+  const tableMapping = (name) => dom.app
+    .querySelector(`.host-table tbody tr[data-host="${name}"] .mapping-cell`);
+  const hubSummary = (name) => dom.app
+    .querySelector(`.hub-host-card[data-host="${name}"] .hub-host-summary`);
+
+  assert.equal(tableMapping(confirmed.name).querySelector('a').getAttribute('href'), confirmed.mappedUrl);
+  assert.equal(tableMapping(confirmed.name).querySelector('a').textContent, '本机 19001');
+  assert.equal(hubSummary(confirmed.name).textContent, '本机 19001 · 点击进入');
+
+  for (const [host, reservedPort] of [[missingUrl, '17702'], [missingPort, '17703']]) {
+    const mapping = tableMapping(host.name);
+    const summary = hubSummary(host.name);
+    assert.equal(mapping.querySelector('a'), null, `${host.name} 缺确认项时不能生成映射链接`);
+    assert.equal(mapping.textContent, '—');
+    assert.equal(summary.textContent, '页面已就绪 · 点击进入');
+    assert.doesNotMatch(`${mapping.textContent} ${summary.textContent}`, new RegExp(reservedPort),
+      `${host.name} 不能回退猜测 config.localPort`);
+  }
 });
 
 test('远端行保留 SSH、远端缺失原因与端口映射文案', async (t) => {
@@ -204,6 +295,30 @@ test('点行内「拉起」发请求并锁住按钮', async (t) => {
   const after = dom.app.querySelector('.host-table tbody tr');
   const busyBtn = after.querySelectorAll('.row-actions .btn').find((b) => b.textContent === '拉起');
   assert.equal(busyBtn.disabled, true, 'pending 期间冲突动作要禁用');
+});
+
+test('pending start 遇到 running 快照后解除行忙态', async (t) => {
+  const { app, dom, es } = await mount(t, { hosts: [hostView('gpu-1')] });
+  dom.app.querySelector('[data-host="gpu-1"] [data-act="start"]').click();
+  await flush();
+
+  assert.equal(app.store.isPending('start', 'gpu-1'), true);
+  assert.equal(app.store.hostBusy('gpu-1'), true);
+  assert.equal(dom.app.querySelector('[data-host="gpu-1"] [data-act="start"]').disabled, true);
+
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [running('gpu-1')],
+    logs: [],
+  });
+  await flush();
+
+  assert.equal(app.store.isPending('start', 'gpu-1'), false, '终态快照应结算失联期间丢失的 operation-done');
+  assert.equal(app.store.hostBusy('gpu-1'), false);
+  assert.equal(dom.app.querySelector('[data-host="gpu-1"] [data-act="stop"]').disabled, false,
+    'running 到达后应展示可用的下一步动作');
 });
 
 test('点 ready 标签一步拉起：慢 SSE 首帧显示可访问占位，phase 不乐观改写', async (t) => {
@@ -368,25 +483,87 @@ test('autoStart 勾选即存，落库结果覆盖本地', async (t) => {
   assert.equal(dom.app.querySelector('.autostart-cell input').checked, true);
 });
 
-test('断线：出现横幅且写按钮禁用；恢复后横幅消失', async (t) => {
+test('抽屉不再编辑 autoStart，脏草稿忽略表格自启更新且保存不回滚', async (t) => {
+  const original = hostView('gpu-1');
+  const remote = hostView('gpu-1', {
+    config: { ...original.config, autoStart: true },
+  });
+  const { app, dom, calls, es } = await mount(t, {
+    hosts: [original],
+    responder: ({ path, method, body }) => (path === '/api/hosts/gpu-1/config' && method === 'PUT'
+      ? {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          host: { ...remote, config: { ...remote.config, inject: body.inject } },
+        }),
+      }
+      : null),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.doesNotMatch(drawer.textContent, /随 manager 自启/);
+  const drawerChecks = drawer.querySelectorAll('input[type="checkbox"]');
+  assert.equal(drawerChecks.length, 1, '抽屉基本配置只保留纳管开关');
+  assert.equal(drawerChecks[0].closest('.field').querySelector('label').textContent, '纳管此主机');
+
+  const form = drawer.querySelector('.drawer-form');
+  const envInput = drawer.querySelectorAll('textarea')[0];
+  const notice = drawer.querySelector('.card-notice');
+  envInput.value = 'LOCAL_DRAFT=1';
+  form.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true);
+
+  es().send('host-changed', { revision: 2, host: remote });
+  await flush();
+  assert.equal(notice.hidden, true, '仅 autoStart 变化不属于抽屉冲突');
+  assert.equal(envInput.value, 'LOCAL_DRAFT=1', '非抽屉字段更新不能覆盖脏草稿');
+  assert.equal(app.store.getHost('gpu-1').config.autoStart, true);
+
+  drawer.querySelectorAll('.btn').find((button) => button.textContent === '保存').click();
+  await flush();
+
+  const put = calls.find((call) => call.method === 'PUT');
+  assert.deepEqual(put.body, {
+    inject: { env: { LOCAL_DRAFT: '1' }, extraArgs: [], patches: [] },
+  });
+  assert.equal('autoStart' in put.body, false, '保存 env 不得顺带覆盖表格刚写入的自启值');
+  assert.equal(app.store.getHost('gpu-1').config.autoStart, true, '远端自启值不得被抽屉保存回滚');
+  assert.equal(notice.hidden, true);
+});
+
+test('断线重同步：横幅按阶段变化，写操作等快照后恢复', async (t) => {
   const { dom, es } = await mount(t);
   es().open();
   es().send('snapshot', { revision: 1, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [hostView('gpu-1')], logs: [] });
 
   const banner = dom.app.querySelector('.disconnect-banner');
+  const startButton = () => dom.app.querySelector('[data-host="gpu-1"] [data-act="start"]');
+  const probeAll = dom.app.querySelector('.probe-all');
+  const backToMain = dom.app.querySelector('.manage-back');
   assert.equal(banner.hidden, true);
+  assert.equal(startButton().disabled, false);
 
   for (const fn of es().listeners.get('error')) fn({});
   assert.equal(banner.hidden, false);
   assert.match(banner.textContent, /失联/);
-  assert.equal(dom.app.querySelector('.probe-all').disabled, true);
-
-  const startBtn = dom.app.querySelector('.host-table tbody tr').querySelectorAll('.btn').find((b) => b.textContent === '拉起');
-  assert.equal(startBtn.disabled, true, '断线时写操作必须禁用');
+  assert.equal(probeAll.disabled, true);
+  assert.equal(startButton().disabled, true, '断线时写操作必须禁用');
+  assert.equal(backToMain.disabled, false, '返回主页面不是写操作，失联时仍应可用');
 
   es().open();
+  assert.equal(banner.hidden, false, 'EventSource open 不代表状态已经同步');
+  assert.match(banner.textContent, /正在同步/);
+  assert.equal(probeAll.disabled, true, 'resyncing 期间全局写操作仍需禁用');
+  assert.equal(startButton().disabled, true, 'resyncing 期间主机写操作仍需禁用');
+  assert.equal(backToMain.disabled, false, '同步期间不能锁住本地导航');
+
   es().send('snapshot', { revision: 2, manager: MANAGER_INFO, defaults: DEFAULTS, hosts: [hostView('gpu-1')], logs: [] });
   assert.equal(banner.hidden, true);
+  assert.equal(probeAll.disabled, false);
+  assert.equal(startButton().disabled, false, '全量快照完成后写操作应恢复');
 });
 
 test('路由到 running 主机：创建 iframe，进管理台只改显隐（keep-alive）', async (t) => {
@@ -465,7 +642,695 @@ test('管理入口次级化：无固定管理台首标签，激活态与页头�
   assert.ok(pageHead.querySelector('.reload-config'));
 });
 
-test('不可用/禁用主机进入 +N 可访问菜单，可探测或转到管理台', async (t) => {
+test('批量配置入口随主机数、连接态与 config:sync pending 刷新', async (t) => {
+  const { app, dom, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('only-one')],
+  });
+  const entry = dom.app.querySelector('.config-sync-open');
+  assert.ok(entry, '管理页页头应提供批量同步入口');
+  assert.equal(entry.disabled, true, '不足两台主机不能同步');
+
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('gpu-1'), hostView('gpu-2')],
+    logs: [],
+  });
+  assert.equal(entry.disabled, false, 'hosts reset 增加到两台后应立即启用');
+
+  const pending = app.store.beginPending({ action: 'config:sync' });
+  assert.equal(entry.disabled, true, '同步 pending 时入口必须锁住');
+  app.store.settlePending(pending.key);
+  assert.equal(entry.disabled, false);
+
+  entry.focus();
+  entry.click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  assert.equal(dialog.open, true);
+  assert.equal(dom.document.activeElement, dialog.querySelector('.config-sync-source'));
+
+  app.store.setConnection({ sse: 'offline', everOpened: true });
+  assert.equal(entry.disabled, true, 'store.canWrite=false 时必须禁用');
+  assert.equal(dialog.open, false, '入口禁用时已打开的原生 dialog 必须关闭');
+  assert.equal(dom.document.activeElement, dom.app.querySelector('.manage-back'),
+    '断线关闭后焦点要回到稳定导航，不能留在 disabled 入口或 body');
+});
+
+test('批量配置 dialog：原生语义、焦点、源目标互斥与快捷选择完整', async (t) => {
+  const { dom } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('gpu-1'), hostView('gpu-2'), hostView('gpu-3')],
+  });
+  const entry = dom.app.querySelector('.config-sync-open');
+  entry.focus();
+  entry.click();
+
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const source = dialog.querySelector('.config-sync-source');
+  const checks = () => dialog.querySelectorAll('.config-sync-targets input[type="checkbox"]');
+  const byHost = (name) => checks().find((node) => node.dataset.host === name);
+  assert.equal(dialog.localName, 'dialog');
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.getAttribute('aria-labelledby'), 'config-sync-title');
+  assert.ok(dialog.querySelector('label').getAttribute('for') === source.id);
+  assert.match(dialog.querySelector('fieldset legend').textContent, /目标主机/);
+  assert.equal(dialog.querySelector('.config-sync-status').getAttribute('aria-live'), 'polite');
+  assert.equal(dialog.querySelector('.config-sync-error').getAttribute('role'), 'alert');
+  assert.equal(dialog.querySelector('.config-sync-error').getAttribute('aria-live'), 'assertive');
+  assert.equal(dialog.querySelector('.config-sync-target-count').textContent, '已选 0 / 200 台');
+  assert.equal(dom.document.activeElement, source, '打开后应聚焦源主机 select');
+  assert.equal(source.value, 'gpu-1');
+  assert.equal(byHost('gpu-1').disabled, true, '源主机不能作为目标');
+  assert.equal(byHost('gpu-1').checked, false);
+  assert.equal(dialog.querySelector('.config-sync-preview').disabled, true, '没有目标时不能预览');
+  assert.match(dialog.textContent, /不会修改主机身份、启用\/自启或本机映射端口/);
+
+  dialog.querySelector('.config-sync-select-all').click();
+  assert.deepEqual(
+    checks().filter((node) => node.checked).map((node) => node.dataset.host),
+    ['gpu-2', 'gpu-3'],
+  );
+  assert.equal(dialog.querySelector('.config-sync-target-count').textContent, '已选 2 / 200 台');
+
+  source.value = 'gpu-2';
+  source.dispatchEvent({ type: 'change' });
+  assert.equal(byHost('gpu-2').disabled, true);
+  assert.equal(byHost('gpu-2').checked, false, '新源必须立刻从目标中剔除');
+  assert.equal(byHost('gpu-3').checked, true, '源变化应保留仍合法目标');
+  assert.equal(byHost('gpu-1').checked, false, '旧源变合法后不应被擅自选中');
+
+  dialog.querySelector('.config-sync-clear').click();
+  assert.equal(checks().some((node) => node.checked), false);
+  assert.equal(dialog.querySelector('.config-sync-preview').disabled, true);
+});
+
+test('批量配置目标上限：全选按主机顺序取前 200，手动第 201 项被拒绝', async (t) => {
+  const names = Array.from({ length: 202 }, (_, index) => `host-${String(index).padStart(3, '0')}`);
+  const { dom, calls } = await mount(t, {
+    hash: '#/manage',
+    hosts: names.map((name) => hostView(name)),
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const checks = () => dialog.querySelectorAll('.config-sync-targets input[type="checkbox"]');
+
+  dialog.querySelector('.config-sync-select-all').click();
+  const selectedByAll = checks().filter((node) => node.checked).map((node) => node.dataset.host);
+  assert.deepEqual(selectedByAll, names.slice(1, 201), '全选应按 store 主机顺序截取，不能分批或乱序');
+  assert.equal(selectedByAll.length, 200);
+  assert.equal(dialog.querySelector('.config-sync-target-count').textContent, '已选 200 / 200 台');
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /前 200 台/);
+
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  let request = calls.filter((call) => call.path === '/api/hosts/sync-config').at(-1);
+  assert.deepEqual(request.body.targets, names.slice(1, 201));
+  assert.equal(request.body.targets.length, 200, '任何请求都不得超过 UI 上限');
+
+  dialog.querySelector('.config-sync-clear').click();
+  const available = checks().filter((node) => !node.disabled);
+  for (const input of available.slice(0, 200)) {
+    input.checked = true;
+    input.dispatchEvent({ type: 'change' });
+  }
+  const item201 = available[200];
+  item201.checked = true;
+  item201.dispatchEvent({ type: 'change' });
+
+  assert.equal(item201.checked, false, '第 201 项必须当场拒选');
+  assert.equal(checks().filter((node) => node.checked).length, 200);
+  assert.equal(dialog.querySelector('.config-sync-target-count').textContent, '已选 200 / 200 台');
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /最多选择 200 台.*先取消一台/);
+
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  request = calls.filter((call) => call.path === '/api/hosts/sync-config').at(-1);
+  assert.equal(request.body.targets.length, 200);
+});
+
+test('批量配置预览 pending 锁住全部控件，无变更结果不能应用', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { dom } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target')],
+    responder: ({ path, body }) => (path === '/api/hosts/sync-config'
+      ? gate.then(() => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          source: body.source,
+          dryRun: true,
+          targets: [{ name: 'target', changed: false, changedFields: [] }],
+          applied: [],
+          hosts: [],
+        }),
+      }))
+      : null),
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+  dialog.querySelector('.config-sync-preview').click();
+
+  assert.equal(dialog.querySelector('.config-sync-source').disabled, true);
+  assert.equal(target.disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-select-all').disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-clear').disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-close').disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-preview').disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true);
+
+  release();
+  await flush();
+  await flush();
+  assert.match(dialog.querySelector('.config-sync-results').textContent, /无需变更/);
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true,
+    '至少一台 changed 才允许应用');
+});
+
+test('批量配置预览与应用：不泄漏值、失效旧结果、标示重启并落服务端视图', async (t) => {
+  const sourceHost = hostView('source', {
+    config: {
+      ...hostView('source').config,
+      inject: { env: { API_SECRET: 'TOP-SECRET-VALUE' }, extraArgs: ['--secret-flag'], patches: [] },
+    },
+  });
+  const targetHost = running('target-running');
+  const updated = {
+    ...targetHost,
+    config: {
+      ...targetHost.config,
+      workdir: '/srv/from-source',
+      inject: { env: { API_SECRET: 'SERVER-ONLY-VALUE' }, extraArgs: ['--secret-flag'], patches: [] },
+    },
+  };
+  const newest = {
+    ...updated,
+    config: {
+      ...updated.config,
+      workdir: '/srv/newest-sse',
+      inject: { ...updated.config.inject, env: { API_SECRET: 'LATEST-SSE-VALUE' } },
+    },
+  };
+  let releaseApply;
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const applyGate = new Promise((resolve) => {
+    releaseApply = (body) => resolve(reply(body));
+  });
+  const { app, dom, calls, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [sourceHost, targetHost],
+    responder: ({ path, method, body }) => {
+      if (path !== '/api/hosts/sync-config' || method !== 'POST') return null;
+      return body.dryRun
+        ? reply({
+          source: 'source',
+          dryRun: true,
+          targets: [{
+            name: 'target-running',
+            changed: true,
+            changedFields: ['remoteWebPort', 'workdir', 'inject.env', 'inject.extraArgs', 'inject.patches'],
+          }],
+          applied: [],
+          hosts: [],
+        })
+        : applyGate;
+    },
+  });
+  const applyResponse = {
+    source: 'source',
+    dryRun: false,
+    targets: [{
+      name: 'target-running',
+      changed: true,
+      changedFields: ['workdir', 'inject.env'],
+    }],
+    applied: ['target-running'],
+    hosts: [updated],
+  };
+  const entry = dom.app.querySelector('.config-sync-open');
+  entry.focus();
+  entry.click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target-running"]');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+
+  const previewCall = calls.find((call) => call.path === '/api/hosts/sync-config');
+  assert.deepEqual(previewCall.body, {
+    source: 'source',
+    targets: ['target-running'],
+    dryRun: true,
+  });
+  const results = dialog.querySelector('.config-sync-results');
+  assert.match(results.textContent, /远端 web 端口/);
+  assert.match(results.textContent, /工作目录/);
+  assert.match(results.textContent, /环境变量/);
+  assert.match(results.textContent, /附加参数/);
+  assert.match(results.textContent, /补丁/);
+  assert.doesNotMatch(dialog.textContent, /TOP-SECRET-VALUE|SERVER-ONLY-VALUE|--secret-flag/);
+  assert.match(results.textContent, /下次重启生效/);
+  assert.match(results.textContent, /不会重启或停止/);
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, false);
+
+  target.checked = false;
+  target.dispatchEvent({ type: 'change' });
+  assert.equal(dialog.querySelector('.config-sync-results'), null, '选择变化后旧 preview 必须消失');
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /重新预览/);
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true);
+
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  dialog.querySelector('.config-sync-apply').click();
+  assert.equal(app.store.isPending('config:sync'), true);
+
+  es().send('host-changed', { revision: 2, host: newest });
+  await flush();
+  assert.equal(app.store.getHost('target-running').config.workdir, '/srv/newest-sse',
+    'apply 在途时到达的 revision SSE 应立即成为 store 真相');
+
+  releaseApply(applyResponse);
+  await flush();
+  await flush();
+
+  const syncCalls = calls.filter((call) => call.path === '/api/hosts/sync-config');
+  assert.deepEqual(syncCalls.at(-1).body, {
+    source: 'source',
+    targets: ['target-running'],
+    dryRun: false,
+  });
+  assert.equal(app.store.getHost('target-running').config.workdir, '/srv/newest-sse',
+    '迟到的无 revision apply 响应不得回退较新 SSE');
+  assert.doesNotMatch(dialog.textContent, /TOP-SECRET-VALUE|SERVER-ONLY-VALUE|LATEST-SSE-VALUE|--secret-flag/);
+  assert.equal(app.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true, '应用成功后不能重复应用');
+  assert.equal(dialog.open, true, '成功后允许留在结果页');
+
+  es().send('host-changed', { revision: 3, host: newest });
+  await flush();
+  assert.ok(dialog.querySelector('.config-sync-results'),
+    '应用后的结果页不是待应用 preview，随后到达的服务端 HostView 不应把它清空');
+
+  dialog.querySelector('.config-sync-close').click();
+  assert.equal(dialog.open, false);
+  assert.equal(dom.document.activeElement, entry, '关闭后焦点应回到触发按钮');
+});
+
+test('批量配置 dialog：相关 SSE/hosts reset 废弃预览、删主机修正选择，Escape 还焦点', async (t) => {
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const { dom, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target'), hostView('third')],
+    responder: ({ path, body }) => (path === '/api/hosts/sync-config' && body?.dryRun
+      ? reply({
+        source: body.source,
+        dryRun: true,
+        targets: body.targets.map((name) => ({ name, changed: true, changedFields: ['workdir'] })),
+        applied: [],
+        hosts: [],
+      })
+      : null),
+  });
+  const entry = dom.app.querySelector('.config-sync-open');
+  entry.focus();
+  entry.click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  assert.ok(dialog.querySelector('.config-sync-results'));
+
+  es().send('host-changed', { revision: 2, host: hostView('target', { phase: 'starting' }) });
+  await flush();
+  assert.equal(dialog.querySelector('.config-sync-results'), null);
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /主机状态已变化.*重新预览/);
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true);
+
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  assert.ok(dialog.querySelector('.config-sync-results'));
+  dialog.querySelector('[data-host="target"]').focus();
+  es().send('snapshot', {
+    revision: 3,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('target'), hostView('third')],
+    logs: [],
+  });
+  await flush();
+
+  const source = dialog.querySelector('.config-sync-source');
+  assert.equal(source.value, 'target', '源被删除后应选择仍存在的第一台主机');
+  assert.equal(dialog.querySelector('[data-host="target"]').disabled, true);
+  assert.equal(dialog.querySelector('[data-host="target"]').checked, false);
+  assert.equal(dom.document.activeElement.dataset.host, 'third',
+    '重建后原焦点项变成 disabled 源时，应回退首个可用目标');
+  assert.equal(dialog.querySelector('.config-sync-results'), null);
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /主机列表已变化.*重新预览/);
+
+  dialog.dispatchEvent({ type: 'cancel' });
+  assert.equal(dialog.open, false, 'Escape/cancel 应正常关闭');
+  assert.equal(dom.document.activeElement, entry);
+});
+
+test('批量配置目标重建：焦点项消失时回退可用目标，无目标则回源选择', async (t) => {
+  const { dom, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target'), hostView('third')],
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  dialog.querySelector('[data-host="target"]').focus();
+
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('source'), hostView('third')],
+    logs: [],
+  });
+  await flush();
+  assert.equal(dom.document.activeElement.dataset.host, 'third',
+    '原目标被删除后应聚焦首个仍可用目标');
+
+  es().send('snapshot', {
+    revision: 3,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('third')],
+    logs: [],
+  });
+  await flush();
+  assert.equal(dom.document.activeElement, dialog.querySelector('.config-sync-source'),
+    '唯一剩余项成为 disabled 源时，焦点应回源选择而不是 body');
+});
+
+test('批量配置预览 HTTP 失败：清空旧结果、释放 pending 并禁止应用', async (t) => {
+  let previews = 0;
+  const reply = (status, body) => ({
+    ok: status < 400,
+    status,
+    text: async () => JSON.stringify(body),
+  });
+  const { app, dom, calls } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target')],
+    responder: ({ path, body }) => {
+      if (path !== '/api/hosts/sync-config' || !body?.dryRun) return null;
+      previews += 1;
+      return previews === 1
+        ? reply(200, {
+          source: body.source,
+          dryRun: true,
+          targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
+          applied: [],
+          hosts: [],
+        })
+        : reply(503, {
+          error: '预览服务暂不可用',
+          code: 'BUSY',
+          detail: '请稍后重试：<img src=x onerror="pwned()">',
+        });
+    },
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  const preview = dialog.querySelector('.config-sync-preview');
+  const apply = dialog.querySelector('.config-sync-apply');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+
+  preview.click();
+  await flush();
+  assert.ok(dialog.querySelector('.config-sync-results'), '先建立一份可应用的旧预览');
+  assert.equal(apply.disabled, false);
+
+  preview.click();
+  assert.equal(calls.filter((call) => call.path === '/api/hosts/sync-config').length, 2);
+  assert.equal(app.store.isPending('config:sync'), true);
+  assert.equal(dialog.querySelector('.config-sync-results'), null, '重试发出时旧结果必须立刻移除');
+  assert.equal(apply.disabled, true);
+
+  await flush();
+  assert.equal(app.store.isPending('config:sync'), false);
+  assert.equal(dialog.querySelector('.config-sync-results'), null, '失败响应不能复活旧预览');
+  assert.equal(apply.disabled, true);
+  assert.equal(preview.disabled, false, '失败后应允许重新预览');
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /预览失败.*重试/);
+  const toast = app.store.state.toasts.at(-1);
+  assert.equal(toast.level, 'error');
+  assert.equal(toast.summary, '预览服务暂不可用');
+  assert.equal(toast.detail, '请稍后重试：<img src=x onerror="pwned()">');
+  assert.match(dom.app.querySelector('.toast-error').textContent, /预览服务暂不可用/);
+  const inlineError = dialog.querySelector('.config-sync-error');
+  assert.equal(inlineError.hidden, false, '原生 modal 内必须有可访问的就地错误');
+  assert.equal(inlineError.getAttribute('role'), 'alert');
+  assert.equal(inlineError.getAttribute('aria-live'), 'assertive');
+  assert.equal(inlineError.querySelector('.config-sync-error-summary').textContent, '预览服务暂不可用');
+  assert.equal(inlineError.querySelector('details pre').textContent,
+    '请稍后重试：<img src=x onerror="pwned()">');
+  assert.equal(inlineError.querySelector('img'), null, '错误 detail 必须经 textContent 渲染');
+
+  target.checked = false;
+  target.dispatchEvent({ type: 'change' });
+  assert.equal(inlineError.hidden, true, '重新选择目标后应清掉旧错误');
+  assert.equal(inlineError.textContent, '');
+});
+
+test('批量配置应用 HTTP 失败：结果作废、不能重复应用且可重新预览', async (t) => {
+  const reply = (status, body) => ({
+    ok: status < 400,
+    status,
+    text: async () => JSON.stringify(body),
+  });
+  const { app, dom, calls } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target')],
+    responder: ({ path, body }) => {
+      if (path !== '/api/hosts/sync-config') return null;
+      return body.dryRun
+        ? reply(200, {
+          source: body.source,
+          dryRun: true,
+          targets: [{ name: 'target', changed: true, changedFields: ['inject.env'] }],
+          applied: [],
+          hosts: [],
+        })
+        : reply(409, {
+          error: '目标配置在应用前已变化',
+          code: 'CONFLICT',
+          detail: 'target revision changed',
+        });
+    },
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  const preview = dialog.querySelector('.config-sync-preview');
+  const apply = dialog.querySelector('.config-sync-apply');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+
+  preview.click();
+  await flush();
+  assert.ok(dialog.querySelector('.config-sync-results'));
+  assert.equal(apply.disabled, false);
+
+  let injected = false;
+  const stopInjecting = app.store.on('toasts:changed', (toasts) => {
+    if (injected || toasts.at(-1)?.summary !== '目标配置在应用前已变化') return;
+    injected = true;
+    app.store.addToast({
+      level: 'error',
+      summary: '并发无关错误',
+      detail: '不能被同步 dialog 误取',
+    });
+  });
+  t.after(stopInjecting);
+  apply.click();
+  assert.equal(app.store.isPending('config:sync'), true);
+  assert.equal(dialog.querySelector('.config-sync-results'), null, '应用开始即不能继续展示待应用预览');
+  await flush();
+
+  const syncCalls = () => calls.filter((call) => call.path === '/api/hosts/sync-config');
+  assert.deepEqual(syncCalls().map((call) => call.body.dryRun), [true, false]);
+  assert.equal(app.store.isPending('config:sync'), false);
+  assert.equal(dialog.querySelector('.config-sync-results'), null);
+  assert.equal(apply.disabled, true);
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /应用结果未确认.*重新预览/);
+  assert.ok(app.store.state.toasts.some((toast) => toast.summary === '目标配置在应用前已变化'));
+  assert.equal(app.store.state.toasts.at(-1).summary, '并发无关错误',
+    '前提：动作错误之后确实并发新增了另一条 error toast');
+  assert.match(dom.app.querySelector('.toast-error').textContent, /目标配置在应用前已变化/);
+  const inlineError = dialog.querySelector('.config-sync-error');
+  assert.equal(inlineError.hidden, false);
+  assert.equal(inlineError.querySelector('.config-sync-error-summary').textContent, '目标配置在应用前已变化',
+    'dialog 必须关联本次 actions 错误，不能拿最后一条并发 toast');
+  assert.equal(inlineError.querySelector('details pre').textContent, 'target revision changed');
+  assert.doesNotMatch(inlineError.textContent, /并发无关错误|不能被同步 dialog 误取/);
+
+  apply.click();
+  await flush();
+  assert.equal(syncCalls().length, 2, '失败后的应用按钮必须是硬禁用，不能重复提交');
+
+  preview.click();
+  await flush();
+  assert.deepEqual(syncCalls().map((call) => call.body.dryRun), [true, false, true]);
+  assert.ok(dialog.querySelector('.config-sync-results'), '失败后重新预览应恢复结果');
+  assert.equal(apply.disabled, false);
+  assert.equal(inlineError.hidden, true, '重新预览成功后应清掉旧错误');
+  assert.equal(inlineError.textContent, '');
+});
+
+test('批量配置预览在途时 SSE 改写选择：迟到响应必须丢弃', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const { app, dom, calls, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target'), hostView('third')],
+    responder: ({ path, body }) => (path === '/api/hosts/sync-config' && body?.dryRun
+      ? gate.then(() => reply({
+        source: body.source,
+        dryRun: true,
+        targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
+        applied: [],
+        hosts: [],
+      }))
+      : null),
+  });
+  dom.app.querySelector('.config-sync-open').click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+  dialog.querySelector('.config-sync-preview').click();
+  assert.equal(app.store.isPending('config:sync'), true);
+
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('target'), hostView('third')],
+    logs: [],
+  });
+  const source = dialog.querySelector('.config-sync-source');
+  assert.equal(source.value, 'target', 'SSE 删除原源主机后应修正为仍存在的主机');
+  assert.equal(dialog.querySelector('[data-host="target"]').checked, false);
+  assert.equal(dialog.querySelector('[data-host="target"]').disabled, true);
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /主机列表已变化.*重新预览/);
+  assert.equal(app.store.isPending('config:sync'), true, '选择失效不能假装 HTTP 请求已经结算');
+
+  release();
+  await flush();
+  await flush();
+  assert.equal(calls.filter((call) => call.path === '/api/hosts/sync-config').length, 1);
+  assert.equal(app.store.isPending('config:sync'), false);
+  assert.equal(dialog.querySelector('.config-sync-results'), null, '旧 selection 的迟到结果不得渲染');
+  assert.equal(dialog.querySelector('.config-sync-apply').disabled, true);
+  assert.equal(dialog.querySelector('.config-sync-preview').disabled, true, '修正选择后尚无目标，不能直接重试');
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /主机列表已变化.*重新预览/,
+    '迟到响应不能覆盖 SSE 给出的真实状态');
+});
+
+test('批量配置应用在途时断线：关闭 dialog，迟到响应不重开也不渲染', async (t) => {
+  let releaseApply;
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const applyGate = new Promise((resolve) => {
+    releaseApply = () => resolve(reply({
+      source: 'source',
+      dryRun: false,
+      targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
+      applied: ['target'],
+      hosts: [hostView('target', {
+        config: { ...hostView('target').config, workdir: '/srv/stale-response' },
+      })],
+    }));
+  });
+  const { app, dom, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target')],
+    responder: ({ path, body }) => {
+      if (path !== '/api/hosts/sync-config') return null;
+      return body.dryRun
+        ? reply({
+          source: 'source',
+          dryRun: true,
+          targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
+          applied: [],
+          hosts: [],
+        })
+        : applyGate;
+    },
+  });
+  es().open();
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('source'), hostView('target')],
+    logs: [],
+  });
+  const entry = dom.app.querySelector('.config-sync-open');
+  entry.click();
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  const target = dialog.querySelector('[data-host="target"]');
+  target.checked = true;
+  target.dispatchEvent({ type: 'change' });
+  dialog.querySelector('.config-sync-preview').click();
+  await flush();
+  dialog.querySelector('.config-sync-apply').click();
+  assert.equal(app.store.isPending('config:sync'), true);
+
+  app.store.setConnection({ sse: 'offline', everOpened: true });
+  assert.equal(dialog.open, false);
+  assert.equal(entry.disabled, true);
+  assert.equal(dom.document.activeElement, dom.app.querySelector('.manage-back'));
+
+  releaseApply();
+  await flush();
+  await flush();
+  assert.equal(dialog.open, false, '迟到成功响应不能重开已因断线关闭的 dialog');
+  assert.equal(dialog.querySelector('.config-sync-results'), null);
+  assert.equal(app.store.getHost('target').config.workdir, null,
+    '迟到响应中的无 revision HostView 也不能覆盖 store');
+});
+
+test('批量配置 dialog 无 showModal/close 时使用 open 属性并恢复焦点', async (t) => {
+  const { dom, calls } = await mount(t, {
+    hash: '#/manage',
+    hosts: [hostView('source'), hostView('target')],
+  });
+  const entry = dom.app.querySelector('.config-sync-open');
+  const dialog = dom.app.querySelector('.config-sync-dialog');
+  dialog.showModal = undefined;
+  dialog.close = undefined;
+  entry.focus();
+
+  entry.click();
+  assert.equal(dialog.hasAttribute('open'), true, '缺少 showModal 时仍应通过 open 属性展示');
+  assert.equal(dom.document.activeElement, dialog.querySelector('.config-sync-source'));
+
+  dialog.querySelector('.config-sync-close').click();
+  assert.equal(dialog.hasAttribute('open'), false, '缺少 close 时应移除 open 属性');
+  assert.equal(dom.document.activeElement, entry);
+  assert.equal(calls.filter((call) => call.path === '/api/hosts/sync-config').length, 0);
+});
+
+test('+N overflow 可纯键盘遍历、退出并只探测选中的主机', async (t) => {
   const disabled = running('disabled');
   disabled.enabled = false;
   disabled.config = { ...disabled.config, enabled: false };
@@ -484,25 +1349,61 @@ test('不可用/禁用主机进入 +N 可访问菜单，可探测或转到管理
   const overflow = dom.app.querySelector('.tab-overflow');
   assert.equal(overflow.textContent, '+3 ▾');
   assert.equal(overflow.getAttribute('aria-haspopup'), 'menu');
+  overflow.focus();
   overflow.dispatchEvent({ type: 'keydown', key: 'ArrowDown' });
 
   const menu = dom.app.querySelector('.overflow-menu');
   assert.equal(menu.hidden, false);
   assert.equal(overflow.getAttribute('aria-expanded'), 'true');
+  assert.deepEqual(
+    [dom.document.activeElement.dataset.host, dom.document.activeElement.dataset.action],
+    ['disabled', 'probe'],
+    'ArrowDown 打开后应聚焦首个可用 menuitem',
+  );
   assert.match(menu.textContent, /disabled — 已禁用/);
   assert.match(menu.textContent, /missing — 未安装\/未配置/);
   assert.match(menu.textContent, /offline — SSH 不可达/);
 
-  const probe = menu.querySelectorAll('button').find((button) => button.textContent === '探测 offline');
+  menu.dispatchEvent({ type: 'keydown', key: 'ArrowDown' });
+  assert.deepEqual(
+    [dom.document.activeElement.dataset.host, dom.document.activeElement.dataset.action],
+    ['disabled', 'view-manage'],
+  );
+  menu.dispatchEvent({ type: 'keydown', key: 'ArrowUp' });
+  assert.deepEqual(
+    [dom.document.activeElement.dataset.host, dom.document.activeElement.dataset.action],
+    ['disabled', 'probe'],
+  );
+  menu.dispatchEvent({ type: 'keydown', key: 'End' });
+  assert.deepEqual(
+    [dom.document.activeElement.dataset.host, dom.document.activeElement.dataset.action],
+    ['offline', 'view-manage'],
+  );
+  menu.dispatchEvent({ type: 'keydown', key: 'Home' });
+  assert.deepEqual(
+    [dom.document.activeElement.dataset.host, dom.document.activeElement.dataset.action],
+    ['disabled', 'probe'],
+  );
+
+  menu.dispatchEvent({ type: 'keydown', key: 'Escape' });
+  assert.equal(menu.hidden, true);
+  assert.equal(overflow.getAttribute('aria-expanded'), 'false');
+  assert.equal(dom.document.activeElement, overflow, 'Escape 后焦点应回到 +N 入口');
+
+  overflow.dispatchEvent({ type: 'keydown', key: 'ArrowDown' });
+  const probe = menu.querySelector('[data-host="offline"][data-action="probe"]');
   probe.click();
   await flush();
-  assert.equal(calls.some((c) => c.path === '/api/hosts/offline/probe' && c.method === 'POST'), true);
+  assert.deepEqual(
+    calls.filter((c) => c.method === 'POST' && c.path.endsWith('/probe')).map((c) => c.path),
+    ['/api/hosts/offline/probe'],
+    '不得误探测菜单里的其他主机',
+  );
   assert.equal(menu.hidden, true);
-  assert.equal(dom.document.activeElement, overflow, '选完动作后焦点应回到 +N 入口');
+  assert.equal(dom.document.activeElement, overflow, '执行动作后焦点应回到 +N 入口');
 
-  overflow.click();
-  const view = menu.querySelectorAll('button').find((button) => button.textContent === '在管理台查看 missing');
-  view.click();
+  overflow.dispatchEvent({ type: 'keydown', key: 'ArrowDown' });
+  menu.querySelector('[data-host="missing"][data-action="view-manage"]').click();
   await flush();
   assert.equal(dom.window.location.hash, '#/manage');
   assert.equal(dom.app.querySelector('.host-drawer').hidden, false);
@@ -562,7 +1463,7 @@ test('overflow 打开时实时重建，并在项目迁出后把焦点安全交�
     '焦点不能留在已隐藏的 overflow 入口上');
 });
 
-test('本机不可用项在 overflow 使用本机文案，远端文案不渗入', async (t) => {
+test('本机不可用项在 overflow 复用共享状态与诊断提示', async (t) => {
   const localMissing = localHostView('local-missing', {
     phase: 'no_dsh',
     probe: {
@@ -581,9 +1482,14 @@ test('本机不可用项在 overflow 使用本机文案，远端文案不渗入'
 
   dom.app.querySelector('.tab-overflow').click();
   const menu = dom.app.querySelector('.overflow-menu');
-  assert.match(menu.textContent, /local-missing — 本机未安装或未配置/);
-  assert.match(menu.textContent, /local-offline — 本机不可用/);
-  assert.doesNotMatch(menu.textContent, /SSH|远端/, '本机项不能借用远端探测文案');
+  const lineFor = (name) => menu
+    .querySelector(`[data-host="${name}"][data-action="view-manage"]`)
+    .closest('li')
+    .querySelector('span')
+    .textContent;
+  assert.equal(lineFor('local-missing'), 'local-missing — 本机未安装或未配置 · 本机未安装 dsh');
+  assert.equal(lineFor('local-offline'), 'local-offline — 本机不可用 · SSH connection refused',
+    'errorSummary 即使含 SSH 字样也应作为原始诊断信息显示');
 });
 
 test('标签区分本机徽标与远端：本机 title 可读，远端文案不变', async (t) => {
@@ -790,6 +1696,29 @@ test('ready 深链 fallback：不造 iframe，并与选中标签形成完整 tab
   assert.equal(back.textContent, '回到起始页');
 });
 
+test('本机深链 fallback 与共享状态文案一致', async (t) => {
+  const localMissing = localHostView('workstation', {
+    phase: 'no_dsh',
+    probe: {
+      ...hostView('workstation').probe,
+      dshPath: null,
+      version: null,
+      profileWeb: false,
+      noDshReason: 'missing-bin',
+    },
+  });
+  const { dom } = await mount(t, {
+    hash: '#/host/workstation',
+    hosts: [localMissing],
+  });
+
+  const fallback = dom.app.querySelector('.view-fallback .empty-hint');
+  assert.equal(
+    fallback.textContent,
+    'workstation 当前状态「本机未安装或未配置」，还没有可打开的页面。',
+  );
+});
+
 test('iframe 断联遮罩的返回锚点指向 hub', async (t) => {
   const { dom, es } = await mount(t, { hash: '#/host/gpu-1', hosts: [running('gpu-1')] });
   es().send('host-changed', { revision: 2, host: { ...running('gpu-1'), phase: 'degraded' } });
@@ -866,16 +1795,135 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.match(drawer.textContent, /gpu-1/);
   assert.equal(calls.some((c) => c.path.startsWith('/api/hosts/gpu-1/log')), true, '打开即拉一次日志');
 
+  const saveBtn = drawer.querySelectorAll('.btn').find((b) => b.textContent === '保存');
+  assert.equal(saveBtn.disabled, true, '刚打开的 canonical 草稿没有可保存变更');
+
   const envBox = drawer.querySelectorAll('textarea')[0];
   envBox.value = 'A=1';
   drawer.querySelector('.drawer-form').dispatchEvent({ type: 'input' });
 
-  const saveBtn = drawer.querySelectorAll('.btn').find((b) => b.textContent === '保存');
   assert.equal(saveBtn.disabled, false, '有改动才允许保存');
 
   drawer.querySelector('.drawer-close').click();
   await flush();
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
+});
+
+test('抽屉保存归一化后无有效差异：零 PUT、canonical 回填并清脏', async (t) => {
+  const base = hostView('gpu-1');
+  const host = hostView('gpu-1', {
+    config: {
+      ...base.config,
+      workdir: '/srv/project',
+      inject: { ...base.config.inject, env: { BASE: '1' } },
+    },
+  });
+  const { app, dom, calls } = await mount(t, { hosts: [host] });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const workdir = drawer.querySelector('input[type="text"]');
+  const envInput = drawer.querySelectorAll('textarea')[0];
+  const [save, discard] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+
+  workdir.value = '  /srv/project  ';
+  envInput.value = 'BASE=1\n\n# 仅注释，不改变 env';
+  form.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true, 'raw draft 与 canonical 文本不同，点击前应允许处理');
+  assert.equal(save.disabled, false);
+  assert.equal(discard.disabled, false);
+
+  save.click();
+  await flush();
+
+  assert.equal(calls.some((call) => call.method === 'PUT'), false, '归一化后无 diff 不应请求服务端');
+  assert.equal(workdir.value, '/srv/project', 'workdir 应回填服务端 canonical draft');
+  assert.equal(envInput.value, 'BASE=1', '注释与空行应从 canonical draft 中移除');
+  assert.equal(app.store.state.drawer.dirty, false);
+  assert.equal(save.disabled, true);
+  assert.equal(discard.disabled, true);
+  const toast = app.store.state.toasts.at(-1);
+  assert.equal(toast.level, 'info');
+  assert.match(toast.summary, /没有需要保存的有效变更/);
+  assert.match(dom.app.querySelector('.toast-info').textContent, /没有需要保存的有效变更/);
+});
+
+test('抽屉提交以当下 DOM 为准，正常 env 修改只 PUT inject', async (t) => {
+  const original = hostView('gpu-1');
+  const saved = hostView('gpu-1', {
+    config: {
+      ...original.config,
+      inject: { ...original.config.inject, env: { LATEST: '2' } },
+    },
+  });
+  const { app, dom, calls } = await mount(t, {
+    hosts: [original],
+    responder: ({ path, method }) => (path === '/api/hosts/gpu-1/config' && method === 'PUT'
+      ? { ok: true, status: 200, text: async () => JSON.stringify({ host: saved }) }
+      : null),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const envInput = drawer.querySelectorAll('textarea')[0];
+  const save = drawer.querySelector('.drawer-actions').querySelectorAll('button')[0];
+
+  envInput.value = 'STALE=1';
+  form.dispatchEvent({ type: 'input' });
+  envInput.value = 'LATEST=2';
+  save.click();
+  await flush();
+
+  const put = calls.find((call) => call.method === 'PUT');
+  assert.deepEqual(put.body, {
+    inject: { env: { LATEST: '2' }, extraArgs: [], patches: [] },
+  });
+  assert.deepEqual(app.store.getHost('gpu-1').config.inject.env, { LATEST: '2' });
+  assert.equal(app.store.state.drawer.dirty, false);
+});
+
+test('抽屉脏草稿遇到远端配置更新时显示冲突，放弃后采用新值', async (t) => {
+  const original = hostView('gpu-1');
+  const { app, dom, es } = await mount(t, { hosts: [original] });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const envInput = drawer.querySelectorAll('textarea')[0];
+  const [save, discard] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+  const notice = drawer.querySelector('.card-notice');
+
+  envInput.value = 'LOCAL_DRAFT=1';
+  form.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true);
+
+  const remote = hostView('gpu-1', {
+    config: {
+      ...original.config,
+      inject: { ...original.config.inject, env: { REMOTE_VALUE: 'new' } },
+    },
+  });
+  es().send('host-changed', { revision: 2, host: remote });
+  await flush();
+
+  assert.equal(notice.hidden, false, '冲突必须投影到已挂载抽屉，而非只停在 reconcile 返回值');
+  assert.match(notice.textContent, /远端配置已变化/);
+  assert.match(notice.textContent, /草稿已保留/);
+  assert.equal(envInput.value, 'LOCAL_DRAFT=1', '远端更新不能静默覆盖脏草稿');
+  assert.equal(save.disabled, false, '用户仍可明确选择保存自己的草稿');
+  assert.equal(discard.disabled, false, '用户也可明确放弃并载入远端值');
+
+  discard.click();
+  assert.equal(envInput.value, 'REMOTE_VALUE=new');
+  assert.equal(notice.hidden, true);
+  assert.equal(app.store.state.drawer.dirty, false);
+  assert.equal(save.disabled, true);
+  assert.equal(discard.disabled, true);
 });
 
 test('日志里的 HTML 原样当文本显示（远端 stderr 是攻击者能左右的）', async (t) => {
@@ -1164,11 +2212,272 @@ test('manager 重启需确认，确认后发请求', async (t) => {
   assert.equal(calls.some((c) => c.path === '/api/manager/restart' && c.method === 'POST'), true);
 });
 
+function defaultsControls(dom) {
+  const card = dom.app.querySelector('.defaults-card');
+  const [remote, managerPort, from, to] = card.querySelectorAll('input');
+  const save = card.querySelectorAll('.btn').find((button) => button.textContent === '保存');
+  const reset = card.querySelectorAll('.btn').find((button) => button.textContent === '还原');
+  return {
+    card, remote, managerPort, from, to, save, reset, notice: card.querySelector('.card-notice'),
+  };
+}
+
+test('config GET 的目标端口不覆盖 manager 卡实际监听端口', async (t) => {
+  const { app, dom } = await mount(t, {
+    responder: ({ path }) => (path === '/api/config'
+      ? {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          configVersion: 1,
+          setupCompleted: true,
+          manager: { port: 7799 },
+          defaults: DEFAULTS,
+          hosts: {},
+        }),
+      }
+      : null),
+  });
+  const { managerPort, notice } = defaultsControls(dom);
+  const managerCard = dom.app.querySelector('.manager-card');
+
+  assert.equal(app.store.state.manager.info.port, 7788);
+  assert.equal(app.store.state.manager.configuredPort, 7799);
+  assert.equal(managerPort.value, '7799');
+  assert.match(managerCard.textContent, /监听端口7788/, 'manager 卡必须展示当前实际监听值');
+  assert.match(notice.textContent, /7799.*重启 manager 后生效/);
+});
+
+test('全局默认：打开时干净且本机端口输入下限为 1024', async (t) => {
+  const { dom } = await mount(t);
+  const {
+    remote, managerPort, from, to, save, reset,
+  } = defaultsControls(dom);
+
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+  assert.equal(remote.getAttribute('min'), '1');
+  assert.equal(managerPort.getAttribute('min'), '1');
+  assert.equal(from.getAttribute('min'), '1024');
+  assert.equal(to.getAttribute('min'), '1024');
+});
+
+test('全局默认：保存、跨标签变更与重启快照始终按配置/运行端口派生提示', async (t) => {
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const { app, dom, calls, es } = await mount(t, {
+    responder: ({ path, method }) => (path === '/api/config/defaults' && method === 'PUT'
+      ? reply({
+        defaults: DEFAULTS,
+        manager: { port: 7799 },
+        restartRequired: true,
+      })
+      : null),
+  });
+  const {
+    managerPort, save, reset, notice,
+  } = defaultsControls(dom);
+
+  managerPort.value = '7799';
+  managerPort.dispatchEvent({ type: 'input' });
+  assert.equal(save.disabled, false);
+  assert.equal(reset.disabled, false);
+
+  save.click();
+  await flush();
+
+  const puts = calls.filter((call) => call.path === '/api/config/defaults' && call.method === 'PUT');
+  assert.equal(puts.length, 1);
+  assert.deepEqual(puts[0].body, { manager: { port: 7799 } });
+  assert.equal(managerPort.value, '7799');
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /7799.*重启 manager 后生效/);
+  assert.equal(app.store.state.manager.info.port, 7788, '保存目标配置不能让运行态 manager 卡撒谎');
+  assert.equal(app.store.state.manager.configuredPort, 7799);
+  assert.match(dom.app.querySelector('.manager-card').textContent, /监听端口7788/);
+
+  es().send('config-changed', {
+    revision: 2,
+    defaults: { ...DEFAULTS, remoteWebPort: 9000 },
+    manager: { port: 7800 },
+  });
+  await flush();
+  assert.equal(managerPort.value, '7800');
+  assert.match(notice.textContent, /7800.*重启 manager 后生效/, '提示必须点名最新跨标签配置');
+  assert.doesNotMatch(notice.textContent, /7799/);
+  assert.equal(app.store.state.manager.info.port, 7788);
+
+  es().send('config-changed', {
+    revision: 3,
+    defaults: { ...DEFAULTS, remoteWebPort: 9000 },
+    manager: { port: 7788 },
+  });
+  await flush();
+  assert.equal(notice.hidden, true, '目标改回实际监听端口后提示应自动消失');
+
+  es().send('config-changed', {
+    revision: 4,
+    defaults: { ...DEFAULTS, remoteWebPort: 9000 },
+    manager: { port: 7799 },
+  });
+  assert.equal(notice.hidden, false);
+  es().send('snapshot', {
+    revision: 5,
+    manager: { ...MANAGER_INFO, port: 7799, pid: 4343 },
+    defaults: { ...DEFAULTS, remoteWebPort: 9000 },
+    hosts: [hostView('gpu-1'), hostView('gpu-2')],
+    logs: [],
+  });
+  await flush();
+  assert.equal(app.store.state.manager.configuredPort, 7799, '重连快照不得擦掉已知配置端口');
+  assert.equal(app.store.state.manager.info.port, 7799);
+  assert.equal(notice.hidden, true, 'manager 真正在目标端口重启后提示应自动清除');
+  assert.match(dom.app.querySelector('.manager-card').textContent, /监听端口7799/);
+});
+
+test('全局默认：断线与重同步期间草稿可编辑、不可保存但可还原', async (t) => {
+  const { dom, es } = await mount(t);
+  es().open();
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('gpu-1')],
+    logs: [],
+  });
+  const {
+    remote, managerPort, from, to, save, reset,
+  } = defaultsControls(dom);
+
+  for (const fn of es().listeners.get('error')) fn({});
+  remote.value = '9001';
+  remote.dispatchEvent({ type: 'change' });
+  assert.equal(remote.value, '9001');
+  assert.equal(save.disabled, true, '断线时不能保存');
+  assert.equal(reset.disabled, false, '断线不应锁住本地还原');
+  assert.equal([remote, managerPort, from, to].some((node) => node.disabled), false,
+    '只有保存 pending 才能锁输入');
+
+  es().open();
+  managerPort.value = '7799';
+  managerPort.dispatchEvent({ type: 'input' });
+  assert.equal(managerPort.value, '7799', 'resyncing 期间仍应允许继续编辑');
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, false);
+
+  reset.click();
+  assert.equal(remote.value, String(DEFAULTS.remoteWebPort));
+  assert.equal(managerPort.value, String(MANAGER_INFO.port));
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+});
+
+test('全局默认：外部更新保留同字段草稿、跟随未改字段，还原载入最新值', async (t) => {
+  const { dom, es } = await mount(t);
+  const {
+    remote, managerPort, from, to, save, reset, notice,
+  } = defaultsControls(dom);
+
+  remote.value = '9001';
+  remote.dispatchEvent({ type: 'input' });
+  es().send('config-changed', {
+    revision: 2,
+    defaults: { remoteWebPort: 9002, localPortRange: [18_001, 18_099] },
+    manager: { port: 7799 },
+  });
+  await flush();
+
+  assert.equal(remote.value, '9001', '同字段外部更新不能覆盖用户草稿');
+  assert.equal(managerPort.value, '7799');
+  assert.equal(from.value, '18001');
+  assert.equal(to.value, '18099');
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /配置已变化/);
+  assert.match(notice.textContent, /草稿已保留/);
+  assert.equal(save.disabled, false);
+  assert.equal(reset.disabled, false);
+
+  reset.click();
+  assert.equal(remote.value, '9002');
+  assert.equal(managerPort.value, '7799');
+  assert.equal(from.value, '18001');
+  assert.equal(to.value, '18099');
+  assert.equal(notice.hidden, false, '冲突清除后仍应保留配置端口与运行端口不一致的事实');
+  assert.doesNotMatch(notice.textContent, /草稿已保留/);
+  assert.match(notice.textContent, /7799.*重启 manager 后生效/);
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+});
+
+test('全局默认：保存按最新 baseline diff，不回滚外部未编辑字段并清冲突', async (t) => {
+  const latestDefaults = { remoteWebPort: 9001, localPortRange: [18_001, 18_099] };
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const { dom, calls, es } = await mount(t, {
+    responder: ({ path, method }) => (path === '/api/config/defaults' && method === 'PUT'
+      ? reply({
+        defaults: latestDefaults,
+        manager: { port: 7799 },
+        restartRequired: false,
+      })
+      : null),
+  });
+  const {
+    remote, managerPort, from, to, save, reset, notice,
+  } = defaultsControls(dom);
+
+  remote.value = '9001';
+  remote.dispatchEvent({ type: 'input' });
+  es().send('config-changed', {
+    revision: 2,
+    defaults: { remoteWebPort: 9002, localPortRange: [18_001, 18_099] },
+    manager: { port: 7799 },
+  });
+  await flush();
+  assert.equal(notice.hidden, false, '前提：远端与本地同时改了 remoteWebPort');
+
+  save.click();
+  await flush();
+
+  const put = calls.find((call) => call.path === '/api/config/defaults' && call.method === 'PUT');
+  assert.deepEqual(put.body, { remoteWebPort: 9001 });
+  assert.deepEqual(
+    [remote.value, managerPort.value, from.value, to.value],
+    ['9001', '7799', '18001', '18099'],
+  );
+  assert.equal(notice.hidden, false, '本次响应虽无需重启，既存配置端口差异仍不能被擦掉');
+  assert.doesNotMatch(notice.textContent, /草稿已保留/);
+  assert.match(notice.textContent, /7799.*重启 manager 后生效/);
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+});
+
+test('全局默认：归一化后无有效 diff 时零 PUT 并回填 canonical', async (t) => {
+  const { app, dom, calls } = await mount(t);
+  const {
+    remote, save, reset,
+  } = defaultsControls(dom);
+
+  remote.value = '08899';
+  remote.dispatchEvent({ type: 'input' });
+  assert.equal(save.disabled, false, 'raw 草稿有变化时应允许点击保存做归一化');
+
+  save.click();
+  await flush();
+
+  assert.equal(calls.some((call) => call.path === '/api/config/defaults' && call.method === 'PUT'), false);
+  assert.equal(remote.value, '8899');
+  assert.equal(save.disabled, true);
+  assert.equal(reset.disabled, true);
+  assert.equal(app.store.state.toasts.at(-1).level, 'info');
+  assert.match(app.store.state.toasts.at(-1).summary, /没有需要保存的有效变更/);
+});
+
 test('全局默认：倒置区间不提交，逐字段报错', async (t) => {
   const { dom, calls } = await mount(t);
-  const card = dom.app.querySelector('.defaults-card');
-  const inputs = card.querySelectorAll('input');
-  const [remote, managerPort, from, to] = inputs;
+  const {
+    card, remote, managerPort, from, to,
+  } = defaultsControls(dom);
   assert.equal(remote.value, '8899');
   assert.equal(managerPort.value, '7788');
 
@@ -1183,15 +2492,50 @@ test('全局默认：倒置区间不提交，逐字段报错', async (t) => {
   assert.match(errors[0], /终点/);
 });
 
+test('全局默认：低于 1024 的本机端口区间就地报错', async (t) => {
+  const { dom, calls } = await mount(t);
+  const {
+    card, from, save,
+  } = defaultsControls(dom);
+
+  from.value = '1023';
+  from.dispatchEvent({ type: 'input' });
+  save.click();
+  await flush();
+
+  assert.equal(calls.some((call) => call.path === '/api/config/defaults' && call.method === 'PUT'), false);
+  const errors = card.querySelectorAll('.field-error').map((node) => node.textContent).filter(Boolean);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /1024/);
+});
+
 test('setup 未完成：强制跳向导，先不拉主机清单', async (t) => {
-  const { dom, calls, es } = await mount(t, {
-    responder: ({ path }) => (path === '/api/manager/info'
-      ? { ok: true, status: 200, text: async () => JSON.stringify({ ...MANAGER_INFO, setupCompleted: false }) }
-      : null),
+  const { app, dom, calls, es } = await mount(t, {
+    responder: ({ path }) => {
+      if (path === '/api/manager/info') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ...MANAGER_INFO, setupCompleted: false }) };
+      }
+      if (path === '/api/config') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            configVersion: 1,
+            setupCompleted: false,
+            manager: { port: 7799 },
+            defaults: DEFAULTS,
+            hosts: {},
+          }),
+        };
+      }
+      return null;
+    },
   });
 
   assert.equal(dom.window.location.hash, '#/setup');
   assert.equal(calls.some((c) => c.path === '/api/hosts'), false, '主机清单等向导走到第 3 步再拉');
+  assert.equal(app.store.state.manager.info.port, 7788);
+  assert.equal(app.store.state.manager.configuredPort, 7799, 'setup 路径的 config GET 也必须写配置端口');
   assert.ok(es(), 'setup 模式仍建 SSE：第 3 步要靠 host-changed 收探测结果');
   assert.equal(dom.app.querySelector('.view-dashboard').hidden, true);
   assert.equal(dom.app.querySelector('.setup-wizard').hidden, false, '向导独占页面');

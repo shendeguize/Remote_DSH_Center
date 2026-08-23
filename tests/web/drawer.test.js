@@ -20,14 +20,14 @@ const config = (patch = {}) => ({
 test('draftOf 把 config 摊平成文本表单', () => {
   assert.deepEqual(draftOf(config()), {
     enabled: true,
-    autoStart: false,
     remoteWebPort: '',
     workdir: '',
     env: 'A=1',
     extraArgs: '--v',
     patches: '/tmp/a.yml',
   });
-  // localPort 不进草稿：它由 manager 分配，表单里改不了
+  // autoStart 由主机表自启列独占，localPort 由 manager 分配；都不进抽屉草稿
+  assert.equal('autoStart' in draftOf(config()), false);
   assert.equal('localPort' in draftOf(config()), false);
 });
 
@@ -35,6 +35,7 @@ test('isDirty 只认真实改动', () => {
   const cfg = config();
   assert.equal(isDirty(draftOf(cfg), cfg), false);
   assert.equal(isDirty({ ...draftOf(cfg), env: 'A=2' }, cfg), true);
+  assert.equal(isDirty(draftOf(cfg), config({ autoStart: true })), false, '表格自启变化不属于抽屉草稿');
   // 空 remoteWebPort 与 null 等价，不该被当成脏
   assert.equal(isDirty({ ...draftOf(cfg), remoteWebPort: '' }, cfg), false);
 });
@@ -85,9 +86,17 @@ test('workdirPending：只在能证明分歧时才提示「重启后生效」', 
   assert.equal(workdirPending({ phase: 'running', config: config(), web: { pid: 1 } }), false);
 });
 
-test('远端 config 变化：草稿干净则跟随，脏则冲突提示', () => {
+test('仅非抽屉字段变化：无论草稿是否脏都不制造冲突', () => {
   const prev = config();
-  const next = config({ autoStart: true });
+  const next = config({ autoStart: true, localPort: 17_799 });
+
+  assert.equal(reconcile(draftOf(prev), prev, next), 'none');
+  assert.equal(reconcile({ ...draftOf(prev), env: 'A=9' }, prev, next), 'none');
+});
+
+test('抽屉拥有的 config 变化：草稿干净则跟随，脏则冲突提示', () => {
+  const prev = config();
+  const next = config({ inject: { ...prev.inject, env: { A: '2' } } });
 
   assert.equal(reconcile(draftOf(prev), prev, next), 'follow');
   assert.equal(reconcile({ ...draftOf(prev), env: 'A=9' }, prev, next), 'conflict');

@@ -1,0 +1,183 @@
+/**
+ * 管理页布局契约：页头与主机卡内容同轴，并在窄屏稳定换行。
+ */
+
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { mount } from './app-harness.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const CSS = fs.readFileSync(path.join(ROOT, 'src', 'web', 'style.css'), 'utf8');
+
+function blocksFor(source, marker) {
+  const blocks = [];
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const start = source.indexOf(marker, cursor);
+    if (start === -1) break;
+    const open = source.indexOf('{', start);
+    assert.notEqual(open, -1, `${marker} 缺少左花括号`);
+
+    let depth = 1;
+    let close = open + 1;
+    while (close < source.length && depth > 0) {
+      if (source[close] === '{') depth += 1;
+      if (source[close] === '}') depth -= 1;
+      close += 1;
+    }
+    assert.equal(depth, 0, `${marker} 缺少右花括号`);
+    blocks.push(source.slice(open + 1, close - 1));
+    cursor = close;
+  }
+
+  return blocks;
+}
+
+function blockFor(source, selector) {
+  const marker = `${selector} {`;
+  let cursor = 0;
+  while (cursor < source.length) {
+    const start = source.indexOf(marker, cursor);
+    if (start === -1) break;
+    const lineStart = source.lastIndexOf('\n', start) + 1;
+    if (source.slice(lineStart, start).trim() === '') {
+      return blocksFor(source.slice(start), marker)[0];
+    }
+    cursor = start + marker.length;
+  }
+  assert.fail(`style.css 缺少 ${selector} 规则`);
+}
+
+function declaration(block, property) {
+  const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = block.match(new RegExp(`(?:^|[;\\n])\\s*${escaped}:\\s*([^;\\n}]+)`));
+  assert.ok(match, `${property} 未声明在目标规则内`);
+  return match[1].trim();
+}
+
+const compact = (value) => value.replace(/\s+/g, '');
+
+test('卡片内缘由 border 与 inline padding token 唯一组合', () => {
+  const root = blockFor(CSS, ':root');
+  assert.equal(declaration(root, '--card-border-width'), '1px');
+  assert.equal(declaration(root, '--card-padding-inline'), '14px');
+  assert.equal(
+    compact(declaration(root, '--card-content-inset')),
+    'calc(var(--card-border-width)+var(--card-padding-inline))',
+    '内容内缘必须由卡片边框与横向 padding 组合，不能另抄总像素值',
+  );
+
+  const card = blockFor(CSS, '.card');
+  assert.equal(
+    declaration(card, 'border'),
+    'var(--card-border-width) solid var(--border)',
+  );
+  assert.match(declaration(card, 'padding'), /^12px\s+var\(--card-padding-inline\)$/);
+  assert.doesNotMatch(card, /\b(?:1px|14px)\b/, '.card 不得保留 token 之外的重复尺寸');
+});
+
+test('管理页头宽屏同排靠右，并消费卡片内容内缘 token', () => {
+  const cardHeader = blockFor(CSS, '.card-header');
+  assert.equal(declaration(cardHeader, 'display'), 'flex');
+  assert.equal(declaration(cardHeader, 'justify-content'), 'space-between');
+  assert.doesNotMatch(cardHeader, /(?:padding-inline|flex-wrap)\s*:/,
+    '管理页布局不能通过修改全局 .card-header 影响其他页面');
+
+  const header = blockFor(CSS, '.view-dashboard > .manage-header');
+  assert.equal(declaration(header, 'padding-inline'), 'var(--card-content-inset)');
+  assert.equal(declaration(header, 'flex-wrap'), 'nowrap');
+
+  const actions = blockFor(CSS, '.view-dashboard > .manage-header > .row-actions');
+  assert.equal(declaration(actions, 'margin-left'), 'auto');
+});
+
+test('620px 以下页头动作独占一行且不撑宽文档', () => {
+  const mobile = blocksFor(CSS, '@media (max-width: 620px)')
+    .find((block) => block.includes('.view-dashboard > .manage-header'));
+  assert.ok(mobile, '缺少管理页头的 620px 窄屏规则');
+
+  const header = blockFor(mobile, '.view-dashboard > .manage-header');
+  assert.equal(declaration(header, 'flex-wrap'), 'wrap');
+  assert.equal(declaration(header, 'min-width'), '0');
+
+  const actions = blockFor(mobile, '.view-dashboard > .manage-header > .row-actions');
+  assert.equal(declaration(actions, 'width'), '100%');
+  assert.equal(declaration(actions, 'min-width'), '0');
+  assert.equal(declaration(actions, 'margin-left'), '0');
+  assert.equal(declaration(actions, 'justify-content'), 'flex-start');
+
+  const rowActions = blockFor(CSS, '.row-actions');
+  assert.equal(declaration(rowActions, 'flex-wrap'), 'wrap');
+  assert.equal(declaration(rowActions, 'gap'), '6px', '窄屏不得覆盖按钮间距');
+  assert.doesNotMatch(actions, /gap\s*:/, '窄屏动作行应继承既有按钮 gap');
+});
+
+test('620px 以下双卡单列并允许卡片宽度链收缩', () => {
+  const desktop = blockFor(CSS, '.side-by-side');
+  assert.equal(
+    declaration(desktop, 'grid-template-columns'),
+    'repeat(auto-fit, minmax(320px, 1fr))',
+    '宽屏仍须保留 320px auto-fit 双列行为',
+  );
+  const mobileStart = CSS.indexOf(
+    '@media (max-width: 620px)',
+    CSS.indexOf('.view-dashboard > .manage-header'),
+  );
+  assert.ok(
+    CSS.indexOf('.side-by-side {') < mobileStart,
+    '宽屏网格规则必须先于窄屏覆盖，避免同权重规则反向覆盖',
+  );
+
+  const card = blockFor(CSS, '.card');
+  assert.equal(declaration(card, 'min-width'), '0');
+
+  const mobile = blocksFor(CSS, '@media (max-width: 620px)')
+    .find((block) => block.includes('.view-dashboard > .manage-header'));
+  const sideBySide = blockFor(mobile, '.side-by-side');
+  assert.equal(declaration(sideBySide, 'grid-template-columns'), 'minmax(0, 1fr)');
+  assert.equal(declaration(sideBySide, 'min-width'), '0');
+  assert.doesNotMatch(
+    sideBySide,
+    /calc\(|(?:^|[;\n])\s*(?:width|max-width)\s*:|\d+vw\b/,
+    '窄屏覆盖应依靠网格收缩，不得另算视口与 view padding',
+  );
+});
+
+test('模态层序与 toast 指针契约：scrim < drawer < toast < menu < dialog', () => {
+  const root = blockFor(CSS, ':root');
+  const z = (name) => Number(declaration(root, `--z-${name}`));
+  const order = ['scrim', 'drawer', 'toast', 'menu', 'dialog'];
+
+  for (let i = 1; i < order.length; i += 1) {
+    const lower = order[i - 1];
+    const upper = order[i];
+    assert.ok(z(lower) < z(upper), `--z-${lower}(${z(lower)}) 必须低于 --z-${upper}(${z(upper)})`);
+  }
+  assert.equal(declaration(blockFor(CSS, '.drawer-scrim'), 'z-index'), 'var(--z-scrim)');
+  assert.equal(declaration(blockFor(CSS, '.host-drawer'), 'z-index'), 'var(--z-drawer)');
+  assert.equal(
+    declaration(blockFor(CSS, '.toast-region[data-modal-blocked="true"] .toast'), 'pointer-events'),
+    'none',
+    'toast 可视觉显示，但抽屉打开时不能盖住抽屉或截获落在其上的鼠标',
+  );
+});
+
+test('#/manage 页头与主机卡是同一 dashboard 的直接子级', async (t) => {
+  const { dom } = await mount(t, { hash: '#/manage' });
+  const dashboard = dom.app.querySelector('.view-dashboard');
+  const header = dashboard.querySelector('.manage-header');
+  const hostTableCard = dashboard.querySelector('.host-table-card');
+
+  assert.equal(dashboard.hidden, false);
+  assert.equal(header.parentNode, dashboard);
+  assert.equal(hostTableCard.parentNode, dashboard);
+  assert.ok(
+    dashboard.children.indexOf(header) < dashboard.children.indexOf(hostTableCard),
+    '页头应直接位于主机卡之前，二者才能共享 dashboard 坐标系',
+  );
+});

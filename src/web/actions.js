@@ -5,8 +5,9 @@
  */
 
 import { ApiError, api } from './api.js';
+import { isHostEnabled, isManagedHost } from './host-rules.js';
 import { ACTION_TIMEOUT_MS, pendingKey } from './store.js';
-import { isManaged, phaseMeta } from './utils.js';
+import { phaseMeta } from './utils.js';
 
 const CALL = {
   start: api.startHost,
@@ -17,22 +18,44 @@ const CALL = {
 };
 
 const NEEDS_CONFIRM = new Set(['stop', 'restart']);
+export const CONFIG_SYNC_TARGET_LIMIT = 200;
 
 export function createActions({ store, confirm, navigate }) {
   /** 统一错误呈现：ApiError 的 detail 落可展开区域（10 §3.9）。 */
-  function reportError(err, fallback) {
+  function reportError(err, fallback, { preferFallback = false } = {}) {
+    let presentation;
     if (err instanceof ApiError) {
-      store.addToast({ level: 'error', summary: err.message || fallback, detail: err.detail ? String(err.detail) : null });
-      return;
+      const apiDetail = err.detail ? String(err.detail) : null;
+      const detail = preferFallback
+        ? [err.message && err.message !== fallback ? err.message : null, apiDetail].filter(Boolean).join('\n') || null
+        : apiDetail;
+      presentation = {
+        level: 'error',
+        summary: preferFallback ? fallback : (err.message || fallback),
+        detail,
+      };
+    } else {
+      presentation = {
+        level: 'error',
+        summary: `${fallback}：${err.message}`,
+        detail: err.stack ?? null,
+      };
     }
-    store.addToast({ level: 'error', summary: `${fallback}：${err.message}`, detail: err.stack ?? null });
+    const toast = store.addToast(presentation);
+    return { ...presentation, id: toast.id };
   }
 
   /**
    * 包住一次写操作：pending 生命周期 + 202 accepted + 超时只解 loading。
-   * @param {{action:string, host?:string|null, run:()=>Promise<any>, settleOnResolve?:boolean}} opts
+   * @param {{
+   *   action:string, host?:string|null, run:()=>Promise<any>,
+   *   settleOnResolve?:boolean, failureMessage?:string,
+   *   onError?:(toast:{id:number,level:string,summary:string,detail:string|null})=>void,
+   * }} opts
    */
-  async function guarded({ action, host = null, run, settleOnResolve = false }) {
+  async function guarded({
+    action, host = null, run, settleOnResolve = false, failureMessage, onError,
+  }) {
     if (!store.canWrite()) {
       store.addToast({ level: 'warn', summary: '与 manager 失联，写操作已暂停' });
       return null;
@@ -57,7 +80,12 @@ export function createActions({ store, confirm, navigate }) {
       return res;
     } catch (err) {
       store.settlePending(key);
-      reportError(err, `${host ?? 'manager'} ${action} 失败`);
+      const errorToast = reportError(
+        err,
+        failureMessage ?? `${host ?? 'manager'} ${action} 失败`,
+        { preferFallback: failureMessage !== undefined },
+      );
+      onError?.(errorToast);
       return null;
     }
   }
@@ -73,7 +101,7 @@ export function createActions({ store, confirm, navigate }) {
       store.addToast({ level: 'info', summary: `${name} 隧道已自行恢复，无需重连` });
       return null;
     }
-    if (NEEDS_CONFIRM.has(action) && !isManaged(host)) {
+    if (NEEDS_CONFIRM.has(action) && !isManagedHost(host)) {
       store.addToast({ level: 'warn', summary: `${name} 上的 dsh web 不是本工具拉起的，禁止 ${action}` });
       return null;
     }
@@ -92,8 +120,8 @@ export function createActions({ store, confirm, navigate }) {
     return guarded({ action, host: name, run: () => CALL[action](name) });
   }
 
-  async function probeAll() {
-    return guarded({ action: 'probe-all', run: () => api.probeAll() });
+  async function probeAll({ failureMessage } = {}) {
+    return guarded({ action: 'probe-all', failureMessage, run: () => api.probeAll() });
   }
 
   /** 创建响应先落服务端 HostView，再复用既有 probe pending；phase 仍只由响应/SSE 决定。 */
@@ -146,6 +174,33 @@ export function createActions({ store, confirm, navigate }) {
     return res;
   }
 
+  async function syncConfig({
+    source, targets, dryRun, onError,
+  }) {
+    if (targets.length > CONFIG_SYNC_TARGET_LIMIT) {
+      store.addToast({
+        level: 'warn',
+        summary: `一次最多同步 ${CONFIG_SYNC_TARGET_LIMIT} 台目标主机`,
+        detail: '请减少目标后重试；配置同步按整单原子执行，不会自动拆分。',
+      });
+      return null;
+    }
+    const res = await guarded({
+      action: 'config:sync',
+      settleOnResolve: true,
+      onError,
+      run: () => api.syncHostConfig({ source, targets, dryRun }),
+    });
+    if (!res || dryRun) return res;
+
+    const count = Array.isArray(res.applied) ? res.applied.length : 0;
+    store.addToast({
+      level: 'success',
+      summary: count > 0 ? `已同步 ${count} 台主机配置` : '目标配置已一致',
+    });
+    return res;
+  }
+
   async function saveDefaults(patch) {
     const res = await guarded({
       action: 'defaults:save',
@@ -154,9 +209,7 @@ export function createActions({ store, confirm, navigate }) {
     });
     if (res) {
       store.setDefaults(res.defaults);
-      if (res.manager && store.state.manager.info) {
-        store.setManagerInfo({ ...store.state.manager.info, ...res.manager });
-      }
+      if (res.manager) store.setManagerConfig(res.manager);
       store.addToast({
         level: 'success',
         summary: res.restartRequired ? '已保存；manager 端口需重启后生效' : '全局默认已保存',
@@ -198,8 +251,7 @@ export function createActions({ store, confirm, navigate }) {
     }
     // ready 标签就是「一步拉起」入口：先提交启动，再立即切路由；phase 仍只等
     // 响应/SSE 推进，绝不在动作层乐观改成 running。
-    const enabled = host.config?.enabled ?? host.enabled;
-    if (host.phase === 'ready' && enabled !== false) void hostAction('start', name);
+    if (host.phase === 'ready' && isHostEnabled(host)) void hostAction('start', name);
     navigate(`#/host/${encodeURIComponent(name)}`);
   }
 
@@ -232,6 +284,7 @@ export function createActions({ store, confirm, navigate }) {
     addLocalHost,
     setAutoStart,
     saveHostConfig,
+    syncConfig,
     saveDefaults,
     reload,
     restartManager,

@@ -360,9 +360,12 @@ Individual layers:
 ```bash
 npm test              # unit + fake-remote integration + CLI e2e + frontend logic/mount + tooling + install.sh
 npm run coverage      # coverage report
-npm run coverage:gate # three-tier thresholds (lib ≥90%, module layer ≥75%, web logic ≥80%)
+npm run coverage:gate # src/** overall lines ≥95% + tier floors (lib ≥90%, modules ≥75%, web logic ≥80%)
 npm run ui:smoke      # real browser (headless Chrome + CDP): layout, focus, reduced motion, real iframe
 ```
+
+The gate also fails if any `src/**/*.js` file has no lcov record. Branch and function
+coverage are diagnostic only and do not participate in the thresholds.
 
 Site and live demo:
 

@@ -3,7 +3,7 @@
  * 统一质量闸门：一条命令跑完发版前该跑的所有东西，给一份摘要与一个退出码。
  *
  * 分五关，任一关红就整体红（退出码 1）：
- *   tests     全量测试 + 三档覆盖率门槛（架构护栏用例也在这一关里）
+ *   tests     全量测试 + 覆盖率总闸与分档门槛（架构护栏用例也在这一关里）
  *   ui        真浏览器冒烟（无头 Chrome + CDP）；没装 Chrome 则跳过，除非 --require-browser
  *   site      站点构建 + 无头 demo 冒烟 + 双语 README 链接与命令核对
  *   pack      npm 打包产物清单核对：该进的都在、tests/.local 之类别混进去
@@ -115,7 +115,7 @@ const STAGES = [
     async run() {
       const res = await node('coverage-gate.mjs');
       if (res.code !== 0) throw new Error('测试或覆盖率门槛未过（详见上方输出）');
-      return '三档达标';
+      return '总闸 + 分档达标';
     },
   },
   {

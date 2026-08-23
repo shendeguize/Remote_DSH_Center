@@ -232,22 +232,89 @@ test('抽屉开着时后景 inert，关掉后恢复可交互', async (t) => {
   const drawer = dom.app.querySelector('.host-drawer');
   assert.equal(drawer.getAttribute('aria-modal'), 'true', '有遮罩就是模态，别说反话');
 
-  const background = ['.app-header', '.tabbar', '.view-dashboard'].map((s) => {
+  const background = ['.app-header', '.tabbar', '.view-dashboard', '.context-menu', '.overflow-menu'].map((s) => {
     const node = dom.app.querySelector(s);
     assert.ok(node, `找不到 ${s}，判据在空转`);
     return node;
   });
-  assert.deepEqual(background.map((n) => Boolean(n.inert)), [false, false, false]);
+  assert.equal(background.some((n) => Boolean(n.inert)), false);
 
   const row = dom.app.querySelector('.host-table tbody tr');
   row.focus();
   key(row, 'Enter');
   await flush();
-  assert.deepEqual(background.map((n) => Boolean(n.inert)), [true, true, true], '后景该 inert');
+  assert.equal(background.every((n) => Boolean(n.inert)), true, '后景与悬浮菜单层都该 inert');
 
   key(dom.document, 'Escape');
   await flush();
-  assert.deepEqual(background.map((n) => Boolean(n.inert)), [false, false, false], '关了就得放开');
+  assert.equal(background.some((n) => Boolean(n.inert)), false, '关了就得放开');
+});
+
+/**
+ * 回归（drawer-modal-toast-focus）：toast 要继续留在 aria-live 树里播报抽屉保存错误，
+ * 但它的关闭/展开/复制控件不能成为 custom modal 的外部 Tab 落点。render() 会整片
+ * 重建 toast，所以模态期间新来的通知也必须继承同一限制。
+ */
+test('抽屉模态期间 toast 只播报不交互，动态新增与关闭恢复都同步', async (t) => {
+  const { app, dom } = await mount(t, { hosts: [running('gpu-1')] });
+  const region = dom.app.querySelector('.toast-region');
+  const controls = () => [
+    ...region.querySelectorAll('summary'),
+    ...region.querySelectorAll('button'),
+  ];
+
+  app.store.addToast({
+    level: 'error',
+    summary: '保存失败',
+    detail: '第一次失败详情',
+  });
+  assert.equal(region.getAttribute('role'), 'status');
+  assert.equal(region.getAttribute('aria-live'), 'polite');
+  assert.equal(Boolean(region.inert), false, '不能 inert 整个 live region，否则错误不会被读屏播报');
+  assert.ok(controls().length >= 3, '带详情 toast 应有展开、复制与关闭控件');
+  assert.equal(controls().some((node) => node.getAttribute('tabindex') !== null), false);
+
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(region.getAttribute('data-modal-blocked'), 'true', '样式层需要明确的指针阻断状态');
+  assert.equal(Boolean(region.inert), false, '模态期间仍须保留 aria-live 通知');
+  assert.equal(controls().every((node) => node.getAttribute('tabindex') === '-1'), true,
+    '已有 toast 控件必须全部退出 Tab 环');
+
+  app.store.addToast({
+    level: 'error',
+    summary: '模态期间的新错误',
+    detail: '第二次失败详情',
+  });
+  assert.match(region.textContent, /模态期间的新错误/);
+  assert.equal(controls().every((node) => node.getAttribute('tabindex') === '-1'), true,
+    'render 重建后新增 toast 也不能漏回 Tab 环');
+
+  const envBox = drawer.querySelectorAll('textarea')[0];
+  envBox.value = 'A=1';
+  drawer.querySelector('.drawer-form').dispatchEvent({ type: 'input' });
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+
+  const dialog = dom.app.querySelector('.confirm-dialog');
+  assert.equal(dialog.open, true, '脏草稿关闭应从抽屉动作弹出原生确认框');
+  assert.equal(Boolean(dialog.inert), false, '抽屉的背景 inert 不能误伤它自己的确认框');
+  assert.equal(dialog.querySelectorAll('button').some((node) => node.getAttribute('tabindex') === '-1'), false,
+    'native modal 控件必须仍可交互');
+  dialog.querySelectorAll('button').find((node) => node.textContent === '取消').click();
+  await flush();
+  assert.equal(dialog.open, false);
+  assert.equal(drawer.hidden, false);
+  assert.equal(region.getAttribute('data-modal-blocked'), 'true', '取消确认后抽屉仍开着，toast 仍须受阻');
+
+  drawer.querySelectorAll('.btn').find((node) => node.textContent === '放弃修改').click();
+  key(dom.document, 'Escape');
+  await flush();
+  assert.equal(drawer.hidden, true);
+  assert.equal(region.getAttribute('data-modal-blocked'), null);
+  assert.equal(controls().some((node) => node.getAttribute('tabindex') !== null), false,
+    '抽屉关闭后 toast 控件应恢复原生 Tab 行为');
 });
 
 /**

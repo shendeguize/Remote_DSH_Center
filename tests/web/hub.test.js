@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createHub, hubHosts } from '../../src/web/components/hub.js';
+import { visibleTabs } from '../../src/web/components/tabbar.js';
 import { createStore } from '../../src/web/store.js';
 import {
   flush, hostView, mount,
@@ -55,10 +56,17 @@ test('Hub 分类：五种可开态进主卡片，其余状态与禁用主机折�
     host('offline', 'unreachable'),
     host('missing', 'no_dsh'),
     host('waiting', 'unknown'),
+    host('legacy-disabled', 'running', { enabled: false, config: { enabled: true } }),
     disabled,
   ];
   const grouped = hubHosts(hosts);
-  assert.deepEqual(grouped.primary.map((item) => item.name), ['crashed', 'degraded', 'ready', 'running', 'starting']);
+  const tabs = visibleTabs(hosts);
+  assert.deepEqual(grouped.primary, tabs, 'Hub primary 与 Tab visible 必须是同一批主机且顺序一致');
+  assert.deepEqual(
+    grouped.primary.map((item) => item.name),
+    ['crashed', 'degraded', 'legacy-disabled', 'ready', 'running', 'starting'],
+    '主入口统一按主机名排序，config.enabled 优先于旧 enabled',
+  );
   assert.deepEqual(grouped.unavailable.map((item) => item.name), ['disabled', 'missing', 'offline', 'waiting']);
 });
 

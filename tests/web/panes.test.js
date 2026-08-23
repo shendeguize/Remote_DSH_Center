@@ -9,6 +9,7 @@ import test from 'node:test';
 import {
   createIframePanes, loadingText, overlayFor, paneDecision,
 } from '../../src/web/components/iframe-pane.js';
+import { isHostActionAllowed } from '../../src/web/host-rules.js';
 import { createStore } from '../../src/web/store.js';
 import { installDom } from './dom-shim.js';
 
@@ -84,18 +85,36 @@ test('crashed 期间隧道地址消失也要留住已加载的文档', () => {
   assert.equal(d.reason, 'no-url-keep');
 });
 
-test('遮罩文案与动作按 phase 裁剪', () => {
+test('遮罩文案与动作按共享矩阵裁剪', () => {
   assert.equal(overlayFor({ phase: 'running', mappedUrl: 'http://x/' }), null, 'running 无遮罩');
 
-  const degraded = overlayFor({ phase: 'degraded', tunnel: { suspendedReason: null } });
-  assert.match(degraded.title, /隧道断开/);
-  assert.equal(degraded.action, 'reconnect');
+  for (const startedByUs of [true, false]) {
+    const degradedHost = {
+      phase: 'degraded',
+      tunnel: { suspendedReason: null },
+      web: { startedByUs },
+    };
+    const degraded = overlayFor(degradedHost);
+    assert.match(degraded.title, /隧道断开/);
+    assert.equal(isHostActionAllowed(degradedHost, 'reconnect'), true);
+    assert.equal(degraded.action, 'reconnect', 'degraded 遮罩不按实例归属裁掉重连');
+  }
 
-  const crashed = overlayFor({ phase: 'crashed' });
-  assert.match(crashed.title, /已退出/);
-  assert.equal(crashed.action, 'restart');
+  const managedCrashedHost = { phase: 'crashed', web: { startedByUs: true } };
+  const managedCrashed = overlayFor(managedCrashedHost);
+  assert.match(managedCrashed.title, /已退出/);
+  assert.equal(isHostActionAllowed(managedCrashedHost, 'restart'), true);
+  assert.equal(managedCrashed.action, 'restart');
 
-  assert.equal(overlayFor({ phase: 'starting' }).action, null, '启动中不给按钮');
+  const manualCrashedHost = { phase: 'crashed', web: { startedByUs: false } };
+  const manualCrashed = overlayFor(manualCrashedHost);
+  assert.equal(isHostActionAllowed(manualCrashedHost, 'restart'), false);
+  assert.equal(manualCrashed.action, null);
+  assert.match(manualCrashed.body, /不是本工具.*手动处理/);
+
+  const startingHost = { phase: 'starting', web: { startedByUs: true } };
+  assert.equal(isHostActionAllowed(startingHost, 'stop'), false);
+  assert.equal(overlayFor(startingHost).action, null, '启动中不给 stop 按钮');
   assert.equal(overlayFor({ phase: 'running', mappedUrl: null }).action, null);
   assert.match(overlayFor({ phase: 'ready' }).title, /可拉起/);
   assert.match(overlayFor(null).title, /已消失/);

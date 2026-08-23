@@ -25,6 +25,7 @@ import { armExitGuard } from './lib/exit-guard.mjs';
 
 import { createHarness, newHostState } from '../tests/harness/index.js';
 import { CONFIG_VERSION } from '../src/defaults.js';
+import { primaryHosts } from '../src/web/host-rules.js';
 import {
   captureScreenshot, findChrome, launchChrome as launchChromeShared, pageSession, sleep,
 } from './lib/browser.mjs';
@@ -65,6 +66,8 @@ async function cleanSlate() {
       // 对抽屉按钮 click() 根本不生效——先收框，再收抽屉。
       const dlg = document.querySelector('.confirm-dialog');
       if (dlg?.open) [...dlg.querySelectorAll('button')].find((b) => /放弃|取消/.test(b.textContent))?.click();
+      const sync = document.querySelector('.config-sync-dialog');
+      if (sync?.open) [...sync.querySelectorAll('button')].find((b) => /取消|关闭/.test(b.textContent) && !b.disabled)?.click();
       const d = document.querySelector('.host-drawer');
       if (d && !d.hidden) {
         const cancel = [...d.querySelectorAll('.btn')].find((b) => /放弃修改/.test(b.textContent));
@@ -126,14 +129,9 @@ export function evaluateS12({
   };
 }
 
-const TAB_PHASES = new Set(['ready', 'starting', 'running', 'degraded', 'crashed']);
-
 async function fixtureTabNames(rig) {
   const res = await rig.api('GET', '/api/hosts');
-  return (res.json?.hosts ?? [])
-    .filter((host) => (host.config?.enabled ?? host.enabled) === true && TAB_PHASES.has(host.phase))
-    .map((host) => host.name)
-    .sort((a, b) => a.localeCompare(b));
+  return primaryHosts(res.json?.hosts ?? []).map((host) => host.name);
 }
 
 // ── 本机 manager（远端换假装置） ─────────────────────────────────────────
@@ -312,16 +310,16 @@ async function main() {
           hash: location.hash,
           hub: visible(document.querySelector('.view-hub')),
           manage: visible(document.querySelector('.view-dashboard')),
-          visibleOps: [...document.querySelectorAll('.probe-all, .reload-config')].filter(visible).length,
-          toolbarOps: document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config').length,
-          headerOps: document.querySelectorAll('.app-header .probe-all, .app-header .reload-config').length,
+          visibleOps: [...document.querySelectorAll('.probe-all, .reload-config, .config-sync-open')].filter(visible).length,
+          toolbarOps: document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config, .manage-header .config-sync-open').length,
+          headerOps: document.querySelectorAll('.app-header .probe-all, .app-header .reload-config, .app-header .config-sync-open').length,
         };
       `);
       assert(landing.hash === '#/hub' && landing.hub && !landing.manage,
         `新浏览器根路由应落 hub，实测 ${landing.hash}（hub=${landing.hub}, manage=${landing.manage}）`);
       assert(landing.visibleOps === 0, `hub 上露出了 ${landing.visibleOps} 个运维写按钮`);
-      assert(landing.toolbarOps === 2 && landing.headerOps === 0,
-        `探测/重载应只属于 manage toolbar（toolbar=${landing.toolbarOps}, header=${landing.headerOps}）`);
+      assert(landing.toolbarOps === 3 && landing.headerOps === 0,
+        `探测/重载/同步应只属于 manage toolbar（toolbar=${landing.toolbarOps}, header=${landing.headerOps}）`);
       const bad = responses.filter((r) => r.status >= 400 && r.url.startsWith(rig.base));
       assert(bad.length === 0, `有失败请求：${bad.map((b) => `${b.status} ${b.url}`).join(', ')}`);
       assert(consoleErrors.length === 0, consoleErrors.join(' | '));
@@ -422,6 +420,114 @@ async function main() {
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
     await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
+
+    await check('S14', '批量同步：真键盘预览/应用、secret 不出 DOM、窄屏不溢出', async () => {
+      const config = (await rig.api('GET', '/api/config')).json;
+      const originalSource = config.hosts['gpu-1'];
+      const originalTarget = config.hosts['gpu-2'];
+      const sentinel = 'REAL-BROWSER-SYNC-SECRET';
+      const profilePatch = (host) => ({
+        remoteWebPort: host.remoteWebPort,
+        workdir: host.workdir,
+        inject: host.inject,
+      });
+
+      try {
+        const changedInject = {
+          ...originalSource.inject,
+          env: { ...originalSource.inject.env, BROWSER_SYNC_SENTINEL: sentinel },
+        };
+        const sourceUpdate = await rig.api('PUT', '/api/hosts/gpu-1/config', { inject: changedInject });
+        assert(sourceUpdate.status === 200, `准备源配置失败：HTTP ${sourceUpdate.status}`);
+
+        await cdp.eval("document.querySelector('.config-sync-open').focus(); return true;");
+        await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+        await cdp.waitFor(
+          "document.querySelector('.config-sync-dialog')?.open && document.activeElement?.classList.contains('config-sync-source')",
+          '同步框打开并聚焦源主机',
+        );
+        await cdp.eval(`
+          const source = document.querySelector('.config-sync-source');
+          source.value = 'gpu-1';
+          source.dispatchEvent(new Event('change', { bubbles: true }));
+          return source.value;
+        `);
+        const source = await cdp.eval("return document.querySelector('.config-sync-source').value;");
+        assert(source === 'gpu-1', `切换源主机失败，实测 ${source}`);
+
+        await cdp.eval("document.querySelector('.config-sync-targets [data-host=\"gpu-2\"]').focus(); return true;");
+        await cdp.key(' ', { code: 'Space', keyCode: 32 });
+        const checked = await cdp.eval("return document.querySelector('.config-sync-targets [data-host=\"gpu-2\"]').checked;");
+        assert(checked, 'Space 没有选中 gpu-2 目标复选框');
+
+        await cdp.eval("document.querySelector('.config-sync-preview').focus(); return true;");
+        await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+        await cdp.waitFor(
+          "document.querySelector('.config-sync-results') && !document.querySelector('.config-sync-apply').disabled",
+          '真实 dry-run 预览完成',
+        );
+        const preview = await cdp.eval(`
+          const dialog = document.querySelector('.config-sync-dialog');
+          return {
+            text: dialog.textContent,
+            active: document.activeElement?.className ?? '',
+            summary: dialog.querySelector('.config-sync-change-summary')?.textContent ?? '',
+          };
+        `);
+        assert(/环境变量/.test(preview.summary), `预览未列出环境变量差异：${preview.summary}`);
+        assert(!preview.text.includes(sentinel), 'secret 值泄漏到批量同步 DOM');
+
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 720, deviceScaleFactor: 1, mobile: false });
+        const narrow = await cdp.eval(`
+          const dialog = document.querySelector('.config-sync-dialog');
+          const rect = dialog.getBoundingClientRect();
+          const actions = dialog.querySelector('.config-sync-actions').getBoundingClientRect();
+          return {
+            left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+            viewport: [innerWidth, innerHeight],
+            actionTop: actions.top, actionBottom: actions.bottom,
+            docWidth: document.documentElement.scrollWidth,
+          };
+        `);
+        assert(narrow.left >= -1 && narrow.right <= narrow.viewport[0] + 1,
+          `窄屏 dialog 横向越界：${narrow.left}..${narrow.right}/${narrow.viewport[0]}`);
+        assert(narrow.top >= -1 && narrow.bottom <= narrow.viewport[1] + 1,
+          `窄屏 dialog 纵向越界：${narrow.top}..${narrow.bottom}/${narrow.viewport[1]}`);
+        assert(narrow.actionTop >= narrow.top && narrow.actionBottom <= narrow.bottom + 1,
+          '窄屏主要操作区不在 dialog 可视边界内');
+        assert(narrow.docWidth <= narrow.viewport[0] + 1,
+          `窄屏文档横溢 ${narrow.docWidth - narrow.viewport[0]}px`);
+        await screenshot(cdp, 'config-sync-narrow-preview');
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+
+        await cdp.eval("document.querySelector('.config-sync-apply').focus(); return true;");
+        await cdp.key('Enter', { code: 'Enter', keyCode: 13 });
+        await cdp.waitFor(
+          "/同步完成/.test(document.querySelector('.config-sync-status')?.textContent) && document.querySelector('.toast-success')",
+          '真实原子应用完成',
+        );
+        const after = (await rig.api('GET', '/api/config')).json;
+        assert(after.hosts['gpu-2'].inject.env.BROWSER_SYNC_SENTINEL === sentinel,
+          '应用后目标配置没有持久化 sentinel');
+        assert(after.hosts['gpu-2'].enabled === originalTarget.enabled
+          && after.hosts['gpu-2'].autoStart === originalTarget.autoStart
+          && after.hosts['gpu-2'].localPort === originalTarget.localPort,
+        '应用改动了同步边界外字段');
+        await screenshot(cdp, 'config-sync-applied');
+
+        await cdp.key('Escape', { code: 'Escape', keyCode: 27 });
+        await cdp.waitFor("!document.querySelector('.config-sync-dialog').open", 'Escape 关闭同步框');
+        const restoredFocus = await cdp.eval("return document.activeElement?.classList.contains('config-sync-open');");
+        assert(restoredFocus, '关闭后焦点没有回到批量同步入口');
+        return '键盘链路、原子持久化、secret 边界与 360px 布局均通过';
+      } finally {
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+          width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+        }).catch(() => {});
+        await rig.api('PUT', '/api/hosts/gpu-1/config', profilePatch(originalSource)).catch(() => {});
+        await rig.api('PUT', '/api/hosts/gpu-2/config', profilePatch(originalTarget)).catch(() => {});
+      }
+    });
 
     await check('S4', '键盘链路：Tab 到主机行 → Enter 开抽屉 → Esc 关且焦点归位', async () => {
       await cdp.eval("document.body.focus(); if (document.activeElement !== document.body) document.activeElement.blur(); return true;");
@@ -592,21 +698,55 @@ async function main() {
       await cdp.eval("window.location.hash = '#/manage'; return true;");
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
+      const waitProbeReady = async (named) => {
+        const deadline = Date.now() + 25_000;
+        for (;;) {
+          // eslint-disable-next-line no-await-in-loop -- 上一轮探测结束前按钮会保持 disabled
+          const state = await cdp.eval(`
+            const tr = document.querySelector('.host-table tbody tr');
+            const b = tr && [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+            const connection = document.querySelector('.conn-indicator')?.dataset.state ?? 'missing';
+            const writable = connection === 'open' && Boolean(document.querySelector('.disconnect-banner')?.hidden);
+            return {
+              ready: Boolean(b && !b.disabled && writable),
+              button: Boolean(b),
+              disabled: b?.disabled ?? null,
+              host: tr?.dataset.host ?? null,
+              connection,
+              writable,
+            };
+          `);
+          if (state.ready) return state;
+          if (Date.now() > deadline) {
+            throw new Error(`${named}按下前置未收敛：button=${state.button}, disabled=${state.disabled}, `
+              + `host=${state.host ?? 'missing'}, connection=${state.connection}, writable=${state.writable}`);
+          }
+          // eslint-disable-next-line no-await-in-loop -- 等页面 pending 与 SSE 状态按真实条件收敛
+          await sleep(50);
+        }
+      };
+
       // 原生激活只有真浏览器能验：单测垫片不会因为 Enter 就替按钮生成 click，
       // 「行抢掉了按钮的按键」在那里只能验到一半（行不开抽屉）。
       for (const key of ['Enter', ' ']) {
-        const mark = responses.length;
+        const named = key === ' ' ? 'Space' : 'Enter';
+        // Enter 发出的上一笔 probe 可能超过固定 400ms；disabled 按钮不会响应下一次 Space。
+        // eslint-disable-next-line no-await-in-loop -- 每个按键都须独立等到目标按钮可原生激活
+        await waitProbeReady(named);
         // eslint-disable-next-line no-await-in-loop -- 逐个按键
-        await cdp.eval(`
+        const focused = await cdp.eval(`
           const tr = document.querySelector('.host-table tbody tr');
-          [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe').focus();
-          return true;
+          const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+          if (!b || b.disabled) return false;
+          b.focus();
+          return document.activeElement === b;
         `);
+        assert(focused, `${named}按下前探测按钮未取得焦点`);
+        const mark = responses.length;
         // eslint-disable-next-line no-await-in-loop -- 同上
         await cdp.key(key === ' ' ? ' ' : 'Enter', { code: key === ' ' ? 'Space' : 'Enter', keyCode: key === ' ' ? 32 : 13 });
         // eslint-disable-next-line no-await-in-loop -- 同上
         await sleep(400);
-        const named = key === ' ' ? 'Space' : 'Enter';
         const hit = responses.slice(mark).some((r) => /\/api\/hosts\/[^/]+\/probe$/.test(r.url));
         assert(hit, `按 ${named} 没发出探测请求——行的 keydown 又把控件的原生激活废了`);
         // eslint-disable-next-line no-await-in-loop -- 同上
@@ -620,14 +760,55 @@ async function main() {
       await cdp.eval("window.location.hash = '#/manage'; return true;");
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
+      const pressReadiness = () => cdp.eval(`
+        const tr = document.querySelector('.host-table tbody tr');
+        const b = tr && [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+        const connection = document.querySelector('.conn-indicator')?.dataset.state ?? 'missing';
+        const writable = connection === 'open' && Boolean(document.querySelector('.disconnect-banner')?.hidden);
+        return {
+          ready: Boolean(b && !b.disabled && writable),
+          button: Boolean(b),
+          disabled: b?.disabled ?? null,
+          host: tr?.dataset.host ?? null,
+          connection,
+          writable,
+          pending: b ? Boolean(b.disabled && writable) : null,
+        };
+      `);
+      const readinessNote = (state) => [
+        `button=${state.button}`,
+        `disabled=${state.disabled}`,
+        `host=${state.host ?? 'missing'}`,
+        `connection=${state.connection}`,
+        `writable=${state.writable}`,
+        `pending=${state.pending}`,
+      ].join(', ');
+      const waitPressReady = async (named) => {
+        const deadline = Date.now() + 25_000;
+        for (;;) {
+          // eslint-disable-next-line no-await-in-loop -- 等上一笔页面 pending 真正结算
+          const state = await pressReadiness();
+          if (state.ready) return state;
+          if (Date.now() > deadline) {
+            throw new Error(`${named}按下前置未收敛：${readinessNote(state)}`);
+          }
+          // eslint-disable-next-line no-await-in-loop -- 按可写/非 pending 谓词轮询，不用固定等待猜时序
+          await sleep(50);
+        }
+      };
+
       // 只有真浏览器验得到：垫片里 click 是直接调的，不存在「按下与抬起要是同一个节点」
       // 这回事。这条也是 CI 上 S4e 抽动的根：runner 一慢，一次重建就落进按下与抬起之间。
       for (const how of ['mouse', 'space']) {
-        const mark = responses.length;
+        const named = how === 'mouse' ? '鼠标' : 'Space';
+        // S4e / 上一轮 probe 可能仍在页面 pending 中；disabled 按钮不会产生原生激活。
+        // eslint-disable-next-line no-await-in-loop -- 每轮都须独立等到目标按钮可原生激活
+        const ready = await waitPressReady(named);
         // eslint-disable-next-line no-await-in-loop -- 逐条按压
         const box = await cdp.eval(`
           const tr = document.querySelector('.host-table tbody tr');
           const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
+          if (!b || b.disabled) return null;
           b.scrollIntoView({ block: 'center' });
           b.focus();
           const r = b.getBoundingClientRect();
@@ -637,6 +818,8 @@ async function main() {
           window.__obs.observe(document.querySelector('.host-table tbody'), { childList: true, subtree: true });
           return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), host: tr.dataset.host };
         `);
+        assert(box, `${named}取按压目标时又失去就绪态：${readinessNote(ready)}`);
+        const mark = responses.length;
         // eslint-disable-next-line no-await-in-loop -- 同上
         if (how === 'mouse') await cdp.mouseHalf('down', box.x, box.y);
         // eslint-disable-next-line no-await-in-loop -- 同上
@@ -658,7 +841,6 @@ async function main() {
         // eslint-disable-next-line no-await-in-loop -- 同上
         await sleep(600);
 
-        const named = how === 'mouse' ? '鼠标' : 'Space';
         const hit = responses.slice(mark).some((r) => r.url.endsWith(`/api/hosts/${box.host}/probe`));
         assert(hit, `${named}按住期间碰上重建，这一下就没了——请求一个都没发出`);
         // eslint-disable-next-line no-await-in-loop -- 同上
@@ -1172,14 +1354,14 @@ async function main() {
         return {
           banner: document.querySelector('.disconnect-banner').textContent.trim(),
           navigationEnabled: Boolean(manageBack && !manageBack.disabled),
-          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config')]
+          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config, .manage-header .config-sync-open')]
             .map((button) => [button.textContent.trim(), button.disabled]),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
         };
       `);
       assert(/失联/.test(state.banner), `横幅文案不含「失联」：${state.banner}`);
       assert(state.navigationEnabled, '断线后「返回主页面」导航被禁用或缺失');
-      assert(state.toolbarWrites.length === 2 && state.toolbarWrites.every(([, disabled]) => disabled),
+      assert(state.toolbarWrites.length === 3 && state.toolbarWrites.every(([, disabled]) => disabled),
         `断线后 manage 页头写按钮未全部禁用：${JSON.stringify(state.toolbarWrites)}`);
       assert(!state.rowWritable, '断线后行内写按钮仍可点');
       await sleep(3_000);
@@ -1208,14 +1390,14 @@ async function main() {
         const manageBack = document.querySelector('.manage-back');
         return {
           navigationEnabled: Boolean(manageBack && !manageBack.disabled),
-          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config')]
+          toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config, .manage-header .config-sync-open')]
             .map((button) => [button.textContent.trim(), button.disabled]),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
           rows: document.querySelectorAll('.host-table tbody tr').length,
         };
       `);
       assert(back.navigationEnabled, '恢复后「返回主页面」导航被禁用或缺失');
-      assert(back.toolbarWrites.length === 2 && back.toolbarWrites.every(([, disabled]) => !disabled),
+      assert(back.toolbarWrites.length === 3 && back.toolbarWrites.every(([, disabled]) => !disabled),
         `恢复后 manage 页头写按钮未全部解禁：${JSON.stringify(back.toolbarWrites)}`);
       assert(back.rowWritable, '恢复后行内写按钮还禁着');
       assert(back.rows >= 1, `恢复后表里只有 ${back.rows} 行，快照没回灌`);

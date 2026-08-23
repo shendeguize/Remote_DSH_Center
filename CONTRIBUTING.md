@@ -131,7 +131,7 @@ Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell �
 | RV-3 | 分层未倒挂：lib 纯内核、web 不碰 `node:`、`defaults.js` 是唯一出厂表、config.json 是唯一配置源 |
 | RV-4 | 远端零常驻未破：新远端行为仍是一次性 ssh，落地物只进 `~/.dsh_center_remote/` |
 | RV-5 | 协议模板变更核对过 LAUNCH/POLL/VERIFY/STOP/LOG 全链兼容性与退出码占用表 |
-| RV-6 | 新代码路径有用例、修复类先红后绿、`tests/COVERAGE_MATRIX.md` 已回写、三档覆盖率达标 |
+| RV-6 | 新代码路径有用例、修复类先红后绿、`tests/COVERAGE_MATRIX.md` 已回写；`src/**` 行覆盖 ≥95%，分档下限达标，且每个 `src/**/*.js` 都有 lcov 记录（branch/function 仅诊断） |
 | RV-7 | 外部可观察变更进了 CHANGELOG `[Unreleased]`；README 与设计文档回写完成 |
 | RV-8 | 提交卫生：一 PR 一意图、标题合约定、无 `.local` 与密钥泄漏 |
 | RV-9 | 退出码语义（0 成功 / 1 操作失败 / 2 超时或通信失败 / 3 用法错误 / 130 等待被 Ctrl-C 打断）与错误文案「说人话」标准未破 |

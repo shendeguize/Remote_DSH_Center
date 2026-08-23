@@ -6,6 +6,7 @@
  */
 
 export const PORT_MIN = 1;
+export const BINDABLE_PORT_MIN = 1024;
 export const PORT_MAX = 65_535;
 
 export function parseIntStrict(raw) {
@@ -30,15 +31,19 @@ export function parseRange(raw) {
   return { ok: true, value: [from.value, to.value] };
 }
 
-export function vRange(range) {
+export function vBindableRange(range) {
   if (!Array.isArray(range) || range.length !== 2) return '区间需要起点与终点两个值';
   for (const p of range) {
-    const bad = vPort(p);
-    if (bad) return bad;
+    if (!Number.isInteger(p) || p < BINDABLE_PORT_MIN || p > PORT_MAX) {
+      return `端口须为 ${BINDABLE_PORT_MIN}–${PORT_MAX} 的整数`;
+    }
   }
   if (range[1] < range[0]) return '区间终点必须 ≥ 起点';
   return null;
 }
+
+// 兼容既有页面向导消费者；区间只用于 defaults.localPortRange，语义即本机可绑定范围。
+export const vRange = vBindableRange;
 
 /**
  * 四步定义，与 01 §2.5 一一对应。
@@ -63,7 +68,7 @@ export const SETUP_STEPS = Object.freeze([
         hint: '每台远端主机从这个区间里分一个本机端口，如 17701-17799',
         def: (c) => c.defaults.localPortRange,
         parse: parseRange,
-        validate: vRange,
+        validate: vBindableRange,
         format: (v) => `${v[0]}-${v[1]}`,
       },
     ],

@@ -10,10 +10,12 @@ import { createActions } from './actions.js';
 import { createStore } from './store.js';
 import { bannerText, createSseClient } from './sse.js';
 import {
-  applyGuard, canOpenHost, parseRoute, rememberLastHost, rootRouteTarget,
+  applyGuard, canOpenHost, navigate, parseRoute, rememberLastHost, rootRouteTarget,
 } from './router.js';
-import { button, clear, el, phaseMeta } from './utils.js';
+import { button, clear, el } from './utils.js';
+import { hostPhaseMeta } from './host-presentation.js';
 import { createConfirmDialog } from './components/confirm-dialog.js';
+import { createConfigSyncDialog } from './components/config-sync-dialog.js';
 import { createDefaultsCard } from './components/defaults-card.js';
 import { createEventPanel } from './components/event-panel.js';
 import { createHostDrawer } from './components/host-drawer.js';
@@ -41,11 +43,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   const actions = createActions({
     store,
     confirm: dialog.confirm,
-    navigate: (to) => {
-      // 向导旧动作把「完成」表达成回根路由；根路由现在会恢复 lastHost，
-      // 但向导收尾必须稳定落在起始页。
-      window.location.hash = to === '#/' && store.state.route.kind === 'setup' ? '#/hub' : to;
-    },
+    navigate,
   });
 
   const banner = el('div.disconnect-banner', { role: 'status', hidden: true });
@@ -72,9 +70,15 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   });
   const probeAllBtn = button('全部探测', { variant: 'primary', compact: false, onClick: () => actions.probeAll() });
   const reloadBtn = button('重载配置', { compact: false, onClick: () => actions.reload() });
+  let configSyncDialog;
+  const configSyncBtn = button('批量同步配置', {
+    compact: false,
+    onClick: () => configSyncDialog.open(configSyncBtn),
+  });
   manageBackBtn.classList.add('manage-back');
   probeAllBtn.classList.add('probe-all');
   reloadBtn.classList.add('reload-config');
+  configSyncBtn.classList.add('config-sync-open');
   const connDot = el('span.conn-indicator', {
     role: 'status',
     'aria-live': 'polite',
@@ -87,10 +91,11 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   const managerCard = createManagerCard({ store, actions });
   const defaultsCard = createDefaultsCard({ store, actions });
   const eventPanel = createEventPanel({ store });
+  configSyncDialog = createConfigSyncDialog({ store, actions });
   dashboard.append(
     el('div.card-header.manage-header', {}, [
       el('h2', { text: '管理' }),
-      el('div.row-actions', {}, [manageBackBtn, probeAllBtn, reloadBtn]),
+      el('div.row-actions', {}, [manageBackBtn, probeAllBtn, reloadBtn, configSyncBtn]),
     ]),
     hostTable.root,
     el('div.side-by-side', {}, [managerCard.root, defaultsCard.root]),
@@ -111,6 +116,8 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     confirm: dialog.confirm,
     setBackgroundInert: (on) => {
       for (const node of backgroundLayers) node.inert = on;
+      // toast 仍须留在 aria-live 树里播报抽屉保存错误，只单独封住交互控件。
+      toasts.setModalBlocked(on);
     },
   });
 
@@ -118,8 +125,21 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   const wizard = createSetupWizard({ store, actions, confirm: dialog.confirm });
 
   // 抽屉开着时要 inert 的就是这一串（遮罩、抽屉本体、确认框、toast 不在其中——
-  // 确认框正是抽屉自己弹的「放弃未保存的修改？」，inert 了就点不动）
-  backgroundLayers.push(header, tabbar.root, banner, skeleton, hub.root, dashboard, panes.root, wizard.root, fallback);
+  // 确认框正是抽屉自己弹的「放弃未保存的修改？」，inert 了就点不动；toast 由上面
+  // 保留 live 语义、只封交互）。菜单虽通常会先关闭，仍按后景处理，避免竞态漏焦点。
+  backgroundLayers.push(
+    header,
+    tabbar.root,
+    banner,
+    skeleton,
+    hub.root,
+    dashboard,
+    panes.root,
+    wizard.root,
+    fallback,
+    tabbar.menu,
+    tabbar.overflowMenu,
+  );
 
   clear(root).append(
     shell,
@@ -135,6 +155,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     tabbar.menu,
     tabbar.overflowMenu,
     toasts.root,
+    configSyncDialog.root,
     dialog.root,
   );
 
@@ -154,9 +175,12 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     const writable = store.canWrite();
     probeAllBtn.disabled = !writable || store.isPending('probe-all');
     reloadBtn.disabled = !writable || store.isPending('config:reload');
+    configSyncBtn.disabled = !writable || store.listHosts().length < 2 || store.isPending('config:sync');
   };
   store.on('connection:changed', syncConnection);
   store.on('pending:changed', syncConnection);
+  store.on('hosts:changed', syncConnection);
+  store.on('hosts:reset', syncConnection);
   syncConnection();
 
   // ── 路由 ─────────────────────────────────────────────────────────────
@@ -220,7 +244,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     if (showFallback) {
       let msg;
       if (!host) msg = `主机 ${route.host} 不存在或尚未同步。`;
-      else msg = `${route.host} 当前状态「${phaseMeta(host.phase).label}」，还没有可打开的页面。`;
+      else msg = `${route.host} 当前状态「${hostPhaseMeta(host).label}」，还没有可打开的页面。`;
       clear(fallback).append(
         el('p.empty-hint', { text: msg }),
         el('a.link', { href: '#/hub', text: '回到起始页' }),
@@ -282,7 +306,9 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     sse.connect();
     if (store.state.manager.setupCompleted === false) {
       try {
-        store.setDefaults((await api.config()).defaults);
+        const config = await api.config();
+        store.setDefaults(config.defaults);
+        store.setManagerConfig(config.manager);
       } catch (err) {
         actions.reportError(err, '读取当前配置失败（向导将使用出厂默认）');
       }
@@ -295,6 +321,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
       const [hosts, config] = await Promise.all([api.hosts(), api.config()]);
       store.mergeFetchedHosts(hosts.hosts, hosts.revision, startedAt);
       store.setDefaults(config.defaults);
+      store.setManagerConfig(config.manager);
     } catch (err) {
       // SSE 的 snapshot 是主路径，GET 只是兜底：失败降级为提示
       actions.reportError(err, '主机列表首屏加载失败（等待实时同步）');
@@ -311,7 +338,10 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
       window.removeEventListener('hashchange', onHashChange);
       detachLifecycle();
       sse.close();
-      for (const c of [hub, hostTable, managerCard, defaultsCard, eventPanel, tabbar, panes, drawer, wizard, toasts]) c.destroy();
+      for (const c of [
+        hub, hostTable, managerCard, defaultsCard, eventPanel, tabbar, panes, drawer, wizard, toasts,
+        configSyncDialog,
+      ]) c.destroy();
     },
   };
 }

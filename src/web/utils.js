@@ -3,6 +3,8 @@
  * 纯函数部分不触 DOM，可被 node:test 直接 import（14 §4）。
  */
 
+import { allowedHostActions, isManagedHost } from './host-rules.js';
+
 /** phase → 文案与样式（颜色之外必须有文本，10 §1.2）。 */
 export const PHASE_META = Object.freeze({
   running: { label: '运行中', tone: 'running', dot: 'solid' },
@@ -85,7 +87,7 @@ export function mappingSummary(host) {
 
 /** 手动实例（非受管）必须带锁：禁 stop/restart（README 不误杀契约）。 */
 export function isManaged(host) {
-  return host?.web?.startedByUs === true;
+  return isManagedHost(host);
 }
 
 /**
@@ -93,20 +95,7 @@ export function isManaged(host) {
  * @returns {string[]}
  */
 export function rowActions(host) {
-  switch (host?.phase) {
-    case 'ready':
-      return ['start', 'probe'];
-    case 'crashed':
-      return isManaged(host) ? ['start', 'open', 'probe'] : ['start', 'probe'];
-    case 'running':
-      return isManaged(host) ? ['open', 'restart', 'stop'] : ['open', 'probe'];
-    case 'degraded':
-      return isManaged(host) ? ['open', 'reconnect', 'stop'] : ['open', 'probe'];
-    case 'starting':
-      return [];
-    default:
-      return ['probe'];
-  }
+  return [...allowedHostActions(host)];
 }
 
 export const ACTION_LABEL = Object.freeze({
@@ -179,9 +168,11 @@ function nextFrame(cb) {
   else setTimeout(cb, 16);
 }
 
-/** 状态圆点 + 文本（颜色不单独承载语义）。 */
-export function phaseBadge(phase) {
-  const meta = phaseMeta(phase);
+/** 状态圆点 + 文本（颜色不单独承载语义）；兼容 phase 字符串与已解析的展示 meta。 */
+export function phaseBadge(phaseOrMeta) {
+  const meta = typeof phaseOrMeta === 'object' && phaseOrMeta !== null
+    ? phaseOrMeta
+    : phaseMeta(phaseOrMeta);
   return el('span.phase-badge', { dataset: { tone: meta.tone } }, [
     el('span.status-dot', { dataset: { dot: meta.dot } }),
     el('span', { text: meta.label }),

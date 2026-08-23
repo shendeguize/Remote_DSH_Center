@@ -21,6 +21,8 @@ test('parsePort 边界', () => {
 
 test('parsePortRange 拒绝倒置区间与过窄区间', () => {
   assert.deepEqual(parsePortRange('17701', '17799').value, [17_701, 17_799]);
+  assert.deepEqual(parsePortRange('1024', '1024').value, [1024, 1024]);
+  assert.match(parsePortRange('1023', '17799').error, /1024/, '本机监听端口不能落入特权区间');
   assert.equal(parsePortRange('17799', '17701').ok, false, '倒置区间必须报错');
   assert.deepEqual(parsePortRange('17701', '17701').value, [17_701, 17_701]);
   assert.equal(parsePortRange('17701', '17703', { minWidth: 10 }).ok, false);
@@ -64,14 +66,14 @@ test('buildHostPatch 组装 PUT 请求体', () => {
   });
   assert.deepEqual(built.value, {
     enabled: true,
-    autoStart: true,
     remoteWebPort: 9001,
     workdir: '~/proj',
     inject: { env: { G: 'hi' }, extraArgs: ['--verbose'], patches: ['/tmp/p.yml'] },
   });
+  assert.equal('autoStart' in built.value, false, '抽屉 builder 不得顺带写回表格独占的自启值');
 
   const empty = buildHostPatch({
-    enabled: false, autoStart: false, remoteWebPort: '', workdir: '', env: '', extraArgs: '', patches: '',
+    enabled: false, remoteWebPort: '', workdir: '', env: '', extraArgs: '', patches: '',
   });
   assert.equal(empty.value.remoteWebPort, null, '空 = 继承 defaults');
   assert.equal(empty.value.workdir, null, '空 = 远端家目录');
@@ -94,6 +96,13 @@ test('buildDefaultsPatch 聚合三键并逐字段报错', () => {
   const bad = buildDefaultsPatch({ remoteWebPort: 'x', rangeFrom: '20', rangeTo: '10', managerPort: '' });
   assert.equal(bad.ok, false);
   assert.deepEqual(Object.keys(bad.errors).sort(), ['localPortRange', 'managerPort', 'remoteWebPort']);
+
+  const lowBindable = buildDefaultsPatch({
+    remoteWebPort: '1', rangeFrom: '1023', rangeTo: '1024', managerPort: '1',
+  });
+  assert.equal(lowBindable.ok, false);
+  assert.deepEqual(Object.keys(lowBindable.errors), ['localPortRange'],
+    '普通远端/manager 端口允许 1，本机映射区间才要求从 1024 起');
 });
 
 test('diffPatch 只提交真正改动的键', () => {

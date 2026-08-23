@@ -10,6 +10,7 @@ import {
   setupBodySchema,
   hostConfigPatchSchema,
   defaultsPatchSchema,
+  syncConfigBodySchema,
 } from '../../src/lib/validate.js';
 import { newFactoryConfig, newHostConfig } from '../../src/defaults.js';
 
@@ -45,6 +46,13 @@ test('组合子：required / unknown key / nullable / enum', () => {
   assert.equal(validate(V.nullable(V.int()), null).ok, true);
   assert.equal(validate(V.obj({}, { extra: true }), { anything: 1 }).ok, true);
   assert.deepEqual(validate(V.enum_(['a', 'b']), 'c').errors, ['<root>: expected one of a|b, got "c"']);
+});
+
+test('组合子：保留键按 shape 自有属性判定', () => {
+  for (const key of ['constructor', 'toString', '__proto__']) {
+    const schema = V.obj({ [key]: V.bool() });
+    assert.equal(validate(schema, { [key]: true }).ok, true, `应接受显式声明的 ${key}`);
+  }
 });
 
 test('configSchema 接受出厂 config 与完整 config', () => {
@@ -197,6 +205,39 @@ test('defaultsPatchSchema 局部体', () => {
   assert.equal(validate(defaultsPatchSchema, { remoteWebPort: 9000 }).ok, true);
   assert.equal(validate(defaultsPatchSchema, { manager: { port: 7788 } }).ok, true);
   assert.match(validate(defaultsPatchSchema, { localPortRange: [2, 3] }).errors.join(), /expected int 1024/);
+});
+
+test('syncConfigBodySchema：主机名安全、目标数 1..200、dryRun 必填', () => {
+  const validBody = {
+    source: 'gpu-1',
+    targets: ['gpu-2'],
+    dryRun: true,
+  };
+  assert.equal(validate(syncConfigBodySchema, validBody).ok, true);
+
+  for (const key of ['constructor', 'toString', '__proto__']) {
+    const body = { ...validBody, [key]: true };
+    assert.equal(Object.hasOwn(body, key), true);
+    assert.deepEqual(
+      validate(syncConfigBodySchema, body).errors,
+      [`${key}: unknown key`],
+      `应拒绝未声明的保留键 ${key}`,
+    );
+  }
+
+  for (const body of [
+    { source: '-source', targets: ['gpu-2'], dryRun: true },
+    { source: 'bad source', targets: ['gpu-2'], dryRun: true },
+    { source: 'gpu-1', targets: ['-target'], dryRun: true },
+    { source: 'gpu-1', targets: ['bad target'], dryRun: true },
+    { source: 'gpu-1', targets: [], dryRun: true },
+    { source: 'gpu-1', targets: Array.from({ length: 201 }, (_, i) => `gpu-${i}`), dryRun: true },
+    { source: 'gpu-1', targets: ['gpu-2'], dryRun: 'true' },
+    { source: 'gpu-1', targets: ['gpu-2'] },
+    { source: 'gpu-1', targets: ['gpu-2'], dryRun: true, extra: true },
+  ]) {
+    assert.equal(validate(syncConfigBodySchema, body).ok, false, `应拒绝 ${JSON.stringify(body)}`);
+  }
 });
 
 test('assertValid 抛 VALIDATION，detail 为逐条错误路径', () => {

@@ -31,6 +31,18 @@ function typeInto(node, value) {
   node.dispatchEvent({ type: 'input', target: node });
 }
 
+function localPresentationHost(name, phase, probePatch) {
+  const base = hostView(name);
+  return {
+    ...base,
+    local: true,
+    sshInfo: null,
+    config: { ...base.config, local: true, localPort: null },
+    phase,
+    probe: { ...base.probe, ...probePatch },
+  };
+}
+
 test('步骤 1：预填现值，非法端口不许前进', async (t) => {
   const { wizard: w } = await mountSetup(t);
   const wizard = w();
@@ -82,7 +94,11 @@ test('一路下一步走到确认页：JSON 预览带上勾选结果', async (t)
 
   assert.match(stepTitle(wizard), /3\. 主机纳管/);
   assert.ok(calls.some((c) => c.path === '/api/hosts' && c.method === 'GET'), '进第 3 步才拉候选');
-  assert.ok(calls.some((c) => c.path === '/api/hosts/probe' && c.method === 'POST'), '进第 3 步就发起探测');
+  assert.equal(
+    calls.filter((c) => c.path === '/api/hosts/probe' && c.method === 'POST').length,
+    1,
+    '进第 3 步只经动作层发起一轮全量探测',
+  );
 
   const rows = wizard.querySelectorAll('.setup-hosts tbody tr');
   assert.equal(rows.length, 2);
@@ -107,6 +123,80 @@ test('一路下一步走到确认页：JSON 预览带上勾选结果', async (t)
   assert.equal(preview.manager.port, SETUP_INFO.port);
   assert.deepEqual(Object.keys(preview.hosts), ['gpu-1', 'gpu-2']);
   assert.equal(preview.hosts['gpu-1'].autoStart, true);
+});
+
+test('发起探测被 API reject：只 toast 一次场景文案且只请求一次', async (t) => {
+  const { app, calls, wizard: w } = await mountSetup(t, {
+    hosts: [hostView('gpu-1')],
+    responder: ({ path, method }) => {
+      if (path === '/api/hosts/probe' && method === 'POST') {
+        throw new TypeError('socket closed');
+      }
+      return null;
+    },
+  });
+  const wizard = w();
+
+  next(wizard).click();
+  next(wizard).click();
+  await flush();
+
+  assert.equal(
+    calls.filter((call) => call.path === '/api/hosts/probe' && call.method === 'POST').length,
+    1,
+    '向导只调用一次全量探测 API',
+  );
+  assert.equal(app.store.state.toasts.length, 1, '动作层统一呈现错误，向导不再重复 catch');
+  assert.match(app.store.state.toasts[0].summary, /发起探测失败（可稍后在管理台重试）/);
+});
+
+test('同一本机 fixture 在管理表、overflow、setup 表共享状态与提示', async (t) => {
+  const fixtures = [
+    localPresentationHost('local-missing', 'no_dsh', {
+      dshPath: null,
+      version: null,
+      profileWeb: false,
+      noDshReason: 'missing-bin',
+      errorSummary: null,
+    }),
+    localPresentationHost('local-offline', 'unreachable', {
+      errorSummary: 'fixture errorSummary',
+    }),
+  ];
+  const expected = new Map([
+    ['local-missing', { label: '本机未安装或未配置', hint: '本机未安装 dsh' }],
+    ['local-offline', { label: '本机不可用', hint: 'fixture errorSummary' }],
+  ]);
+  const { dom, wizard: w } = await mountSetup(t, { hosts: fixtures });
+  const wizard = w();
+
+  next(wizard).click();
+  next(wizard).click();
+  await flush();
+  dom.app.querySelector('.tab-overflow').click();
+
+  const overflow = dom.app.querySelector('.overflow-menu');
+  for (const host of fixtures) {
+    const setupRow = wizard.querySelector(`.setup-hosts tbody tr[data-host="${host.name}"]`);
+    const manageRow = dom.app.querySelector(`.host-table tbody tr[data-host="${host.name}"]`);
+    const overflowLine = overflow
+      .querySelector(`[data-host="${host.name}"][data-action="view-manage"]`)
+      .closest('li')
+      .querySelector('span');
+    const setupLabel = setupRow.querySelector('.phase-badge').textContent;
+    const manageLabel = manageRow.querySelector('.phase-badge').textContent;
+    const manageHint = manageRow.querySelector('.phase-hint').textContent;
+    const want = expected.get(host.name);
+
+    assert.equal(manageLabel, setupLabel, `${host.name} 的管理表与 setup label 必须逐字一致`);
+    assert.equal(setupLabel, want.label);
+    assert.equal(manageHint, want.hint);
+    assert.equal(
+      overflowLine.textContent,
+      `${host.name} — ${setupLabel} · ${manageHint}`,
+      `${host.name} 的 overflow 必须复用同一 label 与 hostPhaseHint`,
+    );
+  }
 });
 
 test('换步把焦点带到新步骤的标题上（前进、后退都算）', async (t) => {
@@ -138,7 +228,7 @@ test('换步把焦点带到新步骤的标题上（前进、后退都算）', as
   assert.equal(dom.document.activeElement, port, '还在填这个字段，焦点不许被标题夺走');
 });
 
-test('提交：POST /api/setup 用预览内容，端口未变则进入主机选择页', async (t) => {
+test('提交：POST /api/setup 用预览内容，端口未变则精确进入 #/hub', async (t) => {
   let saved = false;
   const { calls, dom, wizard: w } = await mountSetup(t, {
     hosts: [hostView('gpu-1')],
@@ -352,11 +442,32 @@ test('迁移超时：停在迁移页，可重试与复制地址，不回滚配�
 });
 
 test('重新配置（已初始化）：预填现值且给取消入口', async (t) => {
-  const { dom } = await mount(t, { hosts: [hostView('gpu-1')], hash: '#/setup' });
+  const configuredPort = 7799;
+  const { dom } = await mount(t, {
+    hosts: [hostView('gpu-1')],
+    hash: '#/setup',
+    responder: ({ path }) => (path === '/api/config'
+      ? {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          configVersion: 1,
+          setupCompleted: true,
+          manager: { port: configuredPort },
+          defaults: DEFAULTS,
+          hosts: {},
+        }),
+      }
+      : null),
+  });
   const wizard = dom.app.querySelector('.setup-wizard');
 
   assert.equal(wizard.hidden, false);
   assert.equal(dom.window.location.hash, '#/setup', '已初始化时不会被守卫改写');
-  assert.ok(cancelLink(wizard), '重新配置可以放弃');
-  assert.equal(fields(wizard)[0].value, String(MANAGER_INFO.port));
+  const cancel = cancelLink(wizard);
+  assert.ok(cancel, '重新配置可以放弃');
+  assert.equal(cancel.getAttribute('href'), '#/manage', '取消链接必须精确返回管理页');
+  assert.equal(cancel.textContent, '取消，返回管理台');
+  assert.equal(MANAGER_INFO.port, 7788, 'fixture 明确模拟仍监听旧端口');
+  assert.equal(fields(wizard)[0].value, String(configuredPort), '重新配置必须优先预填已落盘端口');
 });

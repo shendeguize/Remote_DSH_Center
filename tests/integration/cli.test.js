@@ -15,6 +15,7 @@ import fs from 'node:fs';
 
 import { createHarness, newHostState as freshHostState } from '../harness/index.js';
 import { bootServer, newHostState, waitPhase } from './helpers.js';
+import { newFactoryConfig } from '../../src/defaults.js';
 
 const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'cli.js');
 
@@ -79,6 +80,22 @@ test('dshc ls：表格与 --json 都能反映 manager 视图', async (t) => {
   assert.deepEqual(hosts.map((h) => h.name).sort(), ['cpu-1', 'gpu-1']);
 });
 
+test('hosts 为空：dshc ls/status 正常退出并明确显示空清单', async (t) => {
+  const ctx = await bootServer(t, { hosts: {} });
+
+  const listed = await dshc(ctx, ['ls']);
+  assert.equal(listed.code, 0, `stdout=${listed.stdout} stderr=${listed.stderr}`);
+  assert.equal(listed.stdout, '没有主机：检查 ~/.ssh/config 是否有可用 Host 条目。\n');
+  assert.equal(listed.stderr, '');
+
+  const status = await dshc(ctx, ['status']);
+  assert.equal(status.code, 0, `stdout=${status.stdout} stderr=${status.stderr}`);
+  assert.match(status.stdout, /manager：运行中/);
+  assert.match(status.stdout, /主机 0 台：运行 0 \/ 重连 0 \/ 异常 0/);
+  assert.equal(status.stderr, '');
+  assert.deepEqual(ctx.harness.openedUrls(), [], '只读命令不该意外拉起浏览器');
+});
+
 test('dshc start 等到 running 才退出（退出码 0），stop 回 ready', async (t) => {
   const ctx = await bootServer(t);
   await ctx.api('POST', '/api/hosts/probe');
@@ -126,6 +143,24 @@ test('拉起失败 → 退出码 1 并打出错误摘要', async (t) => {
   const res = await dshc(ctx, ['start', 'gpu-1']);
   assert.equal(res.code, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
   assert.match(res.stderr, /失败/);
+});
+
+test('bind-busy-twice：dshc start 退出 1 并给出可读失败原因', async (t) => {
+  const ctx = await bootServer(t, {
+    hosts: { 'gpu-1': newHostState({ faults: { bindBusyTimes: 5 } }) },
+  });
+  await ctx.api('POST', '/api/hosts/probe');
+  await waitPhase(ctx, 'gpu-1', ['ready']);
+
+  const res = await dshc(ctx, ['start', 'gpu-1']);
+  assert.equal(res.code, 1, `stdout=${res.stdout} stderr=${res.stderr}`);
+  assert.equal(res.stdout, '', '失败不能在 stdout 冒充成功');
+  assert.match(res.stderr, /gpu-1 start 失败/);
+  assert.match(res.stderr, /端口|占用|绑定|拉起/, `应说明为什么失败：${res.stderr}`);
+  assert.doesNotMatch(res.stderr, /LAUNCH_FAILED|at \S+ \(/, '不该把内部错误码或栈甩给用户');
+  assert.equal((await waitPhase(ctx, 'gpu-1', ['ready'])).phase, 'ready');
+  assert.equal(ctx.harness.liveProcesses('gpu-1').length, 0, '双失败后不能留远端孤儿');
+  assert.deepEqual(ctx.harness.openedUrls(), [], 'start 失败不该意外拉起浏览器');
 });
 
 test('--no-wait 立即返回 0，不等终态', async (t) => {
@@ -380,14 +415,14 @@ test('open <host>：拉起的是那台主机的深链', async (t) => {
 });
 
 /** 只要一个隔离的 DSHC_HOME，不需要 manager：这些用例问的是「起不来时怎么说」。 */
-function bareCli(t, writeConfig) {
+function bareCli(t, writeConfig = null) {
   const harness = createHarness({ hosts: { 'gpu-1': freshHostState() } });
   t.after(() => {
     try { fs.chmodSync(`${harness.homeDir}/config.json`, 0o600); } catch { /* 可能没建 */ }
     harness.cleanup();
   });
-  writeConfig(`${harness.homeDir}/config.json`);
-  return (args) => new Promise((resolve, reject) => {
+  if (writeConfig) writeConfig(`${harness.homeDir}/config.json`);
+  const run = (args) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], {
       env: { ...process.env, ...harness.env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -400,9 +435,60 @@ function bareCli(t, writeConfig) {
     child.stderr.on('data', (c) => { stderr += c; });
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`超时；${stdout}${stderr}`)); }, 20_000);
     timer.unref?.();
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out: `${stdout}${stderr}` }); });
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr, out: `${stdout}${stderr}` });
+    });
   });
+  run.harness = harness;
+  return run;
 }
+
+test('真 CLI 分发：未知命令、坏旗标与未初始化 config get 分流准确且零副作用', async (t) => {
+  const run = bareCli(t);
+
+  const unknown = await run(['definitely-not-a-command']);
+  assert.equal(unknown.code, 3);
+  assert.equal(unknown.stdout, '');
+  assert.match(unknown.stderr, /^未知命令：definitely-not-a-command/m);
+  assert.match(unknown.stderr, /dshc —— DSH Center 本机入口/);
+  assert.match(unknown.stderr, /退出码：0 成功/);
+
+  const badFlag = await run(['status', '--definitely-unknown']);
+  assert.equal(badFlag.code, 3);
+  assert.equal(badFlag.stdout, '');
+  assert.match(badFlag.stderr, /用法错误：未知旗标 --definitely-unknown/);
+  assert.match(badFlag.stderr, /dshc status \[--json\]/);
+
+  const uninitialized = await run(['config', 'get', 'defaults.remoteWebPort']);
+  assert.equal(uninitialized.code, 1);
+  assert.equal(uninitialized.stdout, '');
+  assert.match(uninitialized.stderr, /尚未初始化 config\.json，先跑 dshc init/);
+
+  assert.equal(fs.existsSync(path.join(run.harness.homeDir, 'config.json')), false, '只读失败不能偷偷创建配置');
+  assert.equal(fs.existsSync(path.join(run.harness.homeDir, 'manager.pid')), false, '分发失败不能拉起 manager');
+  assert.deepEqual(run.harness.openedUrls(), [], '分发失败不能拉起浏览器');
+});
+
+test('真 CLI config get：不存在点路径退出 1、只写 stderr、磁盘字节不变', async (t) => {
+  const config = newFactoryConfig();
+  config.setupCompleted = true;
+  const originalBytes = `${JSON.stringify(config, null, 2)}\n`;
+  const run = bareCli(t, (file) => fs.writeFileSync(file, originalBytes));
+
+  const missing = await run(['config', 'get', 'defaults.notThere']);
+  assert.equal(missing.code, 1);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, 'config 里没有 defaults.notThere\n');
+  assert.equal(
+    fs.readFileSync(path.join(run.harness.homeDir, 'config.json'), 'utf8'),
+    originalBytes,
+    'config get 不能改动任何磁盘字节',
+  );
+  assert.equal(fs.existsSync(path.join(run.harness.homeDir, 'manager.pid')), false);
+  assert.deepEqual(run.harness.openedUrls(), []);
+});
 
 test('config.json 坏了：说「损坏」而不是「尚未初始化」，也不许自己去走向导', async (t) => {
   // 截断的配置里通常还留着能救的东西（localPort 分配、workdir、注入的环境变量、patch 清单），

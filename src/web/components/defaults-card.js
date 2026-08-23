@@ -1,21 +1,28 @@
 /**
- * 全局默认卡（10 §3.7 / UI-17）。manager.port 改动只落盘，
- * 由响应的 restartRequired 决定是否提示重启（13 §2.6）。
+ * 全局默认卡（10 §3.7 / UI-17）。manager.port 改动只落盘；重启提示始终由
+ * configuredPort 与实际监听端口的差异派生（13 §2.6）。
  */
 
 import { button, el } from '../utils.js';
-import { buildDefaultsPatch, field, input } from '../form.js';
+import {
+  buildDefaultsPatch,
+  deepEqual,
+  diffPatch,
+  field,
+  input,
+} from '../form.js';
+import { BINDABLE_PORT_MIN, PORT_MAX, PORT_MIN } from '../setup-schema.js';
 
 export function createDefaultsCard({ store, actions }) {
-  const remote = field('远端默认 web 端口', input('number', '', { min: '1', max: '65535' }));
-  const rangeFrom = field('本机端口区间起点', input('number', '', { min: '1', max: '65535' }));
-  const rangeTo = field('本机端口区间终点', input('number', '', { min: '1', max: '65535' }));
-  const managerPort = field('manager 监听端口', input('number', '', { min: '1', max: '65535' }), {
+  const remote = field('远端默认 web 端口', input('number', '', { min: PORT_MIN, max: PORT_MAX }));
+  const rangeFrom = field('本机端口区间起点', input('number', '', { min: BINDABLE_PORT_MIN, max: PORT_MAX }));
+  const rangeTo = field('本机端口区间终点', input('number', '', { min: BINDABLE_PORT_MIN, max: PORT_MAX }));
+  const managerPort = field('manager 监听端口', input('number', '', { min: PORT_MIN, max: PORT_MAX }), {
     hint: '改动仅落盘，需重启 manager 生效',
   });
 
   const saveBtn = button('保存', { variant: 'primary', compact: false, onClick: submit });
-  const resetBtn = button('还原', { compact: false, onClick: () => fill() });
+  const resetBtn = button('还原', { compact: false, onClick: resetDraft });
   const notice = el('p.card-notice', { hidden: true });
 
   const root = el('article.card.defaults-card', {}, [
@@ -25,26 +32,134 @@ export function createDefaultsCard({ store, actions }) {
     el('footer.card-footer', {}, [saveBtn, resetBtn]),
   ]);
 
-  function fill() {
+  const controls = {
+    remoteWebPort: remote,
+    managerPort,
+    rangeFrom,
+    rangeTo,
+  };
+  const draftKeys = Object.keys(controls);
+  let baseline = configFromStore();
+  const conflicts = new Set();
+
+  function configFromStore() {
     const defaults = store.state.defaults;
     const info = store.state.manager.info;
-    remote.input.value = defaults?.remoteWebPort ?? '';
-    rangeFrom.input.value = defaults?.localPortRange?.[0] ?? '';
-    rangeTo.input.value = defaults?.localPortRange?.[1] ?? '';
-    managerPort.input.value = info?.port ?? '';
-    for (const f of [remote, rangeFrom, rangeTo, managerPort]) f.setError(null);
-    notice.hidden = true;
-    syncDisabled();
+    const configuredPort = store.state.manager.configuredPort ?? info?.port ?? null;
+    return {
+      remoteWebPort: defaults?.remoteWebPort ?? null,
+      localPortRange: Array.isArray(defaults?.localPortRange) ? [...defaults.localPortRange] : null,
+      manager: { port: configuredPort },
+    };
+  }
+
+  function draftOf(config) {
+    return {
+      remoteWebPort: config?.remoteWebPort == null ? '' : String(config.remoteWebPort),
+      managerPort: config?.manager?.port == null ? '' : String(config.manager.port),
+      rangeFrom: config?.localPortRange?.[0] == null ? '' : String(config.localPortRange[0]),
+      rangeTo: config?.localPortRange?.[1] == null ? '' : String(config.localPortRange[1]),
+    };
+  }
+
+  function readDraft() {
+    return Object.fromEntries(draftKeys.map((key) => [key, controls[key].input.value]));
+  }
+
+  function writeDraft(draft, keys = draftKeys) {
+    for (const key of keys) controls[key].input.value = draft[key];
+  }
+
+  function clearErrors(keys = draftKeys) {
+    for (const key of keys) controls[key].setError(null);
+  }
+
+  function renderNotice() {
+    const messages = [];
+    if (conflicts.size > 0) {
+      messages.push('服务端配置已变化；同字段的本地草稿已保留。「还原」可载入最新服务端值。');
+    }
+    const runtimePort = store.state.manager.info?.port ?? null;
+    const configuredPort = store.state.manager.configuredPort;
+    if (configuredPort != null && runtimePort != null && configuredPort !== runtimePort) {
+      messages.push(`manager 端口已配置为 ${configuredPort}，重启 manager 后生效。`);
+    }
+    notice.textContent = messages.join('\n');
+    notice.hidden = messages.length === 0;
+  }
+
+  function isDirty() {
+    return !deepEqual(readDraft(), draftOf(baseline));
   }
 
   function syncDisabled() {
-    const busy = store.isPending('defaults:save') || !store.canWrite();
-    saveBtn.disabled = busy;
-    resetBtn.disabled = busy;
-    for (const f of [remote, rangeFrom, rangeTo, managerPort]) f.input.disabled = busy;
+    const pending = store.isPending('defaults:save');
+    const dirty = isDirty();
+    saveBtn.disabled = !dirty || !store.canWrite() || pending;
+    resetBtn.disabled = !dirty || pending;
+    for (const f of Object.values(controls)) f.input.disabled = pending;
+  }
+
+  function syncDraftState() {
+    const draft = readDraft();
+    const canonical = draftOf(baseline);
+    for (const key of conflicts) {
+      if (draft[key] === canonical[key]) conflicts.delete(key);
+    }
+    renderNotice();
+    syncDisabled();
+  }
+
+  function resetDraft() {
+    if (store.isPending('defaults:save')) return;
+    baseline = configFromStore();
+    writeDraft(draftOf(baseline));
+    clearErrors();
+    conflicts.clear();
+    syncDraftState();
+  }
+
+  /**
+   * 服务端更新按字段三方合并：用户没动的字段跟随；双方都动了同一字段时，
+   * baseline 仍推进到最新服务端值，但保留 DOM 草稿并提示冲突。
+   */
+  function reconcileFromStore() {
+    const next = configFromStore();
+    const previousDraft = draftOf(baseline);
+    const nextDraft = draftOf(next);
+    const draft = readDraft();
+    for (const key of draftKeys) {
+      const localChanged = draft[key] !== previousDraft[key];
+      const serverChanged = nextDraft[key] !== previousDraft[key];
+      if (!localChanged) {
+        controls[key].input.value = nextDraft[key];
+        controls[key].setError(null);
+        conflicts.delete(key);
+      } else if (serverChanged) {
+        if (draft[key] === nextDraft[key]) {
+          controls[key].input.value = nextDraft[key];
+          controls[key].setError(null);
+          conflicts.delete(key);
+        } else {
+          conflicts.add(key);
+        }
+      }
+    }
+    baseline = next;
+    syncDraftState();
+  }
+
+  function onDraftChanged(event) {
+    const key = draftKeys.find((candidate) => controls[candidate].input === event.target);
+    if (key) {
+      if (key === 'rangeFrom' || key === 'rangeTo') rangeFrom.setError(null);
+      else controls[key].setError(null);
+    }
+    syncDraftState();
   }
 
   async function submit() {
+    if (store.isPending('defaults:save') || !store.canWrite()) return;
     const built = buildDefaultsPatch({
       remoteWebPort: remote.input.value,
       rangeFrom: rangeFrom.input.value,
@@ -58,22 +173,39 @@ export function createDefaultsCard({ store, actions }) {
     managerPort.setError(built.errors?.managerPort ?? null);
     if (!built.ok) return;
 
-    const res = await actions.saveDefaults(built.value);
+    const patch = diffPatch(built.value, baseline);
+    if (Object.keys(patch).length === 0) {
+      writeDraft(draftOf(baseline));
+      clearErrors();
+      conflicts.clear();
+      syncDraftState();
+      store.addToast({ level: 'info', summary: '没有需要保存的有效变更' });
+      return;
+    }
+
+    const res = await actions.saveDefaults(patch);
     if (!res) return;
-    notice.hidden = !res.restartRequired;
-    notice.textContent = res.restartRequired
-      ? `manager 端口已改为 ${res.manager?.port}，重启 manager 后生效。`
-      : '';
+    baseline = configFromStore();
+    writeDraft(draftOf(baseline));
+    clearErrors();
+    conflicts.clear();
+    syncDraftState();
+  }
+
+  for (const f of Object.values(controls)) {
+    f.input.addEventListener('input', onDraftChanged);
+    f.input.addEventListener('change', onDraftChanged);
   }
 
   const offs = [
-    store.on('defaults:changed', fill),
-    store.on('manager:changed', syncDisabled),
-    store.on('pending:changed', syncDisabled),
-    store.on('connection:changed', syncDisabled),
-    store.on('hosts:reset', syncDisabled),
+    store.on('defaults:changed', reconcileFromStore),
+    store.on('manager:changed', reconcileFromStore),
+    store.on('manager-config:changed', reconcileFromStore),
+    store.on('pending:changed', syncDraftState),
+    store.on('connection:changed', syncDraftState),
+    store.on('hosts:reset', syncDraftState),
   ];
-  fill();
+  resetDraft();
 
   return {
     root,

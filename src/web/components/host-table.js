@@ -6,47 +6,14 @@
  */
 
 import {
-  ACTION_LABEL, DASH, button, clear, dshSummary, el, fmtAgo, isManaged, mappingSummary, phaseBadge, phaseHint, rowActions, text,
+  ACTION_LABEL, DASH, button, clear, el, fmtAgo, isManaged, phaseBadge, rowActions, text,
 } from '../utils.js';
+import {
+  hostDshSummary, hostMappingSummary, hostPhaseHint, hostPhaseMeta,
+} from '../host-presentation.js';
 import { field, input } from '../form.js';
 
 const COLUMNS = ['主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
-
-function localNoDshReason(reason) {
-  if (reason === 'missing-bin') return '本机未安装 dsh';
-  if (reason === 'no-web-profile') return '本机 dsh 未配置 web profile';
-  return '';
-}
-
-function displayedPhaseBadge(host) {
-  if (!host.local || host.phase !== 'unreachable') return phaseBadge(host.phase);
-  return el('span.phase-badge', { dataset: { tone: 'neutral' } }, [
-    el('span.status-dot', { dataset: { dot: 'none' } }),
-    el('span', { text: '本机探测失败' }),
-  ]);
-}
-
-function displayedPhaseHint(host) {
-  if (!host.local) return phaseHint(host);
-  if (host.phase === 'no_dsh') return localNoDshReason(host.probe?.noDshReason);
-  if (host.phase === 'unreachable') return '本机命令执行失败';
-  return phaseHint(host);
-}
-
-function displayedDshSummary(host) {
-  const summary = dshSummary(host);
-  if (!host.local || host.phase !== 'no_dsh') return summary;
-  return {
-    ...summary,
-    line2: localNoDshReason(host.probe?.noDshReason),
-  };
-}
-
-function displayedMappingSummary(host) {
-  if (!host.local) return mappingSummary(host);
-  if (!host.mappedUrl || host.tunnel?.localPort == null) return { line1: DASH, line2: '', url: null };
-  return { line1: `本机 ${host.tunnel.localPort}`, line2: '直连 dsh web', url: host.mappedUrl };
-}
 
 export function createHostTable({ store, actions }) {
   const tbody = el('tbody');
@@ -157,20 +124,20 @@ export function createHostTable({ store, actions }) {
         : null,
     ]));
 
-    const hint = displayedPhaseHint(host);
+    const hint = hostPhaseHint(host);
     tr.append(el('td', {}, [
-      displayedPhaseBadge(host),
+      phaseBadge(hostPhaseMeta(host)),
       hint ? el('small.phase-hint', { text: hint }) : null,
     ]));
 
-    const dsh = displayedDshSummary(host);
+    const dsh = hostDshSummary(host);
     tr.append(el('td.dsh-cell', {}, [
       el('span', { text: dsh.line1 }),
       dsh.line2 ? el('small', { text: dsh.line2, title: dsh.line2 }) : null,
       host.probe?.at ? el('small.probe-at', { text: `探测 ${fmtAgo(host.probe.at)}` }) : null,
     ]));
 
-    const mapping = displayedMappingSummary(host);
+    const mapping = hostMappingSummary(host);
     tr.append(el('td.mapping-cell', {}, [
       mapping.url
         ? el('a.mono-link', {

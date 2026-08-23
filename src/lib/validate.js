@@ -40,7 +40,7 @@ export const V = {
       }
       if (!extra) {
         for (const key of Object.keys(value)) {
-          if (!(key in shape)) fail(errs, path ? `${path}.${key}` : key, 'unknown key');
+          if (!Object.hasOwn(shape, key)) fail(errs, path ? `${path}.${key}` : key, 'unknown key');
         }
       }
     };
@@ -293,16 +293,25 @@ export const hostConfigPatchSchema = V.obj(
   { optional: ['local', 'enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject'] },
 );
 
+const safeHostNameSchema = V.all(
+  V.str({ min: 1, pattern: SAFE_HOST_RE }),
+  V.custom((v) => typeof v !== 'string' || !v.startsWith('-') || '不得以 - 开头'),
+);
+
 /** POST /api/hosts/local：名称缺省时由 Node 侧注入 os.hostname()。 */
 export const localHostCreateSchema = V.obj(
   {
-    name: V.all(
-      V.str({ min: 1, pattern: SAFE_HOST_RE }),
-      V.custom((v) => typeof v !== 'string' || !v.startsWith('-') || '不得以 - 开头'),
-    ),
+    name: safeHostNameSchema,
   },
   { optional: ['name'] },
 );
+
+/** POST /api/hosts/sync-config：重复、源混入目标与存在性留给 config-sync 给人话。 */
+export const syncConfigBodySchema = V.obj({
+  source: safeHostNameSchema,
+  targets: V.arr(safeHostNameSchema, { min: 1, max: 200 }),
+  dryRun: V.bool(),
+});
 
 /** PUT /api/config/defaults 局部体（13 §2.6）。 */
 export const defaultsPatchSchema = V.obj(

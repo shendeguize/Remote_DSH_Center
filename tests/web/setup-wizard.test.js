@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  createSetupWizard,
   MIGRATION_DELAYS,
   lineOfJsonError,
   migrationTarget,
@@ -17,10 +18,112 @@ import {
   stepErrors,
   syncSelectionWithHosts,
 } from '../../src/web/components/setup-wizard.js';
-import { SETUP_STEPS, defaultAnswers, setByPath } from '../../src/web/setup-schema.js';
+import {
+  BINDABLE_PORT_MIN,
+  PORT_MAX,
+  SETUP_STEPS,
+  defaultAnswers,
+  setByPath,
+  vBindableRange,
+} from '../../src/web/setup-schema.js';
+import { createStore } from '../../src/web/store.js';
+import { flush } from './app-harness.js';
+import { installDom } from './dom-shim.js';
 
 const current = { manager: { port: 7788 }, defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] } };
 const host = (name, phase) => ({ name, phase });
+
+function mountWizardWithFakes(t, hosts = [host('gpu-1', 'ready')]) {
+  const dom = installDom();
+  const store = createStore({
+    manager: {
+      info: { port: current.manager.port, setupCompleted: false },
+      setupCompleted: false,
+    },
+    defaults: current.defaults,
+  });
+  const calls = {
+    actionProbeAll: 0,
+    apiProbeAll: 0,
+    hosts: 0,
+    navigate: [],
+  };
+  const actions = {
+    async probeAll() { calls.actionProbeAll += 1; },
+    navigate(to) { calls.navigate.push(to); },
+    reportError(err, summary) {
+      assert.fail(`${summary}: ${err.message}`);
+    },
+  };
+  const api = {
+    async hosts() {
+      calls.hosts += 1;
+      return { revision: 1, hosts };
+    },
+    async probeAll() {
+      calls.apiProbeAll += 1;
+    },
+    async setup() {
+      return {
+        ok: true,
+        port: current.manager.port,
+        portChanged: false,
+        restartRequired: false,
+        restarting: false,
+      };
+    },
+    async managerInfo() {
+      return { port: current.manager.port, setupCompleted: true };
+    },
+  };
+  const wizard = createSetupWizard({
+    store,
+    actions,
+    confirm: async () => true,
+    api,
+    win: dom.window,
+  });
+  dom.app.append(wizard.root);
+  wizard.open();
+  t.after(() => {
+    wizard.destroy();
+    dom.restore();
+  });
+  return { wizard, calls };
+}
+
+test('第 3 步只经 actions.probeAll 一次，提交精确 navigate 到 #/hub', async (t) => {
+  const { wizard, calls } = mountWizardWithFakes(t);
+  const primary = (label) => {
+    const control = wizard.root.querySelector('.wizard-foot .btn-primary');
+    assert.equal(control.textContent, label);
+    return control;
+  };
+
+  primary('下一步').click();
+  primary('下一步').click();
+  await flush();
+  const steps = wizard.root.querySelectorAll('.stepper .step');
+  assert.equal(steps[2].dataset.state, 'current');
+  assert.equal(steps[2].getAttribute('aria-current'), 'step');
+  assert.equal(calls.hosts, 1);
+  assert.equal(calls.actionProbeAll, 1, '全量探测必须穿过 actions 的 pending/error 语义');
+  assert.equal(calls.apiProbeAll, 0, 'setup 组件不能绕过 actions 直调 api.probeAll');
+
+  const stepThreeControls = wizard.root.querySelectorAll('.wizard-foot .btn');
+  assert.equal(stepThreeControls[0].textContent, '上一步');
+  stepThreeControls[0].click();
+  primary('下一步').click();
+  await flush();
+  assert.equal(calls.hosts, 1, '重进第 3 步不重复发现');
+  assert.equal(calls.actionProbeAll, 1, '重进第 3 步不重复发起探测');
+  assert.equal(calls.apiProbeAll, 0);
+
+  primary('下一步').click();
+  primary('完成并保存').click();
+  await flush();
+  assert.deepEqual(calls.navigate, ['#/hub']);
+});
 
 test('stepErrors 只判当前步的字段', () => {
   const answers = defaultAnswers(current);
@@ -31,6 +134,27 @@ test('stepErrors 只判当前步的字段', () => {
 
   setByPath(answers, 'defaults.localPortRange', [17_799, 17_701]);
   assert.match(stepErrors(answers, SETUP_STEPS[0])['defaults.localPortRange'], /终点/);
+});
+
+test('setup 本机端口区间与 JSON 预览统一使用可绑定范围', () => {
+  assert.equal(BINDABLE_PORT_MIN, 1024);
+  assert.equal(PORT_MAX, 65_535);
+  assert.match(vBindableRange([1023, 17799]), /1024/);
+  assert.equal(vBindableRange([1024, 65_535]), null);
+
+  const answers = defaultAnswers(current);
+  setByPath(answers, 'defaults.localPortRange', [1023, 17799]);
+  assert.match(stepErrors(answers, SETUP_STEPS[0])['defaults.localPortRange'], /1024/);
+
+  const preview = parsePreview(JSON.stringify({
+    configVersion: 1,
+    setupCompleted: true,
+    manager: { port: 1 },
+    defaults: { remoteWebPort: 1, localPortRange: [1023, 17799] },
+    hosts: {},
+  }));
+  assert.equal(preview.ok, false);
+  assert.match(preview.error, /defaults\.localPortRange.*1024/);
 });
 
 test('取消纳管连带取消开启链接', () => {

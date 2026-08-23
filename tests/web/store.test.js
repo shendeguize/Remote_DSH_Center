@@ -110,7 +110,7 @@ test('事件缓冲为环形，上限 50', () => {
   assert.equal(store.state.events.length, 0);
 });
 
-test('canWrite：首屏建连中允许写，曾连上再断线禁写', () => {
+test('canWrite：首屏建连中允许写，断线与重同步期间禁写', () => {
   const store = createStore();
   assert.equal(store.canWrite(), true, 'idle');
   store.setConnection({ sse: 'connecting' });
@@ -119,6 +119,10 @@ test('canWrite：首屏建连中允许写，曾连上再断线禁写', () => {
   assert.equal(store.canWrite(), true);
   store.setConnection({ sse: 'reconnecting' });
   assert.equal(store.canWrite(), false, '曾连上又断 → 禁写');
+  store.setConnection({ sse: 'open', resyncing: true });
+  assert.equal(store.canWrite(), false, '连接恢复但全量 snapshot 未到 → 仍禁写');
+  store.applySnapshot({ revision: 1, hosts: [], logs: [] });
+  assert.equal(store.canWrite(), true, 'snapshot 清掉 resyncing 后才恢复写操作');
   store.setConnection({ sse: 'offline' });
   assert.equal(store.canWrite(), false);
 });
@@ -201,14 +205,82 @@ test('toast：同文案折叠计数，超出上限丢最旧', () => {
   assert.equal(store.state.toasts.some((t) => t.id === id), false);
 });
 
-test('config-changed 合并 manager 字段而不丢原有 info', () => {
+test('config-changed 只更新配置端口，旧 revision 不得回退配置', () => {
   const store = createStore();
   store.setManagerInfo({ setupCompleted: true, port: 7788, pid: 42, version: '0.1.0' });
-  store.applyConfigChanged({ revision: 9, defaults: { remoteWebPort: 9000, localPortRange: [1, 2] }, manager: { port: 7799 }, changed: ['manager.port'] });
+  store.setManagerConfig({ port: 7788 });
+  const applied = store.applyConfigChanged({
+    revision: 9,
+    defaults: { remoteWebPort: 9000, localPortRange: [1, 2] },
+    manager: { port: 7799 },
+    changed: ['manager.port'],
+  });
 
-  assert.equal(store.state.manager.info.port, 7799);
+  assert.equal(applied, true);
+  assert.equal(store.state.manager.info.port, 7788, '实际监听端口不能被目标配置冒充');
   assert.equal(store.state.manager.info.pid, 42);
+  assert.equal(store.state.manager.configuredPort, 7799);
   assert.equal(store.state.defaults.remoteWebPort, 9000);
+
+  const stale = store.applyConfigChanged({
+    revision: 9,
+    defaults: { remoteWebPort: 8000, localPortRange: [3, 4] },
+    manager: { port: 7800 },
+    changed: ['manager.port'],
+  });
+  assert.equal(stale, false);
+  assert.equal(store.state.manager.configuredPort, 7799);
+  assert.equal(store.state.defaults.remoteWebPort, 9000);
+});
+
+test('snapshot 原子更新实际监听端口与配置目标端口，并以 revision 挡住旧配置帧', () => {
+  const store = createStore();
+  const observed = [];
+  store.on('manager:changed', () => {
+    observed.push([store.state.manager.info?.port, store.state.manager.configuredPort]);
+  });
+  store.on('manager-config:changed', () => {
+    observed.push([store.state.manager.info?.port, store.state.manager.configuredPort]);
+  });
+
+  store.applySnapshot({
+    revision: 10,
+    manager: { setupCompleted: true, port: 7788, pid: 43 },
+    configuredPort: 7799,
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    hosts: [],
+    logs: [],
+  });
+
+  assert.equal(store.state.manager.info.port, 7788);
+  assert.equal(store.state.manager.info.pid, 43);
+  assert.equal(store.state.manager.configuredPort, 7799);
+  assert.deepEqual(observed, [[7788, 7799], [7788, 7799]],
+    '任一 manager 订阅者都只能观察到 runtime/configuredPort 同步后的状态');
+
+  assert.equal(store.applyConfigChanged({
+    revision: 9,
+    defaults: { remoteWebPort: 9000, localPortRange: [18_001, 18_099] },
+    manager: { port: 7800 },
+    changed: ['manager.port'],
+  }), false);
+  assert.equal(store.state.manager.configuredPort, 7799, '旧配置帧不得回退 snapshot 真相');
+});
+
+test('旧 snapshot 不含 configuredPort 时保留已知配置目标端口', () => {
+  const store = createStore();
+  store.setManagerConfig({ port: 7799 });
+
+  store.applySnapshot({
+    revision: 10,
+    manager: { setupCompleted: true, port: 7788, pid: 43 },
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    hosts: [],
+    logs: [],
+  });
+
+  assert.equal(store.state.manager.info.port, 7788);
+  assert.equal(store.state.manager.configuredPort, 7799);
 });
 
 test('upsertHost 落地 REST 回传视图且不动 revision', () => {

@@ -10,6 +10,8 @@ const AUTO_DISMISS_MS = { info: 5_000, success: 5_000, warn: 8_000, error: null 
 export function createToastRegion({ store }) {
   const root = el('div.toast-region', { 'aria-live': 'polite', role: 'status' });
   const timers = new Map();
+  const savedTabindex = new WeakMap();
+  let modalBlocked = false;
 
   const render = () => {
     clear(root);
@@ -17,7 +19,40 @@ export function createToastRegion({ store }) {
       root.append(renderToast(toast));
       scheduleDismiss(toast);
     }
+    syncModalBlocked();
   };
+
+  /**
+   * toast 留在 aria-live 树里播报抽屉内的保存错误，但 custom modal 打开时，它的
+   * summary/button 不能成为外部 Tab 落点。render 会重建整片内容，所以每次渲染都
+   * 重新同步；关闭抽屉时再还原各控件原本的 tabindex。
+   */
+  function syncModalBlocked() {
+    if (modalBlocked) root.setAttribute('data-modal-blocked', 'true');
+    else root.removeAttribute('data-modal-blocked');
+
+    const controls = [
+      ...root.querySelectorAll('summary'),
+      ...root.querySelectorAll('button'),
+    ];
+    for (const control of controls) {
+      if (modalBlocked) {
+        if (!savedTabindex.has(control)) savedTabindex.set(control, control.getAttribute('tabindex'));
+        control.setAttribute('tabindex', '-1');
+        continue;
+      }
+      if (!savedTabindex.has(control)) continue;
+      const previous = savedTabindex.get(control);
+      if (previous === null) control.removeAttribute('tabindex');
+      else control.setAttribute('tabindex', previous);
+      savedTabindex.delete(control);
+    }
+  }
+
+  function setModalBlocked(on) {
+    modalBlocked = Boolean(on);
+    syncModalBlocked();
+  }
 
   function scheduleDismiss(toast) {
     if (timers.has(toast.id)) return;
@@ -62,6 +97,7 @@ export function createToastRegion({ store }) {
 
   return {
     root,
+    setModalBlocked,
     destroy() {
       off();
       for (const timer of timers.values()) clearTimeout(timer);

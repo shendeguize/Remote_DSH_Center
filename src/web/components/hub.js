@@ -6,35 +6,26 @@
  */
 
 import {
-  clear, el, mappingSummary, phaseBadge, phaseMeta,
+  DASH, clear, el, phaseBadge, phaseMeta,
 } from '../utils.js';
-
-const CARD_PHASES = new Set(['ready', 'starting', 'running', 'degraded', 'crashed']);
-
-function isEnabled(host) {
-  return (host?.config?.enabled ?? host?.enabled) === true;
-}
+import { isHostEnabled, primaryHosts } from '../host-rules.js';
+import {
+  hostMappingSummary, hostPhaseMeta, hostStatusText,
+} from '../host-presentation.js';
 
 /** @param {Iterable<object>} hosts */
 export function hubHosts(hosts) {
-  const primary = [];
-  const unavailable = [];
-  for (const host of hosts) {
-    if (isEnabled(host) && CARD_PHASES.has(host.phase)) primary.push(host);
-    else unavailable.push(host);
-  }
+  const all = [...hosts];
+  const primary = primaryHosts(all);
+  const primarySet = new Set(primary);
   const byName = (a, b) => a.name.localeCompare(b.name);
-  return { primary: primary.sort(byName), unavailable: unavailable.sort(byName) };
+  const unavailable = all.filter((host) => !primarySet.has(host)).sort(byName);
+  return { primary, unavailable };
 }
 
 function mappingLine(host) {
-  if (host.local === true) {
-    return host.mappedUrl && host.tunnel?.localPort != null
-      ? `本机 ${host.tunnel.localPort}`
-      : null;
-  }
-  const mapping = mappingSummary(host);
-  return mapping.line1 === '—' ? null : mapping.line1;
+  const mapping = hostMappingSummary(host);
+  return mapping.line1 === DASH ? null : mapping.line1;
 }
 
 function cardSummary(host, store) {
@@ -60,10 +51,7 @@ function cardSummary(host, store) {
 function unavailableSummary(hosts) {
   const counts = new Map();
   for (const host of hosts) {
-    let label;
-    if (!isEnabled(host)) label = '已禁用';
-    else if (host.local === true && host.phase === 'unreachable') label = '本机不可用';
-    else label = phaseMeta(host.phase).label;
+    const label = hostStatusText(host, { disabled: !isHostEnabled(host) });
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const detail = [...counts].map(([label, count]) => `${label} ${count}`).join(' · ');
@@ -80,7 +68,7 @@ export function createHub({ store, actions }) {
       type: 'button',
       dataset: { host: host.name, phase: host.phase },
       class: active ? 'is-active' : '',
-      'aria-label': `${host.name}，${phaseMeta(host.phase).label}，${cardSummary(host, store)}`,
+      'aria-label': `${host.name}，${hostPhaseMeta(host).label}，${cardSummary(host, store)}`,
       'aria-current': active ? 'page' : null,
       on: { click: () => actions.openHost(host.name) },
     }, [

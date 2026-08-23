@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict';
 
+import { SYNC_PROFILE_FIELDS } from '../../src/config-sync.js';
 import { V, validate } from '../../src/lib/validate.js';
 import { PHASES } from '../../src/lib/machine.js';
 import { ERROR_HTTP_STATUS } from '../../src/lib/errors.js';
@@ -136,6 +137,18 @@ export const managerInfo = V.obj({
 export const hostConfigPutResponse = V.obj({ host: hostView });
 export const localHostCreateResponse = V.obj({ host: hostView });
 
+export const syncConfigResponse = V.obj({
+  source: V.str({ min: 1 }),
+  dryRun: V.bool(),
+  targets: V.arr(V.obj({
+    name: V.str({ min: 1 }),
+    changed: V.bool(),
+    changedFields: V.arr(V.enum_(SYNC_PROFILE_FIELDS)),
+  }), { min: 1, max: 200 }),
+  applied: V.arr(V.str({ min: 1 })),
+  hosts: V.arr(hostView),
+});
+
 export const defaultsPutResponse = V.obj({
   defaults: defaultsView,
   manager: V.obj({ port }),
@@ -171,6 +184,7 @@ export const logLine = V.obj({
 export const snapshot = V.obj({
   revision,
   manager: managerInfo,
+  configuredPort: V.nullable(port),
   defaults: V.nullable(defaultsView),
   hosts: V.arr(hostView),
   logs: V.arr(V.obj({

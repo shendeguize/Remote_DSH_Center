@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 
+import { applyConfigSync, planConfigSync } from './config-sync.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import {
@@ -19,6 +20,7 @@ import {
   hostConfigPatchSchema,
   localHostCreateSchema,
   setupBodySchema,
+  syncConfigBodySchema,
 } from './lib/validate.js';
 import * as launcher from './launcher.js';
 import * as prober from './prober.js';
@@ -258,6 +260,7 @@ export function createSseHub({ managerCtl, heartbeatMs = SSE_HEARTBEAT_MS } = {}
       const cfg = store.getConfig();
       write(res, 'snapshot', {
         manager: managerCtl.info(),
+        configuredPort: cfg?.manager?.port ?? null,
         defaults: cfg?.defaults ?? null,
         hosts: store.listHostViews(),
         logs: recentLogs(50),
@@ -373,6 +376,27 @@ export function createHandler({ managerCtl }) {
       assertValid(localHostCreateSchema, body, '本机主机创建请求校验失败');
       const host = store.createLocalHost(body.name ?? os.hostname());
       sendJson(res, 201, { host });
+    }],
+
+    ['POST', /^\/api\/hosts\/sync-config$/, async (req, res) => {
+      const body = await readJsonBody(req);
+      assertValid(syncConfigBodySchema, body, '批量配置同步请求校验失败');
+      const plan = planConfigSync(store.getConfig(), body);
+      let applied = [];
+
+      if (!body.dryRun && plan.targets.some((target) => target.changed)) {
+        store.updateConfig((draft) => {
+          applied = applyConfigSync(draft, plan);
+        });
+      }
+
+      sendJson(res, 200, {
+        source: plan.source,
+        dryRun: body.dryRun,
+        targets: plan.targets,
+        applied,
+        hosts: body.dryRun ? [] : body.targets.map((name) => store.getHostView(name)),
+      });
     }],
 
     ['GET', /^\/api\/config$/, (req, res) => {

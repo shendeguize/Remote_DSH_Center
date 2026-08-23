@@ -9,8 +9,9 @@ import test from 'node:test';
 import {
   COMMANDS, EXIT, TERMINAL, UsageError, assertCliSetupLocalIdentities, buildDefaultsPatchFor, buildHostPatchFor,
   classifyConfigFile, coerceConfigValue, createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame,
-  resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
+  persistSetup, resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
 } from '../src/cli.js';
+import { newFactoryConfig, newHostConfig } from '../src/defaults.js';
 
 test('update 的「已是最新」：跟着 rc 的人得看到新 rc，装正式版的人不受打扰', () => {
   assert.deepEqual(upToDateLines({ from: '0.1.0' }), ['已是最新：v0.1.0。']);
@@ -156,6 +157,66 @@ test('CLI setup 可信身份只允许 canonical 候选，并拒绝把任意 SSH 
     ),
     (err) => err.code === 'NOT_ALLOWED' && /SSH 主机/.test(err.message),
   );
+});
+
+test('persistSetup：manager 未运行时原子写入；写盘失败保留原文件并返回人话', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-persist-'));
+  const savedHome = process.env.DSHC_HOME;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.DSHC_HOME;
+    else process.env.DSHC_HOME = savedHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  let stdout = '';
+  let stderr = '';
+  t.mock.method(process.stdout, 'write', (chunk) => { stdout += String(chunk); return true; });
+  t.mock.method(process.stderr, 'write', (chunk) => { stderr += String(chunk); return true; });
+
+  const config = newFactoryConfig();
+  config.manager.port = 7881;
+  config.hosts.workstation = { ...newHostConfig(), local: true };
+
+  const successDir = path.join(root, 'success');
+  fs.mkdirSync(successDir);
+  process.env.DSHC_HOME = successDir;
+  const success = await persistSetup(config, {}, {
+    preferredLocalName: 'workstation',
+    sshNames: [],
+  });
+
+  const expected = structuredClone(config);
+  expected.setupCompleted = true;
+  const expectedBytes = `${JSON.stringify(expected, null, 2)}\n`;
+  const successFile = path.join(successDir, 'config.json');
+  assert.equal(success, EXIT.ok);
+  assert.equal(fs.readFileSync(successFile, 'utf8'), expectedBytes, '磁盘上只能出现完整的新配置');
+  assert.equal(fs.statSync(successFile).mode & 0o777, 0o600, '原子临时文件的私有权限要随 rename 保留');
+  assert.deepEqual(fs.readdirSync(successDir), ['config.json'], '成功后不留原子写临时文件');
+  assert.match(stdout, /已写入 .*config\.json。执行 dshc up/);
+  assert.equal(stderr, '');
+  assert.equal(fs.existsSync(path.join(successDir, 'manager.pid')), false, '离线路径不该拉起 manager');
+
+  stdout = '';
+  stderr = '';
+  const failureDir = path.join(root, 'failure');
+  fs.mkdirSync(failureDir);
+  process.env.DSHC_HOME = failureDir;
+  const failureFile = path.join(failureDir, 'config.json');
+  const originalBytes = `${JSON.stringify(newFactoryConfig(), null, 2)}\n`;
+  fs.writeFileSync(failureFile, originalBytes);
+  fs.mkdirSync(`${failureFile}.tmp.${process.pid}`);
+
+  const failed = await persistSetup(config, {}, {
+    preferredLocalName: 'workstation',
+    sshNames: [],
+  });
+  assert.equal(failed, EXIT.failed);
+  assert.equal(stdout, '', '失败不能谎报已写入');
+  assert.match(stderr, /^错误：配置没能写入磁盘，本次修改已放弃/m);
+  assert.doesNotMatch(stderr, /内部错误|at persistSetup/, '面向用户的错误不能泄漏栈');
+  assert.equal(fs.readFileSync(failureFile, 'utf8'), originalBytes, '原文件字节必须原封不动');
+  assert.equal(fs.existsSync(path.join(failureDir, 'manager.pid')), false, '失败路径也不该拉起 manager');
 });
 
 test('SSE 分帧器：跨 chunk、心跳注释、坏 JSON', () => {

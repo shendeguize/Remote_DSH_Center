@@ -346,6 +346,7 @@ export function createFakeManager({
     emit('snapshot', {
       revision,
       manager: managerInfo(),
+      configuredPort: config.manager.port,
       defaults: clone(config.defaults),
       hosts: listHosts(),
       logs: logs.map((l) => ({ ...l })),
@@ -697,6 +698,7 @@ export function createFakeManager({
     fn('snapshot', {
       revision,
       manager: managerInfo(),
+      configuredPort: config.manager.port,
       defaults: clone(config.defaults),
       hosts: listHosts(),
       logs: logs.map((l) => ({ ...l })),

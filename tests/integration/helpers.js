@@ -146,10 +146,17 @@ export async function bootServer(t, opts = {}) {
       launcher._setWait(FAST_WAIT);
       return start();
     },
+    /** 调用方已用 _shutdownForTest 拆服后，在原监听端口重跑启动序列。 */
+    async startSamePort() {
+      const port = ctx.port;
+      reset();
+      launcher._setWait(FAST_WAIT);
+      return start(port);
+    },
   };
 
-  async function start() {
-    const booted = await server.main({ portOverride: 0, skipBoot });
+  async function start(portOverride = 0) {
+    const booted = await server.main({ portOverride, skipBoot });
     ctx.port = booted.port;
     ctx.base = `http://127.0.0.1:${booted.port}`;
     ctx.setupGate = booted.setupGate;

@@ -7,11 +7,15 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { evaluateTiers, parseLcov, TIERS } from '../scripts/coverage-gate.mjs';
+import {
+  aggregateDiagnostics, coverageVerdict, evaluateTiers, formatReport, missingSourceFiles,
+  parseLcov, sourceJsFiles, TIERS,
+} from '../scripts/coverage-gate.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = path.join(ROOT, 'src');
@@ -204,6 +208,7 @@ const LCOV = [
   'TN:',
   'SF:src/lib/shq.js',
   'DA:1,1', 'DA:2,1', 'DA:3,0', 'DA:4,1', 'DA:5,1', 'DA:6,1', 'DA:7,1', 'DA:8,1', 'DA:9,1', 'DA:10,1',
+  'BRF:4', 'BRH:3', 'FNF:2', 'FNH:1',
   'end_of_record',
   'TN:',
   'SF:src/tunnel.js',
@@ -212,25 +217,47 @@ const LCOV = [
   'TN:',
   'SF:src/web/router.js',
   'DA:1,1', 'DA:2,1', 'DA:3,1', 'DA:4,1', 'DA:5,0',
+  'BRF:2', 'BRH:1', 'FNF:1', 'FNH:1',
   'end_of_record',
   'TN:',
   'SF:src/web/components/tabbar.js',
   'DA:1,0', 'DA:2,0', 'DA:3,0', 'DA:4,1',
+  'BRF:6', 'BRH:0', 'FNF:3', 'FNH:0',
   'end_of_record',
   '',
 ].join('\n');
+
+function temporarySources(t, entries) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-source-set-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [relative, contents] of Object.entries(entries)) {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
+  return root;
+}
 
 test('parseLcov 逐文件算行覆盖', () => {
   const parsed = parseLcov(LCOV);
   assert.deepEqual(parsed.map((f) => f.file), ['src/lib/shq.js', 'src/tunnel.js', 'src/web/router.js', 'src/web/components/tabbar.js']);
   assert.equal(parsed[0].pct, 90);
   assert.equal(parsed[1].pct, 50);
+  assert.deepEqual(parsed[0].branches, { found: 4, hit: 3 });
+  assert.deepEqual(parsed[0].functions, { found: 2, hit: 1 });
+  assert.equal(parsed[1].branches, null, '缺 BRH/BRF 的旧记录仍可解析');
+  assert.equal(parsed[1].functions, null, '缺 FNH/FNF 的旧记录仍可解析');
 });
 
-test('三档门槛各判各的，components 只报告不设卡', () => {
+test('总闸与分档各判各的，components 计入 overall 但不计 web-logic', () => {
   const tiers = evaluateTiers(parseLcov(LCOV));
   const byId = Object.fromEntries(tiers.map((t) => [t.id, t]));
 
+  assert.equal(byId.overall.min, 95);
+  assert.equal(byId.overall.files, 4, 'components 必须计入全仓总闸');
+  assert.equal(byId.overall.found, 23);
+  assert.equal(byId.overall.hit, 16);
+  assert.equal(byId.overall.ok, false);
   assert.equal(byId.lib.min, 90);
   assert.equal(byId.lib.ok, true, '90% 刚好达标');
   assert.equal(byId.modules.ok, false, '50% 该被卡住');
@@ -240,8 +267,164 @@ test('三档门槛各判各的，components 只报告不设卡', () => {
   assert.equal(byId['web-logic'].files, 1, 'components 不能混进 web-logic 档');
 });
 
-test('门槛表覆盖 14 §6 的三档', () => {
-  assert.deepEqual(TIERS.filter((t) => t.min !== null).map((t) => t.min).sort((a, b) => a - b), [75, 80, 90]);
+test('overall 是首位 95% 总闸，原分档门槛保持不变', () => {
+  assert.deepEqual(
+    TIERS.map(({ id, min }) => ({ id, min })),
+    [
+      { id: 'overall', min: 95 },
+      { id: 'lib', min: 90 },
+      { id: 'modules', min: 75 },
+      { id: 'web-logic', min: 80 },
+      { id: 'web-components', min: null },
+    ],
+  );
+});
+
+test('overall 按 DA 行数加权：94.9% 红，95% 刚好绿', () => {
+  const large = {
+    file: 'src/large.js', found: 999, hit: 949, pct: (949 / 999) * 100,
+  };
+  const component = {
+    file: 'src/web/components/tiny.js', found: 1, hit: 0, pct: 0,
+  };
+  const overall = (files_) => evaluateTiers(files_).find((tier) => tier.id === 'overall');
+
+  const red = overall([large, component]);
+  assert.equal(Number(red.pct.toFixed(1)), 94.9);
+  assert.deepEqual({ hit: red.hit, found: red.found }, { hit: 949, found: 1_000 });
+  assert.equal(red.ok, false);
+
+  const green = overall([large, { ...component, hit: 1, pct: 100 }]);
+  assert.equal(green.pct, 95);
+  assert.deepEqual({ hit: green.hit, found: green.found }, { hit: 950, found: 1_000 });
+  assert.equal(green.ok, true);
+});
+
+test('branch/function 独立聚合并只作诊断，不参与 overall.ok', () => {
+  const files_ = parseLcov(LCOV);
+  assert.deepEqual(aggregateDiagnostics(files_), {
+    files: 4,
+    branches: { found: 12, hit: 4, files: 3 },
+    functions: { found: 6, hit: 2, files: 3 },
+  });
+
+  const linePass = [{
+    file: 'src/a.js',
+    found: 20,
+    hit: 19,
+    pct: 95,
+    branches: { found: 100, hit: 0 },
+    functions: { found: 50, hit: 0 },
+  }];
+  const tiers = evaluateTiers(linePass);
+  assert.equal(tiers.find((tier) => tier.id === 'overall').ok, true, '诊断指标再低也不许扩大门槛');
+  const report = formatReport(tiers, aggregateDiagnostics(linePass));
+  assert.match(report, /全仓诊断（不设门槛）/);
+  assert.match(report, /branch BRH\/BRF 0\/100/);
+  assert.match(report, /function FNH\/FNF 0\/50/);
+});
+
+test('lcov 空报告不能让 overall 假绿', () => {
+  const overall = evaluateTiers(parseLcov('')).find((tier) => tier.id === 'overall');
+  assert.equal(overall.pct, 0);
+  assert.equal(overall.ok, false);
+});
+
+test('sourceJsFiles 扫全普通 src/**/*.js：含嵌套、忽略非 JS、结果稳定排序', (t) => {
+  const root = temporarySources(t, {
+    'src/z.js': 'export const z = 1;\n',
+    'src/nested/a.js': 'export const a = 1;\n',
+    'src/nested/readme.txt': '不是源码\n',
+  });
+
+  assert.deepEqual(sourceJsFiles(root), ['src/nested/a.js', 'src/z.js']);
+});
+
+test('sourceJsFiles 对 src 树内文件与目录软链 fail-closed，并点名路径和原因', (t) => {
+  const root = temporarySources(t, {
+    'src/regular.js': 'export const regular = true;\n',
+    'outside/untested.js': 'throw new Error("未覆盖");\n',
+    'outside/linked-dir/escape.js': 'throw new Error("不该扫描仓库外目标");\n',
+  });
+  const fileLink = path.join(root, 'src', 'untested.js');
+  fs.symlinkSync(path.join(root, 'outside', 'untested.js'), fileLink, 'file');
+
+  assert.throws(
+    () => sourceJsFiles(root),
+    (error) => error.code === 'COVERAGE_SOURCE_SYMLINK'
+      && error.message.includes('src/untested.js')
+      && error.message.includes('软链'),
+    '外部 JS 文件软链不能被静默跳过，否则可绕过 overall 95% 总闸',
+  );
+
+  fs.rmSync(fileLink);
+  fs.symlinkSync(
+    path.join(root, 'outside', 'linked-dir'),
+    path.join(root, 'src', 'linked-outside'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  assert.throws(
+    () => sourceJsFiles(root),
+    (error) => error.code === 'COVERAGE_SOURCE_SYMLINK'
+      && error.message.includes('src/linked-outside')
+      && error.message.includes('软链'),
+    '目录软链也必须在解析目标前 fail-closed',
+  );
+});
+
+test('missingSourceFiles 对齐磁盘与 lcov：全覆盖绿、缺一个点名，绝对/相对路径视同', (t) => {
+  const root = temporarySources(t, {
+    'src/a.js': 'export const a = 1;\n',
+    'src/nested/b.js': 'export const b = 1;\n',
+    'src/nested/data.json': '{}\n',
+  });
+  const absoluteA = path.join(root, 'src', 'a.js');
+  const relativeB = ['src', 'nested', 'b.js'].join(path.sep);
+  const completeLcov = [
+    `SF:${absoluteA}`, 'DA:1,1', 'end_of_record',
+    `SF:${relativeB}`, 'DA:1,1', 'end_of_record',
+  ].join('\n');
+  const complete = parseLcov(completeLcov, root);
+
+  assert.deepEqual(complete.map((file) => file.file), ['src/a.js', 'src/nested/b.js']);
+  assert.deepEqual(
+    missingSourceFiles(complete, root),
+    [],
+    'lcov 的绝对与相对路径都应归一到 repo-relative POSIX 路径',
+  );
+  const onlyA = parseLcov('SF:src\\a.js\nDA:1,1\nend_of_record\n', root);
+  assert.deepEqual(
+    missingSourceFiles(onlyA, root),
+    ['src/nested/b.js'],
+    '反斜杠路径也要归一，且缺失名单按路径稳定排序',
+  );
+});
+
+test('coverageVerdict 顺序固定，并把 missing 纳入主退出判据', () => {
+  const covered = [{
+    file: 'src/a.js', found: 20, hit: 19, pct: 95,
+  }];
+  const tiers = evaluateTiers(covered);
+  const emptyTiers = evaluateTiers([]);
+
+  const testFailure = coverageVerdict({
+    testExit: 2, files: [], tiers: emptyTiers, missing: ['src/untested.js'],
+  });
+  assert.equal(testFailure.phase, 'tests', '测试退出码优先于空 lcov 与缺失源码');
+  assert.equal(testFailure.exitCode, 2);
+  assert.equal(coverageVerdict({
+    testExit: 0, files: [], tiers: emptyTiers, missing: ['src/untested.js'],
+  }).phase, 'empty-lcov', '空 lcov 优先给出采集失败原因');
+
+  assert.equal(coverageVerdict({
+    testExit: 0, files: covered, tiers, missing: [],
+  }).ok, true);
+  const missing = coverageVerdict({
+    testExit: 0, files: covered, tiers, missing: ['src/untested.js'],
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.exitCode, 1);
+  assert.deepEqual(missing.missing, ['src/untested.js']);
 });
 
 test('前端不碰 innerHTML 一类的 HTML 注入口', () => {

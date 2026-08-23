@@ -7,8 +7,22 @@
 
 import { DASH, button, clear, el, fmtAgo, phaseBadge, text } from '../utils.js';
 import { buildHostPatch, deepEqual, diffPatch, field, formatEnvLines, formatLines, input } from '../form.js';
+import { hostMappingSummary, hostPhaseMeta } from '../host-presentation.js';
 
 const LOG_LINES = 200;
+
+function drawerConfigOf(config) {
+  return {
+    enabled: Boolean(config?.enabled),
+    remoteWebPort: config?.remoteWebPort ?? null,
+    workdir: config?.workdir ?? null,
+    inject: {
+      env: config?.inject?.env ?? {},
+      extraArgs: config?.inject?.extraArgs ?? [],
+      patches: config?.inject?.patches ?? [],
+    },
+  };
+}
 
 /**
  * config → 表单草稿（纯函数，便于单测草稿/冲突逻辑）。
@@ -19,7 +33,6 @@ const LOG_LINES = 200;
 export function draftOf(config) {
   return {
     enabled: Boolean(config?.enabled),
-    autoStart: Boolean(config?.autoStart),
     remoteWebPort: config?.remoteWebPort == null ? '' : String(config.remoteWebPort),
     workdir: config?.workdir ?? '',
     env: formatEnvLines(config?.inject?.env),
@@ -51,7 +64,7 @@ export function workdirPending(host) {
  * @returns {'follow'|'conflict'|'none'}
  */
 export function reconcile(draft, prevConfig, nextConfig) {
-  if (deepEqual(prevConfig, nextConfig)) return 'none';
+  if (deepEqual(drawerConfigOf(prevConfig), drawerConfigOf(nextConfig))) return 'none';
   return isDirty(draft, prevConfig) ? 'conflict' : 'follow';
 }
 
@@ -85,7 +98,6 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const conflict = el('p.card-notice', { hidden: true });
 
   const enabled = field('纳管此主机', input('checkbox', false));
-  const autoStart = field('随 manager 自启', input('checkbox', false));
   const remotePort = field('远端 web 端口', input('number', '', { min: '1', max: '65535', placeholder: '留空 = 用全局默认' }));
   const workdir = field(
     '启动目录（工作区根）',
@@ -97,7 +109,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const env = field('环境变量（每行 KEY=VALUE）', input('textarea', '', { rows: '4', spellcheck: 'false' }));
   const extraArgs = field('追加参数（每行一项，不做 shell 拆词）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
   const patches = field('Patch 文件（每行一个本机绝对路径）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
-  const fields = [enabled, autoStart, remotePort, workdir, env, extraArgs, patches];
+  const fields = [enabled, remotePort, workdir, env, extraArgs, patches];
 
   const saveBtn = button('保存', { variant: 'primary', compact: false, onClick: submit });
   const cancelBtn = button('放弃修改', { compact: false, onClick: () => resetDraft() });
@@ -136,7 +148,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   }, [
     el('section.config-section', {}, [
       el('h3', { text: '基本配置' }),
-      el('div.field-grid', {}, [enabled.root, autoStart.root, remotePort.root]),
+      el('div.field-grid', {}, [enabled.root, remotePort.root]),
     ]),
     el('section.config-section.env-editor', {}, [
       el('h3', { text: '注入配置' }),
@@ -190,7 +202,6 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   function readForm() {
     return {
       enabled: enabled.input.checked,
-      autoStart: autoStart.input.checked,
       remoteWebPort: remotePort.input.value,
       workdir: workdir.input.value,
       env: env.input.value,
@@ -201,7 +212,6 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   function writeForm(draft) {
     enabled.input.checked = draft.enabled;
-    autoStart.input.checked = draft.autoStart;
     remotePort.input.value = draft.remoteWebPort === null ? '' : String(draft.remoteWebPort);
     workdir.input.value = draft.workdir ?? '';
     env.input.value = draft.env;
@@ -326,7 +336,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   function renderReadonly(host) {
     const copy = drawerCopy(host);
     title.textContent = host.name;
-    clear(badge).append(phaseBadge(host.phase));
+    clear(badge).append(phaseBadge(hostPhaseMeta(host)));
     workdirBadge.hidden = !workdirPending(host);
     remotePort.root.querySelector('label').textContent = copy.portLabel;
     probeTitle.textContent = copy.probeTitle;
@@ -341,7 +351,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       ['DSH_HOME', text(probe?.dshHome)],
       ['最近探测', probe?.at ? fmtAgo(probe.at) : DASH],
       [copy.effectivePortLabel, text(host.effectiveRemotePort)],
-      ['本机映射', host.mappedUrl ?? DASH],
+      ['本机映射', hostMappingSummary(host).url ?? DASH],
       [copy.processLabel, host.web ? `PID ${host.web.pid}（${host.web.startedByUs ? '本工具拉起' : '手动'}）` : DASH],
       // 实测工作目录：远端 /proc 不可读时为 null，此处退回「—」而不是编一个值
       [copy.workdirLabel, host.web ? (host.web.cwd ?? DASH) : DASH],
@@ -373,6 +383,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   async function submit() {
     if (!current) return;
+    // submit 以此刻 DOM 为准；input/change 事件与点击之间可能还有尚未同步进 draft 的值。
+    current.draft = readForm();
     // 保存是最终权威：该说的全说，之后这些字段也就都算碰过了
     for (const key of Object.keys(validated)) touched.add(key);
     const built = revalidate();
@@ -381,7 +393,10 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     // 只提交真正改动的键：避免把没碰过的字段“全量替换”回当前显示值
     const patch = diffPatch(built.value, current.config);
     if (Object.keys(patch).length === 0) {
-      store.setDrawer({ dirty: false });
+      // raw 文本可能看似有变化，但 trim / 注释过滤后与服务端配置完全一致。
+      // 回填 canonical draft，避免按钮与冲突提示继续暗示仍有内容可保存。
+      resetDraft();
+      store.addToast({ level: 'info', summary: '没有需要保存的有效变更' });
       return;
     }
     const res = await actions.saveHostConfig(current.name, patch);
@@ -418,6 +433,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
         conflict.hidden = false;
         conflict.textContent = `${drawerCopy(host).configChanged}（可能来自另一个标签页）；你的草稿已保留，「放弃修改」可载入最新值。`;
         current.config = host.config; // 冲突基准跟进，保存时按最新值 diff
+      } else {
+        current.config = host.config; // 非抽屉字段也跟进基准，但不动草稿
       }
       syncDirty();
     }),

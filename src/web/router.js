@@ -3,6 +3,8 @@
  * 只有 attachRouter 触碰 location。
  */
 
+import { isHostEnabled } from './host-rules.js';
+
 /**
  * @param {string} hash
  * @returns {{kind:'root'|'hub'|'manage'|'host'|'setup'|'invalid', host:string|null, raw:string}}
@@ -65,8 +67,7 @@ export function rootRouteTarget(hosts, storage) {
   const lastHost = readLastHost(storage);
   if (lastHost) {
     for (const host of hosts) {
-      const enabled = host?.enabled ?? host?.config?.enabled;
-      if (host?.name === lastHost && enabled === true && canOpenHost(host)) return hostRoute(lastHost);
+      if (host?.name === lastHost && isHostEnabled(host) && canOpenHost(host)) return hostRoute(lastHost);
     }
   }
   return '#/hub';

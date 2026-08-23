@@ -5,20 +5,19 @@
  */
 
 import {
-  ACTION_LABEL, clear, copyText, el, isManaged, phaseHint, phaseMeta,
+  ACTION_LABEL, clear, copyText, el, phaseMeta,
 } from '../utils.js';
+import {
+  isHostActionAllowed, isHostEnabled, primaryHosts,
+} from '../host-rules.js';
+import { hostPhaseHint, hostStatusText } from '../host-presentation.js';
 import { hostPanelId, hostTabId } from './iframe-pane.js';
 
 const LONG_PRESS_MS = 550;
-const PRIMARY_PHASES = new Set(['ready', 'starting', 'running', 'degraded', 'crashed']);
 
 /** ready fallback 独占的稳定 panel ID，避免与 iframe/启动占位的 ID 同时存在。 */
 export function hostFallbackPanelId(name) {
   return `host-fallback-panel-${encodeURIComponent(String(name))}`;
-}
-
-function isEnabled(host) {
-  return (host?.config?.enabled ?? host?.enabled) === true;
 }
 
 /**
@@ -26,11 +25,7 @@ function isEnabled(host) {
  * @param {Iterable<object>} hosts
  */
 export function visibleTabs(hosts) {
-  const out = [];
-  for (const host of hosts) {
-    if (isEnabled(host) && PRIMARY_PHASES.has(host.phase)) out.push(host);
-  }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+  return primaryHosts(hosts);
 }
 
 /** 主标签之外的主机集中到 +N 菜单，保证不可用/禁用主机仍然找得到。 */
@@ -86,14 +81,10 @@ export function nextTabIndex(key, current, count) {
 
 /** 菜单项按 phase / 归属裁剪（无效项禁用而非隐藏，位置稳定）。 */
 export function menuItems(host) {
-  const managed = isManaged(host);
-  const running = host?.phase === 'running';
-  const degraded = host?.phase === 'degraded';
-  const crashed = host?.phase === 'crashed';
   return [
-    { action: 'restart', label: ACTION_LABEL.restart, enabled: managed && (running || degraded || crashed), needsWrite: true },
-    { action: 'stop', label: ACTION_LABEL.stop, enabled: managed && (running || degraded), needsWrite: true },
-    { action: 'reconnect', label: ACTION_LABEL.reconnect, enabled: managed && degraded, needsWrite: true },
+    { action: 'restart', label: ACTION_LABEL.restart, enabled: isHostActionAllowed(host, 'restart'), needsWrite: true },
+    { action: 'stop', label: ACTION_LABEL.stop, enabled: isHostActionAllowed(host, 'stop'), needsWrite: true },
+    { action: 'reconnect', label: ACTION_LABEL.reconnect, enabled: isHostActionAllowed(host, 'reconnect'), needsWrite: true },
     { action: 'copy-address', label: '复制本机映射地址', enabled: Boolean(host?.mappedUrl), needsWrite: false },
     { action: 'view-manage', label: '在管理台查看', enabled: Boolean(host), needsWrite: false },
     { action: 'open-new-window', label: '在新窗口打开', enabled: Boolean(host?.mappedUrl), needsWrite: false },
@@ -218,17 +209,8 @@ export function createTabbar({
   function fillOverflowMenu(hosts) {
     clear(overflowMenu);
     for (const host of hosts) {
-      const meta = phaseMeta(host.phase);
-      const localUnavailable = host.local === true && host.phase === 'unreachable';
-      const localNoDsh = host.local === true && host.phase === 'no_dsh';
-      const hint = localUnavailable || localNoDsh ? '' : phaseHint(host);
-      const status = !isEnabled(host)
-        ? '已禁用'
-        : localUnavailable
-          ? '本机不可用'
-          : localNoDsh
-            ? '本机未安装或未配置'
-            : meta.label;
+      const hint = hostPhaseHint(host);
+      const status = hostStatusText(host, { disabled: !isHostEnabled(host) });
       overflowMenu.append(el('li', { role: 'none' }, [
         el('span', { text: `${host.name} — ${status}${hint ? ` · ${hint}` : ''}` }),
         el('button', {

@@ -21,7 +21,8 @@ import {
   vRange,
 } from '../setup-schema.js';
 import { field, input } from '../form.js';
-import { button, clear, copyText, el, phaseMeta } from '../utils.js';
+import { hostPhaseMeta } from '../host-presentation.js';
+import { button, clear, copyText, el } from '../utils.js';
 
 /** 迁移探测的递增间隔（10 §3.5：60 秒兜底后停手）。 */
 export const MIGRATION_DELAYS = Object.freeze([300, 500, 800, 1_200, 2_000, 3_000, 5_000]);
@@ -82,13 +83,9 @@ export function pendingHosts(hosts, selection) {
   return hosts.filter((h) => !PROBED.has(h.phase) && (selection[h.name]?.enabled ?? true)).map((h) => h.name);
 }
 
-/** setup 表格里的本机不可用态不能沿用 SSH/远端语义。 */
+/** 保留给既有消费者的兼容导出，展示语义统一由 host-presentation 提供。 */
 export function setupPhaseLabel(host) {
-  if (host?.local === true) {
-    if (host.phase === 'unreachable') return '本机不可用';
-    if (host.phase === 'no_dsh') return '本机未安装或未配置';
-  }
-  return phaseMeta(host?.phase).label;
+  return hostPhaseMeta(host).label;
 }
 
 /**
@@ -193,15 +190,16 @@ export function createSetupWizard({
   panel.addEventListener('submit', (ev) => ev.preventDefault());
 
   /**
-   * 现值来源：manager info 的实际端口 + `GET /api/config`（setup 模式白名单内）下发的
-   * defaults——首启时后端那份就是出厂默认表。前端不留第二份常量：拿不到就留空让用户填，
-   * 抄一份端口常量在这里，迟早和 `src/defaults.js` 对不上。
+   * 现值来源：`GET /api/config` 下发的已配置 manager 端口与 defaults；配置端口还没到时
+   * 才退回 manager info 的实际监听端口。首启时后端那份就是出厂默认表。前端不留第二份
+   * 常量：拿不到就留空让用户填，抄一份端口常量在这里迟早和 `src/defaults.js` 对不上。
    */
   function currentConfig() {
     const info = store.state.manager.info;
+    const configuredPort = store.state.manager.configuredPort;
     const defaults = store.state.defaults;
     return {
-      manager: { port: info?.port ?? null },
+      manager: { port: configuredPort ?? info?.port ?? null },
       defaults: {
         remoteWebPort: defaults?.remoteWebPort ?? null,
         localPortRange: defaults?.localPortRange ?? null,
@@ -239,11 +237,7 @@ export function createSetupWizard({
       ui.discovered = false;
       return;
     }
-    try {
-      await api.probeAll();
-    } catch (err) {
-      actions.reportError(err, '发起探测失败（可稍后在管理台重试）');
-    }
+    await actions.probeAll({ failureMessage: '发起探测失败（可稍后在管理台重试）' });
   }
 
   function onHostsChanged() {
@@ -320,7 +314,7 @@ export function createSetupWizard({
     const body = el('tbody');
     for (const host of hosts) {
       const pick = ui.selection[host.name] ?? { enabled: true, autoStart: false };
-      const meta = phaseMeta(host.phase);
+      const meta = hostPhaseMeta(host);
       const phaseLabel = setupPhaseLabel(host);
       const probing = !PROBED.has(host.phase);
       const enabledBox = input('checkbox', pick.enabled, {
@@ -451,7 +445,7 @@ export function createSetupWizard({
     }
     // 首次 setup 没有「退出到管理台」的口子（10 §5.2）；重新配置才给取消
     if (store.state.manager.setupCompleted === true) {
-      foot.append(el('a.link', { href: '#/', text: '取消，返回管理台' }));
+      foot.append(el('a.link', { href: '#/manage', text: '取消，返回管理台' }));
     }
   }
 
@@ -573,7 +567,7 @@ export function createSetupWizard({
       try {
         store.setManagerInfo(await api.managerInfo());
       } catch { /* 守卫会在下次刷新时纠正 */ }
-      actions.navigate('#/');
+      actions.navigate('#/hub');
     } catch (err) {
       actions.reportError(err, '保存配置失败');
       ui.frozen = null;
@@ -609,6 +603,9 @@ export function createSetupWizard({
   const offManager = store.on('manager:changed', () => {
     if (!root.hidden && !ui.migration) syncFoot();
   });
+  const offManagerConfig = store.on('manager-config:changed', () => {
+    if (!root.hidden && !ui.migration) render();
+  });
 
   render();
 
@@ -626,6 +623,7 @@ export function createSetupWizard({
       offHosts();
       offReset();
       offManager();
+      offManagerConfig();
     },
     // 测试用视图
     _ui: ui,
