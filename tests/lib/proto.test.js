@@ -318,9 +318,28 @@ function runSh(script, { env = {}, input = Buffer.alloc(0) } = {}) {
       stdout: Buffer.concat(stdout).toString('utf8'),
       stderr: Buffer.concat(stderr).toString('utf8'),
     }));
+    child.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE') reject(err);
+    });
     child.stdin.end(input);
   });
 }
+
+test('runSh 子进程立即退出时忽略大 stdin 的 EPIPE 并按 close resolve', async () => {
+  const result = await runSh('exit 0', {
+    input: Buffer.alloc(16 * 1024 * 1024, 0x61),
+  });
+  assert.deepEqual(result, {
+    code: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+  });
+});
+
+test('runSh 不吞 child spawn error', async () => {
+  await assert.rejects(runSh('exit 0', { env: { PATH: '' } }), { code: 'ENOENT' });
+});
 
 function checkShSyntax(script) {
   return new Promise((resolve, reject) => {
