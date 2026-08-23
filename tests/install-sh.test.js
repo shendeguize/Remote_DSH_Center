@@ -25,6 +25,24 @@ const INSTALL_SH = path.join(ROOT, 'install.sh');
 /** Windows 上没有 bash，整个文件跳过（本项目只支持 macOS / Linux）。 */
 const skip = process.platform === 'win32' ? 'install.sh 只在 macOS / Linux 上有意义' : false;
 
+function removeTempTree(target, remove = fs.rmSync) {
+  // Ubuntu CI 偶尔在 Git 刚退出后仍短暂看到变化中的 .git 目录。Node 只会为
+  // EBUSY/ENOTEMPTY/EPERM 等瞬态错误重试；5 次线性退避最多等待 1.5 秒。
+  remove(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+test('临时目录清理启用有界重试，永久错误仍上抛', () => {
+  let received;
+  removeTempTree('/unused', (target, options) => { received = { target, options }; });
+  assert.deepEqual(received, {
+    target: '/unused',
+    options: { recursive: true, force: true, maxRetries: 5, retryDelay: 100 },
+  });
+
+  const fatal = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  assert.throws(() => removeTempTree('/unused', () => { throw fatal; }), (error) => error === fatal);
+});
+
 /** 安装真正需要的最小文件集：CLI 入口 + 它的依赖 + 安装脚本。 */
 function makeOriginRepo(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -36,6 +54,10 @@ function makeOriginRepo(dir) {
   }
   const git = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
   execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'pipe' });
+  // commit 会触发可脱离到后台的 auto-maintenance；临时仓库必须在首次提交前关掉，
+  // 否则 teardown 可能与仍在写 .git/objects 的维护进程竞态。
+  git('config', '--local', 'maintenance.auto', 'false');
+  git('config', '--local', 'gc.auto', '0');
   git('add', '-A');
   git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed');
   // 真仓库有 main 与 release 两条分支，装的默认是 release。
@@ -85,7 +107,7 @@ function runInstallAsync(env, args = []) {
 
 function rig(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-install-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  t.after(() => removeTempTree(base));
   const home = path.join(base, 'home');
   const prefix = path.join(base, 'bin');
   const appDir = path.join(home, '.dsh_center', 'app');
@@ -106,6 +128,16 @@ function rig(t) {
     },
   };
 }
+
+test('临时 origin 在首次 commit 前关闭自动 maintenance 与 gc', { skip }, (t) => {
+  const { origin } = rig(t);
+  const config = (key) => execFileSync(
+    'git', ['-C', origin, 'config', '--local', '--get', key], { encoding: 'utf8' },
+  ).trim();
+
+  assert.equal(config('maintenance.auto'), 'false');
+  assert.equal(config('gc.auto'), '0');
+});
 
 test('install.sh：不指定 DSHC_REF 时装的是 release 分支', { skip }, (t) => {
   // 默认渠道是承重的：默认值被改成不存在的分支，所有新装当场失败，
