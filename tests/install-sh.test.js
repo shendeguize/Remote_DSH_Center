@@ -25,6 +25,24 @@ const INSTALL_SH = path.join(ROOT, 'install.sh');
 /** Windows 上没有 bash，整个文件跳过（本项目只支持 macOS / Linux）。 */
 const skip = process.platform === 'win32' ? 'install.sh 只在 macOS / Linux 上有意义' : false;
 
+function removeTempTree(target, remove = fs.rmSync) {
+  // Ubuntu CI 偶尔在 Git 刚退出后仍短暂看到变化中的 .git 目录。Node 只会为
+  // EBUSY/ENOTEMPTY/EPERM 等瞬态错误重试；5 次线性退避最多等待 1.5 秒。
+  remove(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+test('临时目录清理启用有界重试，永久错误仍上抛', () => {
+  let received;
+  removeTempTree('/unused', (target, options) => { received = { target, options }; });
+  assert.deepEqual(received, {
+    target: '/unused',
+    options: { recursive: true, force: true, maxRetries: 5, retryDelay: 100 },
+  });
+
+  const fatal = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  assert.throws(() => removeTempTree('/unused', () => { throw fatal; }), (error) => error === fatal);
+});
+
 /** 安装真正需要的最小文件集：CLI 入口 + 它的依赖 + 安装脚本。 */
 function makeOriginRepo(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -85,7 +103,7 @@ function runInstallAsync(env, args = []) {
 
 function rig(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-install-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  t.after(() => removeTempTree(base));
   const home = path.join(base, 'home');
   const prefix = path.join(base, 'bin');
   const appDir = path.join(home, '.dsh_center', 'app');
