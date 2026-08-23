@@ -21,12 +21,16 @@ import { PHASES } from '../src/lib/machine.js';
 import { drawerCopy } from '../src/web/components/host-drawer.js';
 import { overlayFor } from '../src/web/components/iframe-pane.js';
 import { setupPhaseLabel } from '../src/web/components/setup-wizard.js';
-import { createFakeManager, FakeApiError } from '../site/demo/demo-manager.js';
+import {
+  createFakeManager,
+  FakeApiError,
+  posixCksum as demoPosixCksum,
+} from '../site/demo/demo-manager.js';
 import { DEGRADED_ROUTES, ROUTE_IDS, dispatch, matchRoute } from '../site/demo/demo-routes.js';
 import {
   accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
   managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
-  localHostCreateResponse, syncConfigResponse,
+  localHostCreateResponse, settingsReadResponse, settingsWriteResponse, syncConfigResponse,
 } from './contract/schemas.js';
 
 /** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
@@ -89,9 +93,16 @@ function assertSyncContract(body, label) {
   return body.previewToken;
 }
 
-const req = (manager, method, pathname, { body, query } = {}) => dispatch(manager, {
-  method, pathname, body, query: new URLSearchParams(query ?? ''),
-});
+const req = (manager, method, pathname, options = {}) => {
+  const { body, query } = options;
+  return dispatch(manager, {
+    method,
+    pathname,
+    body,
+    query: new URLSearchParams(query ?? ''),
+    hasQueryDelimiter: options.hasQueryDelimiter ?? Object.hasOwn(options, 'query'),
+  });
+};
 
 // ── 本机文案覆盖 ─────────────────────────────────────────────────────────
 
@@ -126,8 +137,8 @@ test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () =>
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 16 个真实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 16, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 18 个真实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 18, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -146,6 +157,8 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['POST', '/api/hosts/gpu-a100/restart', 'restart'],
     ['POST', '/api/hosts/gpu-a100/reconnect', 'reconnect'],
     ['GET', '/api/hosts/gpu-a100/log', 'log'],
+    ['GET', '/api/hosts/gpu-a100/dsh-settings', 'dsh-settings-get'],
+    ['PUT', '/api/hosts/gpu-a100/dsh-settings', 'dsh-settings-put'],
     ['PUT', '/api/hosts/gpu-a100/config', 'host-config-put'],
     ['POST', '/api/manager/restart', 'manager-restart'],
     ['POST', '/api/manager/shutdown', 'manager-shutdown'],
@@ -158,6 +171,25 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
   // 方法不对不该误命中（真后端也是 404/405，不是「凑合执行」）
   assert.equal(matchRoute('GET', '/api/hosts/gpu-a100/start'), null);
   assert.equal(matchRoute('POST', '/api/nope'), null);
+  assert.equal(
+    matchRoute('POST', '/api/hosts/gpu-a100/start/')?.route,
+    'start',
+    '旧端点继续兼容尾斜杠',
+  );
+  for (const method of ['GET', 'PUT']) {
+    const trailing = `/api/hosts/gpu-a100/dsh-settings/`;
+    assert.equal(matchRoute(method, trailing), null, `${method} settings 尾斜杠不得 normalize`);
+    const err = grab(() => req(rig().manager, method, trailing, {
+      ...(method === 'PUT' ? { body: { content: 'synthetic\n', baseChecksum: null } } : {}),
+    }));
+    assert.equal(err.status, 404);
+    assert.equal(err.code, 'NOT_FOUND');
+  }
+
+  const malformed = grab(() => matchRoute('GET', '/api/hosts/%E0%A4%A/dsh-settings'));
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.code, 'VALIDATION');
+  assert.match(malformed.message, /URL 编码/u);
 });
 
 // ── 读端点：逐个过契约 ────────────────────────────────────────────────────
@@ -644,6 +676,210 @@ test('POST sync-config 边界：schema/语义错误不改状态，no-op 不发�
   assert.equal(gated.code, 'SETUP_REQUIRED');
 });
 
+test('demo POSIX cksum 匹配标准向量，仅作为 settings CAS 协议镜像', () => {
+  const bytes = (value) => new TextEncoder().encode(value);
+  assert.equal(demoPosixCksum(bytes('')), 4_294_967_295);
+  assert.equal(demoPosixCksum(bytes('123456789')), 930_766_865);
+  assert.equal(demoPosixCksum(bytes('abc')), 1_219_131_554);
+});
+
+test('GET/PUT dsh-settings：missing→create→read→update→stale，固定路径且内容不进 HostView/SSE', () => {
+  const r = rig();
+  const route = '/api/hosts/gpu-a100/dsh-settings';
+  const initialRevision = r.manager.revision;
+  const initialFrames = r.frames.length;
+
+  const missing = req(r.manager, 'GET', route);
+  assert.equal(missing.status, 200);
+  assertShape(settingsReadResponse, missing.json, 'demo GET missing settings');
+  assert.deepEqual(missing.json, {
+    exists: false,
+    path: '/root/.dsh/settings.yaml',
+    content: '',
+    checksum: null,
+    size: 0,
+  });
+
+  const syntheticV1 = 'provider: synthetic-v1\nkey: demo-only-alpha\n';
+  const created = req(r.manager, 'PUT', route, {
+    body: { content: syntheticV1, baseChecksum: null },
+  });
+  assert.equal(created.status, 200);
+  assertShape(settingsWriteResponse, created.json, 'demo PUT create settings');
+  assert.equal(Object.hasOwn(created.json, 'content'), false, 'PUT 成功不得回显 settings 内容');
+  const v1Bytes = new TextEncoder().encode(syntheticV1);
+  assert.deepEqual(created.json, {
+    updated: true,
+    path: '/root/.dsh/settings.yaml',
+    checksum: `cksum-v1:${demoPosixCksum(v1Bytes)}:${v1Bytes.byteLength}`,
+    size: v1Bytes.byteLength,
+  });
+
+  const loadedV1 = req(r.manager, 'GET', route);
+  assertShape(settingsReadResponse, loadedV1.json, 'demo GET created settings');
+  assert.equal(loadedV1.json.content, syntheticV1);
+  assert.equal(loadedV1.json.checksum, created.json.checksum);
+
+  const syntheticV2 = 'provider: synthetic-v2\r\nkey: demo-only-beta\r\n';
+  const updated = req(r.manager, 'PUT', route, {
+    body: { content: syntheticV2, baseChecksum: loadedV1.json.checksum },
+  });
+  assertShape(settingsWriteResponse, updated.json, 'demo PUT update settings');
+  assert.equal(Object.hasOwn(updated.json, 'content'), false);
+
+  const stale = grab(() => req(r.manager, 'PUT', route, {
+    body: { content: 'must-not-win: synthetic-stale\n', baseChecksum: loadedV1.json.checksum },
+  }));
+  assert.equal(stale.status, 409);
+  assert.equal(stale.code, 'SETTINGS_STALE');
+  assert.match(stale.message, /重新 GET/u);
+  assert.equal(req(r.manager, 'GET', route).json.content, syntheticV2, 'stale PUT 不得覆盖当前内容');
+
+  const sideChannels = JSON.stringify({
+    hosts: r.manager.hosts(),
+    config: r.manager.config(),
+    frames: r.frames,
+  });
+  for (const marker of ['demo-only-alpha', 'demo-only-beta', 'synthetic-stale']) {
+    assert.equal(sideChannels.includes(marker), false, `${marker} 不得进入 HostView/config/SSE`);
+  }
+  const demoManagerSource = fs.readFileSync(new URL('../site/demo/demo-manager.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(demoManagerSource, /(?:local|session)Storage/u, 'settings 不得进入浏览器持久存储');
+  assert.equal(r.manager.revision, initialRevision, 'settings API 不改变 revision');
+  assert.equal(r.frames.length, initialFrames, 'settings API 不产生 SSE');
+
+  r.manager.reset();
+  const afterReset = req(r.manager, 'GET', route);
+  assert.equal(afterReset.json.exists, false, 'demo reset 后 settings 应消失');
+  assert.equal(JSON.stringify(r.frames.at(-1)).includes('demo-only-'), false, 'reset snapshot 不得夹带 settings');
+});
+
+test('unreachable 主机的 settings GET/PUT 均报 SSH_UNREACHABLE，且不改变状态', () => {
+  const r = rig();
+  const route = '/api/hosts/legacy-box/dsh-settings';
+  const before = {
+    host: r.manager.getHost('legacy-box'),
+    config: r.manager.config(),
+    revision: r.manager.revision,
+    frames: structuredClone(r.frames),
+  };
+
+  const unknown = grab(() => req(r.manager, 'PUT', '/api/hosts/not-present/dsh-settings', {
+    body: { unknown: true },
+  }));
+  assert.equal(unknown.status, 404, '未知主机应优先于 body 校验');
+  assert.equal(unknown.code, 'NOT_FOUND');
+
+  const invalidBeforeTransport = [
+    [{ unknown: true }, 400, 'VALIDATION'],
+    [{ content: 'synthetic\n', baseChecksum: 'cksum-v1:01:1' }, 400, 'VALIDATION'],
+    [{ content: '\ud800', baseChecksum: null }, 400, 'VALIDATION'],
+    [{ content: 'x'.repeat(512 * 1024 + 1), baseChecksum: null }, 413, 'SETTINGS_TOO_LARGE'],
+  ];
+  for (const [body, status, code] of invalidBeforeTransport) {
+    const err = grab(() => req(r.manager, 'PUT', route, { body }));
+    assert.equal(err.status, status, `unreachable body priority: ${code}`);
+    assert.equal(err.code, code);
+  }
+
+  for (const [method, body] of [
+    ['GET', undefined],
+    ['PUT', { content: 'must-not-store: synthetic-unreachable\n', baseChecksum: null }],
+  ]) {
+    const err = grab(() => req(r.manager, method, route, { body }));
+    assert.equal(err.status, 502);
+    assert.equal(err.code, 'SSH_UNREACHABLE');
+  }
+  assert.deepEqual(r.manager.getHost('legacy-box'), before.host);
+  assert.deepEqual(r.manager.config(), before.config);
+  assert.equal(r.manager.revision, before.revision);
+  assert.deepEqual(r.frames, before.frames, '失败的 settings 请求不得产生 SSE');
+
+  r.manager.reset();
+  assert.equal(r.manager.getHost('legacy-box').phase, 'unreachable');
+  for (const method of ['GET', 'PUT']) {
+    const err = grab(() => req(r.manager, method, route, {
+      ...(method === 'PUT' ? {
+        body: { content: 'must-not-store-after-reset: synthetic\n', baseChecksum: null },
+      } : {}),
+    }));
+    assert.equal(err.status, 502);
+    assert.equal(err.code, 'SSH_UNREACHABLE');
+  }
+  assert.equal(r.manager.getHost('legacy-box').phase, 'unreachable', '失败与 reset 后 HostView 状态保持不变');
+});
+
+test('PUT dsh-settings 严格校验 UTF-8 字节上限、surrogate、CAS body 与 query', () => {
+  const { manager } = rig();
+  const route = '/api/hosts/cpu-build/dsh-settings';
+  const exact = '😀'.repeat((512 * 1024) / 4);
+  const exactWrite = req(manager, 'PUT', route, {
+    body: { content: exact, baseChecksum: null },
+  });
+  assert.equal(exactWrite.json.size, 512 * 1024, 'UTF-8 恰好 512 KiB 应允许');
+  assert.equal(exactWrite.json.path, '/home/ci/.dsh/settings.yaml');
+
+  const tooLarge = grab(() => req(manager, 'PUT', route, {
+    body: { content: `${exact}x`, baseChecksum: exactWrite.json.checksum },
+  }));
+  assert.equal(tooLarge.status, 413);
+  assert.equal(tooLarge.code, 'SETTINGS_TOO_LARGE');
+
+  for (const content of ['\ud800', '\udc00', 'ok\ud800x']) {
+    const invalid = grab(() => req(manager, 'PUT', route, {
+      body: { content, baseChecksum: exactWrite.json.checksum },
+    }));
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.code, 'VALIDATION');
+    assert.match(invalid.message, /Unicode|surrogate/u);
+  }
+
+  const invalidBodies = [
+    undefined,
+    null,
+    { content: 'synthetic\n' },
+    { content: 'synthetic\n', baseChecksum: undefined },
+    { content: 'synthetic\n', baseChecksum: 'cksum-v1:01:1' },
+    { content: 'synthetic\n', baseChecksum: exactWrite.json.checksum, unknown: true },
+    { content: 'synthetic\n', baseChecksum: exactWrite.json.checksum, path: '/tmp/settings.yaml' },
+  ];
+  for (const body of invalidBodies) {
+    const invalid = grab(() => req(manager, 'PUT', route, { body }));
+    assert.equal(invalid.status, 400, JSON.stringify(body));
+    assert.equal(invalid.code, 'VALIDATION', JSON.stringify(body));
+  }
+
+  for (const method of ['GET', 'PUT']) {
+    const invalid = grab(() => req(manager, method, route, {
+      query: 'path=%2Ftmp%2Fsettings.yaml',
+      ...(method === 'PUT' ? {
+        body: { content: 'synthetic\n', baseChecksum: exactWrite.json.checksum },
+      } : {}),
+    }));
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.code, 'VALIDATION');
+    assert.match(invalid.message, /query/u);
+  }
+  for (const rawQuery of ['?', '?&&']) {
+    for (const method of ['GET', 'PUT']) {
+      const invalid = grab(() => req(manager, method, route, {
+        query: rawQuery.slice(1),
+        hasQueryDelimiter: true,
+        ...(method === 'PUT' ? {
+          body: { content: 'synthetic\n', baseChecksum: exactWrite.json.checksum },
+        } : {}),
+      }));
+      assert.equal(invalid.status, 400, `${method} ${rawQuery}`);
+      assert.equal(invalid.code, 'VALIDATION', `${method} ${rawQuery}`);
+      assert.match(invalid.message, /query/u);
+    }
+  }
+
+  const missingHost = grab(() => req(manager, 'GET', '/api/hosts/not-present/dsh-settings'));
+  assert.equal(missingHost.status, 404);
+  assert.equal(missingHost.code, 'NOT_FOUND');
+});
+
 test('PUT /api/hosts/:name/config：回传 HostView，且拒收 localPort 与未知键', () => {
   const { manager } = rig();
   const res = req(manager, 'PUT', '/api/hosts/gpu-a100/config', { body: { autoStart: false, workdir: '~/other' } });
@@ -812,6 +1048,32 @@ test('setup 模式：门禁生效时只放行白名单，setup 提交后自动�
   const blocked = grab(() => req(r.manager, 'POST', '/api/hosts/gpu-a100/start'));
   assert.equal(blocked.status, 409);
   assert.equal(blocked.code, 'SETUP_REQUIRED');
+
+  // settings route 的 setup gate 必须早于 host decode、query 与 handler/body；
+  // 尾斜杠不匹配生产 route，因此仍由路由层给 404。
+  const settingsGateCases = [
+    ['GET', '/api/hosts/gpu-a100/dsh-settings', { query: 'path=synthetic' }],
+    ['PUT', '/api/hosts/gpu-a100/dsh-settings', {
+      query: '',
+      hasQueryDelimiter: true,
+      body: { unknown: true },
+    }],
+    ['GET', '/api/hosts/%/dsh-settings', { query: 'x=1' }],
+    ['PUT', '/api/hosts/%/dsh-settings', { body: { unknown: true } }],
+  ];
+  for (const [method, pathname, options] of settingsGateCases) {
+    const gated = grab(() => req(r.manager, method, pathname, options));
+    assert.equal(gated.status, 409, `${method} ${pathname} 应先过 setup gate`);
+    assert.equal(gated.code, 'SETUP_REQUIRED');
+  }
+  for (const method of ['GET', 'PUT']) {
+    const trailing = grab(() => req(r.manager, method, '/api/hosts/gpu-a100/dsh-settings/', {
+      query: 'x=1',
+      ...(method === 'PUT' ? { body: { unknown: true } } : {}),
+    }));
+    assert.equal(trailing.status, 404, `${method} settings 尾斜杠不应进入 setup gate`);
+    assert.equal(trailing.code, 'NOT_FOUND');
+  }
 
   // 白名单内可用：主机清单（SSH + 恰好一台只驻内存的本机候选）+ 全量探测
   const hosts = req(r.manager, 'GET', '/api/hosts');

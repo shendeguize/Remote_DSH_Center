@@ -254,6 +254,139 @@ test('saveHostConfig 成功：提交 patch、落服务端 HostView 并提示成�
   assert.equal(h.store.state.toasts.at(-1).summary, 'gpu-1 配置已保存');
 });
 
+test('saveHostConfig 迟到响应：snapshot 删除主机后不得复活或误报成功', async (t) => {
+  let release;
+  const stale = hostView({
+    config: { ...hostView().config, workdir: '/srv/stale-response' },
+  });
+  const gate = new Promise((resolve) => {
+    release = () => resolve(res(200, { host: stale }));
+  });
+  const h = harness(t, { responder: () => gate });
+  seed(h.store);
+
+  const request = h.actions.saveHostConfig('gpu-1', { workdir: '/srv/stale-response' });
+  h.store.applySnapshot({ revision: 2, hosts: [], logs: [] });
+  release();
+  const out = await request;
+
+  assert.deepEqual(out, { host: stale }, 'HTTP 成功事实仍返回给调用方');
+  assert.equal(h.store.getHost('gpu-1'), null, '迟到 action response 不得复活 snapshot 已删除主机');
+  assert.equal(h.store.state.toasts.some((toast) => toast.level === 'success'), false,
+    '主机已删除时不能再报“配置已保存”');
+});
+
+test('saveHostConfig 迟到响应：较新 SSE 保持权威，不被旧 response 覆盖', async (t) => {
+  let release;
+  const stale = hostView({
+    config: { ...hostView().config, workdir: '/srv/stale-response' },
+  });
+  const newest = hostView({
+    config: { ...hostView().config, workdir: '/srv/newest-sse' },
+  });
+  const gate = new Promise((resolve) => {
+    release = () => resolve(res(200, { host: stale }));
+  });
+  const h = harness(t, { responder: () => gate });
+  seed(h.store);
+
+  const request = h.actions.saveHostConfig('gpu-1', { workdir: '/srv/stale-response' });
+  h.store.applyHostChanged({ revision: 2, host: newest });
+  release();
+  await request;
+
+  assert.equal(h.store.getHost('gpu-1').config.workdir, '/srv/newest-sse');
+  assert.equal(h.store.state.toasts.at(-1).summary, 'gpu-1 配置已保存');
+});
+
+test('运行中保存新 workdir：不重启实例，并明确提示 manager 重启无效', async (t) => {
+  const current = hostView({
+    phase: 'running',
+    config: { ...hostView().config, workdir: '/srv/old' },
+    web: {
+      pid: 42,
+      port: 8899,
+      startedByUs: true,
+      startedAt: '2026-08-23T00:00:00.000Z',
+      workdir: '/srv/old',
+    },
+  });
+  const updated = {
+    ...current,
+    config: { ...current.config, workdir: '/srv/new' },
+  };
+  const h = harness(t, { responder: () => res(200, { host: updated }) });
+  h.store.applySnapshot({ revision: 1, hosts: [current], logs: [] });
+
+  await h.actions.saveHostConfig('gpu-1', { workdir: '/srv/new' });
+
+  assert.deepEqual(h.calls.map((call) => [call.method, call.path]), [
+    ['PUT', '/api/hosts/gpu-1/config'],
+  ], '保存配置不得暗中追加主机或 manager 重启');
+  assert.equal(h.store.getHost('gpu-1').web.pid, 42);
+  assert.equal(h.store.getHost('gpu-1').web.workdir, '/srv/old');
+  assert.equal(h.store.getHost('gpu-1').config.workdir, '/srv/new');
+  assert.equal(
+    h.store.state.toasts.at(-1).summary,
+    'gpu-1 配置已保存；需重启此主机的 dsh web（重启 manager 无效）',
+  );
+});
+
+test('starting 保存新 workdir：无论 web 是否已出现都提示需重启主机实例', async (t) => {
+  const startingWeb = {
+    pid: 43,
+    port: 8899,
+    startedByUs: true,
+    startedAt: '2026-08-23T00:00:00.000Z',
+    workdir: '/srv/old',
+  };
+  for (const web of [null, startingWeb]) {
+    await t.test(web ? 'web 已出现' : 'web 尚未出现', async (st) => {
+      const current = hostView({
+        phase: 'starting',
+        config: { ...hostView().config, workdir: '/srv/old' },
+        web,
+      });
+      const updated = {
+        ...current,
+        config: { ...current.config, workdir: '/srv/new' },
+      };
+      const h = harness(st, { responder: () => res(200, { host: updated }) });
+      h.store.applySnapshot({ revision: 1, hosts: [current], logs: [] });
+
+      await h.actions.saveHostConfig('gpu-1', { workdir: '/srv/new' });
+
+      assert.equal(
+        h.store.state.toasts.at(-1).summary,
+        'gpu-1 配置已保存；需重启此主机的 dsh web（重启 manager 无效）',
+      );
+    });
+  }
+});
+
+test('starting 保存 workdir 时流程已回落 ready/no_dsh：不误提示重启', async (t) => {
+  for (const phase of ['ready', 'no_dsh']) {
+    await t.test(phase, async (st) => {
+      const current = hostView({
+        phase: 'starting',
+        config: { ...hostView().config, workdir: '/srv/old' },
+        web: null,
+      });
+      const updated = {
+        ...current,
+        phase,
+        config: { ...current.config, workdir: '/srv/new' },
+      };
+      const h = harness(st, { responder: () => res(200, { host: updated }) });
+      h.store.applySnapshot({ revision: 1, hosts: [current], logs: [] });
+
+      await h.actions.saveHostConfig('gpu-1', { workdir: '/srv/new' });
+
+      assert.equal(h.store.state.toasts.at(-1).summary, 'gpu-1 配置已保存');
+    });
+  }
+});
+
 test('saveHostConfig API 失败：保留原 host 并显示错误 toast', async (t) => {
   const h = harness(t, {
     responder: () => res(400, {
@@ -359,6 +492,47 @@ test('批量配置应用：转发 preview token，无 SSE 时用成功响应更�
   assert.equal(h.store.state.revision, 1, '无 revision 的动作响应不得伪造或推进 revision');
   assert.equal(h.store.state.toasts.at(-1).level, 'success');
   assert.equal(h.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
+});
+
+test('批量同步运行中目标：toast 点明需重启对应 dsh web，manager 重启无效', async (t) => {
+  const original = hostView({
+    name: 'gpu-2',
+    phase: 'running',
+    config: { ...hostView().config, workdir: '/srv/old' },
+    web: {
+      pid: 52,
+      port: 8899,
+      startedByUs: true,
+      startedAt: '2026-08-23T00:00:00.000Z',
+      workdir: '/srv/old',
+    },
+  });
+  const updated = {
+    ...original,
+    config: { ...original.config, workdir: '/srv/shared' },
+  };
+  const h = harness(t, {
+    responder: () => res(200, {
+      source: 'gpu-1',
+      dryRun: false,
+      targets: [{ name: 'gpu-2', changed: true, changedFields: ['workdir'] }],
+      applied: ['gpu-2'],
+      hosts: [updated],
+    }),
+  });
+  h.store.applySnapshot({ revision: 1, hosts: [hostView(), original], logs: [] });
+
+  await h.actions.syncConfig({
+    source: 'gpu-1',
+    targets: ['gpu-2'],
+    dryRun: false,
+    previewToken: 'v1.preview-token',
+  });
+
+  const toast = h.store.state.toasts.at(-1);
+  assert.equal(toast.summary, '已同步 1 台主机配置；运行中目标需重启 dsh web（重启 manager 无效）');
+  assert.equal(toast.detail, 'gpu-2：需重启此主机的 dsh web（重启 manager 无效）');
+  assert.equal(h.store.getHost('gpu-2').web.pid, 52, '同步配置不得重启运行实例');
 });
 
 test('批量配置应用迟到响应：请求后 snapshot 删除目标时不得复活幽灵主机', async (t) => {
@@ -588,6 +762,11 @@ test('manager 重启取消：不发请求也不创建 pending', async (t) => {
   assert.equal(out, null);
   assert.equal(h.calls.length, 0);
   assert.equal(h.confirms.length, 1);
+  const confirmation = h.confirms[0].lines.join(' ');
+  assert.match(confirmation, /存活的受管实例.*复核接管/);
+  assert.match(confirmation, /远端重建隧道、本机重新登记直连/);
+  assert.match(confirmation, /ready.*autoStart.*才会拉起/);
+  assert.doesNotMatch(confirmation, /按 autoStart 重建/);
   assert.equal(h.store.isPending('manager:restart'), false);
 });
 
@@ -665,6 +844,452 @@ test('日志响应读取抛普通 Error：返回 null 并保留诊断堆栈', as
   assert.equal(toast.level, 'error');
   assert.equal(toast.summary, 'gpu-1 日志拉取失败：日志流解码失败');
   assert.match(toast.detail, /Error: 日志流解码失败/);
+});
+
+test('settings GET：编码主机名并原样返回 missing/existing，成功不 toast', async (t) => {
+  const missing = {
+    exists: false,
+    path: '/home/me/.dsh/settings.yaml',
+    content: '',
+    checksum: null,
+    size: 0,
+  };
+  const existing = {
+    exists: true,
+    path: '/home/me/.dsh/settings.yaml',
+    content: 'provider: synthetic\n',
+    checksum: 'cksum-v1:123:20',
+    size: 20,
+  };
+  let attempt = 0;
+  const h = harness(t, {
+    responder: () => res(200, attempt++ === 0 ? missing : existing),
+  });
+
+  assert.deepEqual(await h.actions.loadDshSettings('gpu/a b'), missing);
+  assert.deepEqual(await h.actions.loadDshSettings('gpu/a b'), existing);
+  assert.deepEqual(h.calls, [
+    {
+      path: '/api/hosts/gpu%2Fa%20b/dsh-settings',
+      method: 'GET',
+      body: null,
+    },
+    {
+      path: '/api/hosts/gpu%2Fa%20b/dsh-settings',
+      method: 'GET',
+      body: null,
+    },
+  ]);
+  assert.equal(h.store.isPending('settings:load', 'gpu/a b'), false);
+  assert.deepEqual(h.store.state.toasts, []);
+  assert.equal(h.store.state.revision, -1, 'settings GET 不得冒充 host/store/SSE 更新');
+});
+
+test('settings PUT：只提交 content/baseChecksum，同步结算且不发含糊成功 toast', async (t) => {
+  const content = 'token: save-secret\n';
+  const saved = {
+    updated: true,
+    path: '/home/me/.dsh/settings.yaml',
+    checksum: 'cksum-v1:456:19',
+    size: 19,
+  };
+  const h = harness(t, { responder: () => res(200, saved) });
+
+  const out = await h.actions.saveDshSettings('gpu/a b', {
+    content,
+    baseChecksum: 'cksum-v1:123:18',
+  });
+
+  assert.deepEqual(h.calls, [{
+    path: '/api/hosts/gpu%2Fa%20b/dsh-settings',
+    method: 'PUT',
+    body: {
+      content,
+      baseChecksum: 'cksum-v1:123:18',
+    },
+  }]);
+  assert.deepEqual(out, saved);
+  assert.equal(Object.hasOwn(out, 'content'), false, '保存响应不回显 settings 正文');
+  assert.equal(h.store.isPending('settings:save', 'gpu/a b'), false);
+  assert.deepEqual(h.store.state.toasts, [],
+    '抽屉要区分“提交时版本已保存”与“当前仍有草稿”，动作层不能抢先报笼统成功');
+});
+
+test('settings load/save 使用独立 pending，同类重复调用不重复提交', async (t) => {
+  const releases = new Map();
+  const h = harness(t, {
+    responder: ({ method }) => new Promise((resolve) => {
+      releases.set(method, resolve);
+    }),
+  });
+
+  const loading = h.actions.loadDshSettings('gpu-1');
+  const saving = h.actions.saveDshSettings('gpu-1', {
+    content: 'pending-secret\n',
+    baseChecksum: null,
+  });
+  assert.equal(h.store.isPending('settings:load', 'gpu-1'), true);
+  assert.equal(h.store.isPending('settings:save', 'gpu-1'), true);
+
+  assert.equal(await h.actions.loadDshSettings('gpu-1'), null);
+  assert.equal(await h.actions.saveDshSettings('gpu-1', {
+    content: 'must-not-submit\n',
+    baseChecksum: null,
+  }), null);
+  assert.equal(h.calls.length, 2);
+
+  releases.get('GET')(res(200, {
+    exists: false,
+    path: '/home/me/.dsh/settings.yaml',
+    content: '',
+    checksum: null,
+    size: 0,
+  }));
+  releases.get('PUT')(res(200, {
+    updated: true,
+    path: '/home/me/.dsh/settings.yaml',
+    checksum: 'cksum-v1:1:15',
+    size: 15,
+  }));
+  await Promise.all([loading, saving]);
+  assert.equal(h.store.isPending('settings:load', 'gpu-1'), false);
+  assert.equal(h.store.isPending('settings:save', 'gpu-1'), false);
+});
+
+test('settings GET 在断线/resync 仍尝试 REST，PUT 保持 canWrite 阻断', async (t) => {
+  for (const mode of ['reconnecting', 'resyncing']) {
+    await t.test(mode, async (st) => {
+      const loadedResponse = {
+        exists: false,
+        path: '/home/me/.dsh/settings.yaml',
+        content: '',
+        checksum: null,
+        size: 0,
+      };
+      const h = harness(st, { responder: () => res(200, loadedResponse) });
+      if (mode === 'reconnecting') h.store.setConnection({ sse: 'reconnecting' });
+      else h.store.setConnection({ sse: 'open', resyncing: true });
+      const errors = [];
+
+      const loaded = await h.actions.loadDshSettings('gpu-1', {
+        onError: (error) => errors.push(error),
+      });
+      const saved = await h.actions.saveDshSettings('gpu-1', {
+        content: `blocked-${mode}-secret\n`,
+        baseChecksum: null,
+      }, {
+        onError: (error) => errors.push(error),
+      });
+
+      assert.deepEqual(loaded, loadedResponse);
+      assert.equal(saved, null);
+      assert.deepEqual(h.calls.map((call) => [call.method, call.path]), [
+        ['GET', '/api/hosts/gpu-1/dsh-settings'],
+      ]);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].level, 'warn');
+      assert.match(errors[0].summary, /失联/u);
+      assert.equal(errors[0].detail, null);
+      assert.equal(errors[0].code, null);
+      assert.equal(errors[0].status, null);
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        new RegExp(`blocked-${mode}-secret`, 'u'),
+      );
+    });
+  }
+});
+
+test('settings API 已知错误使用本地固定文案，并保留 code/status', async (t) => {
+  const cases = [
+    [409, 'SETTINGS_STALE', 'dsh 配置文件已变化，请重新加载后再保存'],
+    [413, 'SETTINGS_TOO_LARGE', 'dsh 配置文件超过大小限制，无法处理'],
+    [501, 'SETTINGS_UNSUPPORTED', '该主机不支持安全编辑 dsh 配置文件'],
+    [422, 'SETTINGS_INVALID_UTF8', 'dsh 配置文件不是有效的 UTF-8 文本'],
+    [500, 'SETTINGS_READ_FAILED', '读取 dsh 配置文件失败，请稍后重试'],
+    [500, 'SETTINGS_WRITE_FAILED', '保存 dsh 配置文件失败，请重新加载确认结果'],
+    [409, 'SETTINGS_BUSY', '该主机已有 dsh 配置操作正在进行，请稍后重试'],
+    [504, 'SSH_TIMEOUT', '保存结果未知，请重新加载后确认'],
+    [502, 'SSH_UNREACHABLE', '保存结果未知，请重新加载后确认'],
+    [504, 'LOCAL_TIMEOUT', '保存结果未知，请重新加载后确认'],
+    [500, 'LOCAL_EXEC_FAILED', '保存结果未知，请重新加载后确认'],
+  ];
+  for (const [status, code, summary] of cases) {
+    await t.test(code, async (st) => {
+      const secret = `malicious-${code}-secret`;
+      const h = harness(st, {
+        responder: () => res(status, {
+          error: `server error ${secret}`,
+          code,
+          detail: `server detail ${secret}`,
+        }),
+      });
+      const errors = [];
+      const out = await h.actions.saveDshSettings('gpu-1', {
+        content: `request-${secret}\n`,
+        baseChecksum: null,
+      }, {
+        onError: (error) => errors.push(error),
+      });
+
+      assert.equal(out, null);
+      assert.equal(h.store.isPending('settings:save', 'gpu-1'), false);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].code, code);
+      assert.equal(errors[0].status, status);
+      assert.equal(errors[0].summary, summary);
+      assert.equal(errors[0].detail, null);
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        new RegExp(secret, 'u'),
+      );
+    });
+  }
+});
+
+test('settings API 未知 JSON/plain 错误只保留安全 code/status 与 HTTP 文案', async (t) => {
+  for (const kind of ['json', 'plain']) {
+    await t.test(kind, async (st) => {
+      const secret = `malicious-${kind}-500-secret`;
+      const h = harness(st, {
+        responder: () => (kind === 'json'
+          ? res(500, {
+            error: `server error ${secret}`,
+            code: `UNKNOWN_SETTINGS_FAILURE_${secret}`,
+            detail: `server detail ${secret}`,
+          })
+          : res(500, undefined, { text: `plain server failure ${secret}` })),
+      });
+      const errors = [];
+
+      const out = await h.actions.loadDshSettings('gpu-1', {
+        onError: (error) => errors.push(error),
+      });
+
+      assert.equal(out, null);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].status, 500);
+      assert.equal(errors[0].code, 'INTERNAL');
+      assert.equal(errors[0].summary, 'dsh 配置请求失败（HTTP 500）');
+      assert.equal(errors[0].detail, null);
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        new RegExp(secret, 'u'),
+      );
+    });
+  }
+});
+
+test('settings transport 失败走 onError 的 ApiError code/status', async (t) => {
+  const secret = 'transport-error-unique-secret';
+  const h = harness(t, {
+    responder: () => {
+      throw new TypeError(`fetch failed ${secret}`);
+    },
+  });
+  h.store.setConnection({ sse: 'reconnecting' });
+  const errors = [];
+
+  const out = await h.actions.loadDshSettings('gpu-1', {
+    onError: (error) => errors.push(error),
+  });
+
+  assert.equal(out, null);
+  assert.equal(h.store.isPending('settings:load', 'gpu-1'), false);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, 'INTERNAL');
+  assert.equal(errors[0].status, 0);
+  assert.equal(errors[0].summary, 'dsh 配置请求失败，请稍后重试');
+  assert.equal(errors[0].detail, null);
+  assert.deepEqual(h.calls.map((call) => [call.method, call.path]), [
+    ['GET', '/api/hosts/gpu-1/dsh-settings'],
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify({ errors, toasts: h.store.state.toasts }),
+    new RegExp(secret, 'u'),
+  );
+});
+
+test('settings GET/PUT 都使用 30 秒请求超时', async (t) => {
+  for (const action of ['load', 'save']) {
+    await t.test(action, async (st) => {
+      st.mock.timers.enable({ apis: ['setTimeout'] });
+      const original = globalThis.fetch;
+      let aborted = false;
+      globalThis.fetch = async (path, init) => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          aborted = true;
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+      st.after(() => {
+        globalThis.fetch = original;
+      });
+
+      const store = createStore();
+      store.setConnection({ sse: 'open' });
+      const actions = createActions({ store, confirm: async () => true, navigate: () => {} });
+      const errors = [];
+      const onError = (error) => errors.push(error);
+      const request = action === 'load'
+        ? actions.loadDshSettings('gpu-1', { onError })
+        : actions.saveDshSettings('gpu-1', {
+          content: 'timeout-secret\n',
+          baseChecksum: null,
+        }, { onError });
+
+      st.mock.timers.tick(29_999);
+      assert.equal(aborted, false);
+      st.mock.timers.tick(1);
+      assert.equal(aborted, true);
+      assert.equal(await request, null);
+      assert.equal(errors[0].code, 'SSH_TIMEOUT');
+      assert.equal(errors[0].status, 0);
+      assert.equal(
+        errors[0].summary,
+        action === 'save'
+          ? '保存结果未知，请重新加载后确认'
+          : 'dsh 配置请求超时，请稍后重试',
+      );
+    });
+  }
+});
+
+test('settings PUT transport/正文读取失败统一提示保存结果未知', async (t) => {
+  for (const stage of ['transport', 'body']) {
+    await t.test(stage, async (st) => {
+      const secret = `save-${stage}-failure-secret`;
+      const h = harness(st, {
+        responder: () => {
+          if (stage === 'transport') throw new TypeError(`fetch failed ${secret}`);
+          return {
+            ok: true,
+            status: 200,
+            text: async () => {
+              throw new Error(`body read failed ${secret}`);
+            },
+          };
+        },
+      });
+      const errors = [];
+
+      const out = await h.actions.saveDshSettings('gpu-1', {
+        content: `request-${secret}\n`,
+        baseChecksum: null,
+      }, {
+        onError: (error) => errors.push(error),
+      });
+
+      assert.equal(out, null);
+      assert.equal(h.store.isPending('settings:save', 'gpu-1'), false);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].code, 'INTERNAL');
+      assert.equal(errors[0].status, 0);
+      assert.equal(errors[0].summary, '保存结果未知，请重新加载后确认');
+      assert.equal(errors[0].detail, null);
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        new RegExp(secret, 'u'),
+      );
+    });
+  }
+});
+
+test('settings timeout 覆盖 headers 后的响应正文读取，并最终释放 pending', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const original = globalThis.fetch;
+  let bodyReadStarted = false;
+  let bodyAborted = false;
+  globalThis.fetch = async (path, init) => ({
+    ok: true,
+    status: 200,
+    text: async () => new Promise((resolve, reject) => {
+      bodyReadStarted = true;
+      init.signal.addEventListener('abort', () => {
+        bodyAborted = true;
+        const error = new Error('body aborted');
+        error.name = 'AbortError';
+        reject(error);
+      }, { once: true });
+    }),
+  });
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  const store = createStore();
+  store.setConnection({ sse: 'open' });
+  const actions = createActions({ store, confirm: async () => true, navigate: () => {} });
+  const errors = [];
+  const request = actions.loadDshSettings('gpu-1', {
+    onError: (error) => errors.push(error),
+  });
+  await Promise.resolve();
+
+  assert.equal(bodyReadStarted, true);
+  assert.equal(store.isPending('settings:load', 'gpu-1'), true);
+  t.mock.timers.tick(29_999);
+  assert.equal(bodyAborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(bodyAborted, true);
+  assert.equal(await request, null);
+  assert.equal(store.isPending('settings:load', 'gpu-1'), false);
+  assert.equal(errors[0].code, 'SSH_TIMEOUT');
+  assert.equal(errors[0].status, 0);
+});
+
+test('settings 成功响应 JSON 畸形时 PROTO_PARSE 不把原文/content 放入呈现', async (t) => {
+  for (const action of ['load', 'save']) {
+    await t.test(action, async (st) => {
+      const secret = `malformed-${action}-secret`;
+      const h = harness(st, {
+        responder: () => res(200, undefined, {
+          text: `{"content":"${secret}"`,
+        }),
+      });
+      const errors = [];
+      const onError = (error) => errors.push(error);
+      const out = action === 'load'
+        ? await h.actions.loadDshSettings('gpu-1', { onError })
+        : await h.actions.saveDshSettings('gpu-1', {
+          content: `${secret}-request`,
+          baseChecksum: null,
+        }, { onError });
+
+      assert.equal(out, null);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].code, 'PROTO_PARSE');
+      assert.equal(errors[0].status, 200);
+      assert.equal(errors[0].detail, null);
+      assert.equal(
+        errors[0].summary,
+        action === 'save'
+          ? '保存结果未知，请重新加载后确认'
+          : '响应不是合法 JSON',
+      );
+      assert.doesNotMatch(
+        JSON.stringify({ errors, toasts: h.store.state.toasts }),
+        new RegExp(secret, 'u'),
+      );
+    });
+  }
+});
+
+test('settings 解析脱敏不改变其他 API 的既有 PROTO_PARSE detail', async (t) => {
+  const raw = '{"diagnostic":"legacy-detail"';
+  const h = harness(t, {
+    responder: () => res(200, undefined, { text: raw }),
+  });
+  seed(h.store);
+
+  const out = await h.actions.hostAction('probe', 'gpu-1');
+
+  assert.equal(out, null);
+  const toast = h.store.state.toasts.at(-1);
+  assert.equal(toast.summary, '响应不是合法 JSON');
+  assert.equal(toast.detail, raw);
 });
 
 test('打开主机走路由，不存在则提示', async (t) => {

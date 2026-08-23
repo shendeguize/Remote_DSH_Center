@@ -36,14 +36,23 @@ function errorResponse(err) {
 function createApiRouter(manager) {
   return async function route(input, init = {}) {
     const method = (init.method ?? 'GET').toUpperCase();
-    const url = new URL(typeof input === 'string' ? input : input.url, globalThis.location.href);
+    const requestUrl = String(typeof input === 'string' ? input : input.url);
+    const queryDelimiter = requestUrl.indexOf('?');
+    const fragmentDelimiter = requestUrl.indexOf('#');
+    const hasQueryDelimiter = queryDelimiter !== -1
+      && (fragmentDelimiter === -1 || queryDelimiter < fragmentDelimiter);
+    const url = new URL(requestUrl, globalThis.location.href);
     const body = init.body === undefined || init.body === null ? undefined : JSON.parse(init.body);
 
     await sleep(LATENCY_MS);
 
     try {
       const res = dispatch(manager, {
-        method, pathname: url.pathname, query: url.searchParams, body,
+        method,
+        pathname: url.pathname,
+        query: url.searchParams,
+        hasQueryDelimiter,
+        body,
       });
       if (res.text !== undefined) return new Response(res.text, { status: res.status, headers: TEXT_HEADERS });
       return jsonResponse(res.json, res.status);

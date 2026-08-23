@@ -5,6 +5,48 @@
 
 const JSON_HEADERS = { 'content-type': 'application/json' };
 const DEFAULT_TIMEOUT_MS = 15_000;
+const SETTINGS_TIMEOUT_MS = 30_000;
+const SETTINGS_MUTATION_UNKNOWN_MESSAGE = '保存结果未知，请重新加载后确认';
+const SETTINGS_ERROR_MESSAGES = Object.freeze({
+  SETTINGS_STALE: 'dsh 配置文件已变化，请重新加载后再保存',
+  SETTINGS_TOO_LARGE: 'dsh 配置文件超过大小限制，无法处理',
+  SETTINGS_UNSUPPORTED: '该主机不支持安全编辑 dsh 配置文件',
+  SETTINGS_INVALID_UTF8: 'dsh 配置文件不是有效的 UTF-8 文本',
+  SETTINGS_READ_FAILED: '读取 dsh 配置文件失败，请稍后重试',
+  SETTINGS_WRITE_FAILED: '保存 dsh 配置文件失败，请重新加载确认结果',
+  SETTINGS_BUSY: '该主机已有 dsh 配置操作正在进行，请稍后重试',
+  SSH_TIMEOUT: 'dsh 配置请求超时，请稍后重试',
+  SSH_UNREACHABLE: '无法连接目标主机，请稍后重试',
+  LOCAL_TIMEOUT: '本机 dsh 配置请求超时，请稍后重试',
+  LOCAL_EXEC_FAILED: '本机 dsh 配置操作失败，请稍后重试',
+  LOCAL_COPY_FAILED: '本机 dsh 配置传输失败，请稍后重试',
+  NOT_FOUND: '目标主机不存在或已被删除',
+  VALIDATION: 'dsh 配置请求无效，请检查后重试',
+  PROTO_PARSE: 'dsh 配置响应无法解析，请重试',
+  INTERNAL: 'dsh 配置请求失败，请稍后重试',
+});
+const SETTINGS_MUTATION_UNCERTAIN_CODES = new Set([
+  'SSH_TIMEOUT',
+  'SSH_UNREACHABLE',
+  'LOCAL_TIMEOUT',
+  'LOCAL_EXEC_FAILED',
+  'LOCAL_COPY_FAILED',
+  'PROTO_PARSE',
+  'INTERNAL',
+]);
+
+function safeSettingsHttpError(rawCode, status, mutationResultUnknown) {
+  const known = typeof rawCode === 'string'
+    && Object.hasOwn(SETTINGS_ERROR_MESSAGES, rawCode);
+  const code = known ? rawCode : 'INTERNAL';
+  const message = mutationResultUnknown
+    && (!known || SETTINGS_MUTATION_UNCERTAIN_CODES.has(code))
+    ? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+    : (known
+      ? SETTINGS_ERROR_MESSAGES[code]
+      : `dsh 配置请求失败（HTTP ${status}）`);
+  return { code, message };
+}
 
 export class ApiError extends Error {
   constructor({ status, code, message, detail }) {
@@ -16,10 +58,18 @@ export class ApiError extends Error {
   }
 }
 
-async function call(method, path, { body, timeoutMs = DEFAULT_TIMEOUT_MS, as = 'json' } = {}) {
+async function call(method, path, {
+  body,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  as = 'json',
+  redactParseError = false,
+  redactErrorResponse = false,
+  mutationResultUnknown = false,
+} = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res;
+  let text;
   try {
     res = await fetch(path, {
       method,
@@ -28,19 +78,24 @@ async function call(method, path, { body, timeoutMs = DEFAULT_TIMEOUT_MS, as = '
       signal: controller.signal,
       cache: 'no-store',
     });
+    text = await res.text();
   } catch (err) {
-    clearTimeout(timer);
-    const aborted = err.name === 'AbortError';
+    const aborted = err?.name === 'AbortError' || controller.signal.aborted;
+    if (!aborted && res && !redactErrorResponse) throw err;
     throw new ApiError({
       status: 0,
       code: aborted ? 'SSH_TIMEOUT' : 'INTERNAL',
-      message: aborted ? `请求超时（${method} ${path}）` : `无法连接 manager：${err.message}`,
+      message: mutationResultUnknown
+        ? SETTINGS_MUTATION_UNKNOWN_MESSAGE
+        : redactErrorResponse
+        ? (aborted ? SETTINGS_ERROR_MESSAGES.SSH_TIMEOUT : SETTINGS_ERROR_MESSAGES.INTERNAL)
+        : (aborted ? `请求超时（${method} ${path}）` : `无法连接 manager：${err.message}`),
       detail: null,
     });
+  } finally {
+    clearTimeout(timer);
   }
-  clearTimeout(timer);
 
-  const text = await res.text();
   if (!res.ok) {
     let payload = null;
     try {
@@ -48,20 +103,39 @@ async function call(method, path, { body, timeoutMs = DEFAULT_TIMEOUT_MS, as = '
     } catch {
       payload = null;
     }
+    const rawCode = typeof payload?.code === 'string' ? payload.code : undefined;
+    const safeError = redactErrorResponse
+      ? safeSettingsHttpError(rawCode, res.status, mutationResultUnknown)
+      : null;
     throw new ApiError({
       status: res.status,
-      code: payload?.code,
-      message: payload?.error ?? `${method} ${path} 失败（HTTP ${res.status}）`,
-      detail: payload?.detail ?? (text || null),
+      code: safeError?.code ?? rawCode,
+      message: redactErrorResponse
+        ? safeError.message
+        : (payload?.error ?? `${method} ${path} 失败（HTTP ${res.status}）`),
+      detail: redactErrorResponse ? null : (payload?.detail ?? (text || null)),
     });
   }
 
   if (as === 'text') return text;
-  if (text === '') return null;
+  if (text === '') {
+    if (!redactParseError) return null;
+    throw new ApiError({
+      status: res.status,
+      code: 'PROTO_PARSE',
+      message: mutationResultUnknown ? SETTINGS_MUTATION_UNKNOWN_MESSAGE : '响应不是合法 JSON',
+      detail: null,
+    });
+  }
   try {
     return JSON.parse(text);
   } catch {
-    throw new ApiError({ status: res.status, code: 'PROTO_PARSE', message: '响应不是合法 JSON', detail: text });
+    throw new ApiError({
+      status: res.status,
+      code: 'PROTO_PARSE',
+      message: mutationResultUnknown ? SETTINGS_MUTATION_UNKNOWN_MESSAGE : '响应不是合法 JSON',
+      detail: redactParseError ? null : text,
+    });
   }
 }
 
@@ -93,6 +167,22 @@ export const api = {
   }),
 
   hostLog: (name, lines = 200) => call('GET', `/api/hosts/${enc(name)}/log?lines=${lines}`, { as: 'text', timeoutMs: 30_000 }),
+  getDshSettings: (name) => call('GET', `/api/hosts/${enc(name)}/dsh-settings`, {
+    timeoutMs: SETTINGS_TIMEOUT_MS,
+    redactParseError: true,
+    redactErrorResponse: true,
+  }),
+  saveDshSettings: (name, { content, baseChecksum }) => call(
+    'PUT',
+    `/api/hosts/${enc(name)}/dsh-settings`,
+    {
+      body: { content, baseChecksum },
+      timeoutMs: SETTINGS_TIMEOUT_MS,
+      redactParseError: true,
+      redactErrorResponse: true,
+      mutationResultUnknown: true,
+    },
+  ),
   saveHostConfig: (name, patch) => call('PUT', `/api/hosts/${enc(name)}/config`, { body: patch }),
   saveDefaults: (patch) => call('PUT', '/api/config/defaults', { body: patch }),
   reload: () => call('POST', '/api/reload'),

@@ -20,10 +20,21 @@ import {
   parseWorkdir,
   validatePatches,
 } from '../form.js';
+import { HOST_WEB_RESTART_NOTICE } from '../actions.js';
 import { hostMappingSummary, hostPhaseMeta } from '../host-presentation.js';
 
 const LOG_LINES = 200;
+const REMOTE_CONFIG_NOTE = 'dsh web 的“打开配置文件”发生在目标主机；目标主机没有桌面环境时，请使用下方“dsh 配置文件”编辑器，无需通过 SSH。';
 const DRAFT_FIELDS = ['enabled', 'remoteWebPort', 'workdir', 'env', 'extraArgs', 'patches'];
+const SETTINGS_UNKNOWN_CODES = new Set([
+  'SSH_TIMEOUT',
+  'SSH_UNREACHABLE',
+  'LOCAL_TIMEOUT',
+  'LOCAL_EXEC_FAILED',
+  'LOCAL_COPY_FAILED',
+  'PROTO_PARSE',
+  'INTERNAL',
+]);
 const DRAFT_FIELD_LABELS = {
   enabled: '纳管状态',
   remoteWebPort: 'web 端口',
@@ -154,12 +165,13 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const enabled = field('纳管此主机', input('checkbox', false));
   const remotePort = field('远端 web 端口', input('number', '', { min: '1', max: '65535', placeholder: '留空 = 用全局默认' }));
   const workdir = field(
-    '启动目录（工作区根）',
+    '启动目录（进程 CWD）',
     input('text', '', { placeholder: '~（家目录，默认）', spellcheck: 'false' }),
-    { hint: 'dsh 以此目录为默认 workspace 根，并从这里加载 AGENTS.md' },
+    { hint: '这是 dsh web 进程的 CWD；新会话未显式选择 Workspace 时会回落到这里。它不会自动登记 Workspace，也不会替换浏览器恢复的历史 Session。' },
   );
-  const workdirBadge = el('span.pending-badge', { hidden: true, text: '重启后生效' });
+  const workdirBadge = el('span.pending-badge', { hidden: true, text: HOST_WEB_RESTART_NOTICE });
   workdir.root.querySelector('label').append(workdirBadge);
+  const remoteConfigNote = el('p.section-note.remote-config-note', { hidden: true });
   const env = field('环境变量（每行 KEY=VALUE）', input('textarea', '', { rows: '4', spellcheck: 'false' }));
   const extraArgs = field('追加参数（每行一项，不做 shell 拆词）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
   const patches = field('Patch 文件（每行一个本机绝对路径）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
@@ -170,6 +182,71 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   const probeDl = el('dl.kv');
   const probeTitle = el('h3', { text: '探测详情' });
+
+  const settingsTextareaId = 'drawer-dsh-settings-content';
+  const settingsTextarea = el('textarea.dsh-settings-content', {
+    id: settingsTextareaId,
+    disabled: true,
+    rows: '12',
+    spellcheck: 'false',
+    autocomplete: 'off',
+    autocapitalize: 'off',
+  });
+  const settingsPreservedTextarea = el('textarea.dsh-settings-preserved-content', {
+    rows: '8',
+    spellcheck: 'false',
+    autocomplete: 'off',
+    autocapitalize: 'off',
+    'aria-label': '重新加载前的草稿（只读）',
+  });
+  settingsPreservedTextarea.readOnly = true;
+  const settingsPreserved = el('details.dsh-settings-preserved', { hidden: true }, [
+    el('summary', { text: '重新加载前的草稿（只读）' }),
+    settingsPreservedTextarea,
+  ]);
+  const settingsPath = el('code.dsh-settings-path');
+  const settingsStatus = el('p.dsh-settings-status', {
+    role: 'status',
+    'aria-live': 'polite',
+  });
+  const settingsLoadBtn = button('加载文件', {
+    compact: false,
+    onClick: () => loadSettings(),
+  });
+  const settingsSaveBtn = button('保存文件', {
+    variant: 'primary',
+    compact: false,
+    disabled: true,
+    onClick: () => saveSettings(),
+  });
+  const settingsDiscardBtn = button('放弃文件修改', {
+    compact: false,
+    disabled: true,
+    onClick: () => resetSettingsDraft(),
+  });
+  const settingsSection = el('section.dsh-settings-editor', {}, [
+    el('h3', { text: 'dsh 配置文件' }),
+    el('p.dsh-settings-safety', {
+      text: 'settings.yaml 可能包含凭据；内容仅在本页面内存中显示，不写入 manager 配置、日志或 SSE。',
+    }),
+    el('p.section-note', {
+      text: '零侵入：只原子替换 settings.yaml，不修改 dsh CLI；当前 dsh 自行监视并加载，Center 不自动重启。',
+    }),
+    el('div.dsh-settings-path-row', {}, [
+      el('span', { text: '解析路径（只读）' }),
+      settingsPath,
+    ]),
+    el('label', { for: settingsTextareaId, text: '文件内容' }),
+    settingsTextarea,
+    settingsPreserved,
+    settingsStatus,
+    el('div.dsh-settings-actions', {}, [
+      settingsLoadBtn,
+      settingsSaveBtn,
+      settingsDiscardBtn,
+    ]),
+  ]);
+
   const logPre = el('pre.remote-log-body', { text: '（未加载）' });
   const logBtn = button('拉取最近 200 行', { compact: false, onClick: () => loadLog() });
   const logTitle = el('h3', { text: '远端日志' });
@@ -207,6 +284,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     el('section.config-section.env-editor', {}, [
       el('h3', { text: '注入配置' }),
       el('p.section-note', { text: '本区改动保存后在下次拉起时生效，不影响正在跑的实例。' }),
+      remoteConfigNote,
       workdir.root,
       env.root,
       extraArgs.root,
@@ -237,6 +315,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     conflict,
     form,
     el('section.probe-detail', {}, [probeTitle, probeDl]),
+    settingsSection,
     el('section.remote-log', {}, [
       logTitle,
       logPre,
@@ -250,6 +329,11 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   let restoreFocus = null;
   let closing = false;
   const touched = new Set(); // 碰过的字段才实时报错，见 revalidate
+
+  settingsTextarea.addEventListener('input', () => {
+    if (current) current.settings.editEpoch += 1;
+    syncSettingsControls();
+  });
 
   // ── 草稿 ─────────────────────────────────────────────────────────────
 
@@ -313,10 +397,12 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     refreshConflict();
     revalidate();
     const dirty = isDirty(current.draft, current.config);
-    store.setDrawer({ dirty });
+    const saving = store.isPending('config:save', current.name);
+    for (const f of fields) f.input.disabled = saving;
     saveBtn.disabled = !dirty || current.conflicts.length > 0
-      || !store.canWrite() || store.isPending('config:save', current.name);
-    cancelBtn.disabled = !dirty;
+      || !store.canWrite() || saving;
+    cancelBtn.disabled = !dirty || saving;
+    syncSettingsControls();
   }
 
   function resetDraft() {
@@ -336,8 +422,19 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       return;
     }
     restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    clearSettingsSession(current);
     current = {
       name, config: host.config, draft: draftOf(host.config), conflicts: [],
+      settings: {
+        loaded: false,
+        baselineContent: null,
+        baselineChecksum: null,
+        path: null,
+        size: null,
+        saveContent: null,
+        editEpoch: 0,
+        preserveOnReload: false,
+      },
     };
     writeForm(current.draft);
     logPre.textContent = '（未加载）';
@@ -368,6 +465,17 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   }
 
   async function requestClose() {
+    if (current && store.isPending('config:save', current.name)) {
+      store.addToast({
+        level: 'warn',
+        summary: `${current.name} 配置正在保存，完成后再关闭；关闭不会取消写入`,
+      });
+      return;
+    }
+    if (current && store.isPending('settings:save', current.name)) {
+      setSettingsStatus('保存正在进行，完成后再关闭；关闭不会取消写入。', 'warn');
+      return;
+    }
     // 连按两下 Esc 不该弹出两个「放弃未保存的修改？」
     if (closing) return;
     closing = true;
@@ -379,10 +487,15 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   }
 
   async function confirmThenClose() {
-    if (current && isDirty(current.draft, current.config)) {
+    const hostDirty = current && isDirty(current.draft, current.config);
+    const fileDirty = settingsDirty(current);
+    if (current && (hostDirty || fileDirty)) {
+      const lines = [];
+      if (hostDirty) lines.push(`${current.name} 的主机配置有改动尚未保存。`);
+      if (fileDirty) lines.push(`${current.name} 的 dsh 配置文件有改动尚未保存。`);
       const ok = await confirm({
         title: '放弃未保存的修改？',
-        lines: [`${current.name} 的注入配置有改动尚未保存。`],
+        lines,
         confirmLabel: '放弃',
       });
       if (!ok) return;
@@ -394,10 +507,232 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     root.hidden = true;
     scrim.hidden = true;
     setBackgroundInert(false);
+    clearSettingsSession(current);
     current = null;
     store.setDrawer({ open: false, host: null, dirty: false });
-    restoreFocus?.focus?.();
+    const focusTarget = isUsableFocusTarget(restoreFocus)
+      ? restoreFocus
+      : findStableFocusTarget();
+    focusTarget?.focus?.();
     restoreFocus = null;
+  }
+
+  function isUsableFocusTarget(node) {
+    if (!node || node.disabled) return false;
+    if (typeof node.isConnected === 'boolean') return node.isConnected;
+    return typeof document.contains === 'function' ? document.contains(node) : false;
+  }
+
+  function findStableFocusTarget() {
+    const manageBack = document.querySelector('.manage-back');
+    if (isUsableFocusTarget(manageBack)) return manageBack;
+    const brand = document.querySelector('.brand');
+    if (isUsableFocusTarget(brand)) {
+      brand.tabIndex = -1;
+      return brand;
+    }
+    return isUsableFocusTarget(document.body) ? document.body : null;
+  }
+
+  // ── dsh settings 文件 ────────────────────────────────────────────────
+
+  function settingsDirty(session = current) {
+    return Boolean(
+      session?.settings.loaded
+      && settingsTextarea.value !== session.settings.baselineContent,
+    );
+  }
+
+  function setSettingsStatus(message, tone = null) {
+    settingsStatus.textContent = message ?? '';
+    if (tone) settingsStatus.dataset.tone = tone;
+    else delete settingsStatus.dataset.tone;
+  }
+
+  function updateDrawerDirty() {
+    if (!current) return;
+    store.setDrawer({
+      dirty: isDirty(current.draft, current.config) || settingsDirty(current),
+    });
+  }
+
+  function syncSettingsControls() {
+    if (!current) return;
+    const loaded = current.settings.loaded;
+    const dirty = settingsDirty(current);
+    const loading = store.isPending('settings:load', current.name);
+    const saving = store.isPending('settings:save', current.name);
+
+    settingsTextarea.disabled = !loaded || loading;
+    settingsLoadBtn.disabled = loading || saving;
+    settingsSaveBtn.disabled = !loaded || !dirty || !store.canWrite() || loading || saving;
+    settingsDiscardBtn.disabled = !loaded || !dirty || loading || saving;
+    updateDrawerDirty();
+  }
+
+  function clearPreservedSettingsDraft() {
+    settingsPreservedTextarea.value = '';
+    settingsPreserved.hidden = true;
+    settingsPreserved.open = false;
+  }
+
+  function clearSettingsSession(session) {
+    settingsTextarea.value = '';
+    settingsTextarea.disabled = true;
+    settingsPath.textContent = '';
+    setSettingsStatus('');
+    settingsLoadBtn.disabled = false;
+    settingsSaveBtn.disabled = true;
+    settingsDiscardBtn.disabled = true;
+    clearPreservedSettingsDraft();
+    if (!session?.settings) return;
+    session.settings.loaded = false;
+    session.settings.baselineContent = null;
+    session.settings.baselineChecksum = null;
+    session.settings.path = null;
+    session.settings.size = null;
+    session.settings.saveContent = null;
+    session.settings.editEpoch = 0;
+    session.settings.preserveOnReload = false;
+  }
+
+  function showSettingsLoadError(error) {
+    setSettingsStatus(error?.summary || '读取失败，请稍后重试。', 'error');
+  }
+
+  function showSettingsSaveError(error) {
+    if (error?.code === 'SETTINGS_STALE') {
+      if (current) current.settings.preserveOnReload = true;
+      setSettingsStatus('目标文件已变化；请重新加载后手工合并。你的草稿已保留。', 'warn');
+      return;
+    }
+    if (error?.code === 'SETTINGS_BUSY') {
+      setSettingsStatus('另一项文件操作进行中，请稍后重试。你的草稿已保留。', 'warn');
+      return;
+    }
+    if (error?.status === 0 || SETTINGS_UNKNOWN_CODES.has(error?.code)) {
+      if (current) current.settings.preserveOnReload = true;
+      setSettingsStatus('保存结果未知；请重新加载后确认。你的草稿已保留。', 'warn');
+      return;
+    }
+    setSettingsStatus(error?.summary || '保存失败，请稍后重试。', 'error');
+  }
+
+  async function loadSettings() {
+    const session = current;
+    if (!session
+      || store.isPending('settings:load', session.name)
+      || store.isPending('settings:save', session.name)) return;
+    if (settingsDirty(session)) {
+      const ok = await confirm({
+        title: '重新加载 dsh 配置文件？',
+        lines: [`${session.name} 有未保存的文件修改；重新加载会用当前文件覆盖草稿。`],
+        confirmLabel: '重新加载',
+      });
+      if (!ok || current !== session) return;
+    }
+
+    const dirtyBeforeLoad = settingsDirty(session);
+    const draftBeforeLoad = dirtyBeforeLoad ? settingsTextarea.value : null;
+    const loadEpoch = session.settings.editEpoch;
+    setSettingsStatus('正在读取文件…');
+    const body = await actions.loadDshSettings(session.name, {
+      onError: (error) => {
+        if (current === session) showSettingsLoadError(error);
+      },
+    });
+    if (current !== session) return;
+    if (!body) {
+      syncSettingsControls();
+      return;
+    }
+    if (session.settings.editEpoch !== loadEpoch) {
+      setSettingsStatus('加载期间草稿已变化；本次响应未覆盖内容，请确认草稿后再次加载。', 'warn');
+      syncSettingsControls();
+      return;
+    }
+
+    session.settings.loaded = true;
+    session.settings.baselineContent = body.content;
+    session.settings.baselineChecksum = body.checksum;
+    session.settings.path = body.path;
+    session.settings.size = body.size;
+    settingsTextarea.value = body.content;
+    settingsPath.textContent = body.path;
+    if (dirtyBeforeLoad && session.settings.preserveOnReload) {
+      settingsPreservedTextarea.value = draftBeforeLoad;
+      settingsPreserved.hidden = false;
+      settingsPreserved.open = false;
+      setSettingsStatus('已重新加载目标文件；重新加载前的草稿已保留在下方，可手工对照合并。', 'warn');
+    } else {
+      clearPreservedSettingsDraft();
+      setSettingsStatus(
+        body.exists
+          ? `已加载（${body.size} 字节）。`
+          : '文件不存在；当前为空草稿，保存将创建 settings.yaml。',
+      );
+    }
+    session.settings.preserveOnReload = false;
+    syncSettingsControls();
+  }
+
+  async function saveSettings() {
+    const session = current;
+    if (!session
+      || !session.settings.loaded
+      || !settingsDirty(session)
+      || !store.canWrite()
+      || store.isPending('settings:load', session.name)
+      || store.isPending('settings:save', session.name)) return;
+
+    session.settings.saveContent = settingsTextarea.value;
+    setSettingsStatus('正在保存文件…');
+    const body = await actions.saveDshSettings(session.name, {
+      content: session.settings.saveContent,
+      baseChecksum: session.settings.baselineChecksum,
+    }, {
+      onError: (error) => {
+        if (current === session) showSettingsSaveError(error);
+      },
+    });
+    if (current !== session) {
+      if (body && session.forcedHostRemoval) {
+        store.addToast({
+          level: 'success',
+          summary: `${session.name} 的 dsh 配置文件已保存（主机详情已关闭）`,
+        });
+      }
+      return;
+    }
+
+    const savedContent = session.settings.saveContent;
+    session.settings.saveContent = null;
+    if (!body) {
+      syncSettingsControls();
+      return;
+    }
+
+    session.settings.loaded = true;
+    session.settings.baselineContent = savedContent;
+    session.settings.baselineChecksum = body.checksum;
+    session.settings.path = body.path;
+    session.settings.size = body.size;
+    settingsPath.textContent = body.path;
+    session.settings.preserveOnReload = false;
+    clearPreservedSettingsDraft();
+    if (settingsTextarea.value !== savedContent) {
+      setSettingsStatus('已保存提交时版本；当前仍有未保存修改。', 'warn');
+    } else {
+      setSettingsStatus(`已保存（${body.size} 字节）。`);
+    }
+    syncSettingsControls();
+  }
+
+  function resetSettingsDraft() {
+    if (!current?.settings.loaded) return;
+    settingsTextarea.value = current.settings.baselineContent;
+    setSettingsStatus('已放弃文件修改，恢复到最近一次加载或保存的内容。');
+    syncSettingsControls();
   }
 
   // ── 只读区 ───────────────────────────────────────────────────────────
@@ -410,6 +745,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     remotePort.root.querySelector('label').textContent = copy.portLabel;
     probeTitle.textContent = copy.probeTitle;
     logTitle.textContent = copy.logTitle;
+    remoteConfigNote.hidden = host.local === true;
+    remoteConfigNote.textContent = host.local === true ? '' : REMOTE_CONFIG_NOTE;
 
     const probe = host.probe;
     clear(probeDl);
@@ -451,18 +788,19 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   // ── 保存 ─────────────────────────────────────────────────────────────
 
   async function submit() {
-    if (!current) return;
+    const session = current;
+    if (!session || store.isPending('config:save', session.name)) return;
     // submit 以此刻 DOM 为准；input/change 事件与点击之间可能还有尚未同步进 draft 的值。
-    current.draft = readForm();
+    session.draft = readForm();
     refreshConflict();
-    if (current.conflicts.length > 0) return;
+    if (session.conflicts.length > 0) return;
     // 保存是最终权威：该说的全说，之后这些字段也就都算碰过了
     for (const key of Object.keys(validated)) touched.add(key);
     const built = revalidate();
     if (!built.ok) return;
 
     // 只提交真正改动的键：避免把没碰过的字段“全量替换”回当前显示值
-    const patch = diffPatch(built.value, current.config);
+    const patch = diffPatch(built.value, session.config);
     if (Object.keys(patch).length === 0) {
       // raw 文本可能看似有变化，但 trim / 注释过滤后与服务端配置完全一致。
       // 回填 canonical draft，避免按钮与冲突提示继续暗示仍有内容可保存。
@@ -470,17 +808,36 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       store.addToast({ level: 'info', summary: '没有需要保存的有效变更' });
       return;
     }
-    const res = await actions.saveHostConfig(current.name, patch);
-    if (res?.host) {
-      current.config = res.host.config;
-      current.draft = draftOf(current.config);
-      current.conflicts = [];
-      writeForm(current.draft);
-      syncDirty();
-    }
+    await actions.saveHostConfig(session.name, patch);
+    if (current !== session) return;
+    syncDirty();
   }
 
   // ── store 订阅 ───────────────────────────────────────────────────────
+
+  function reconcileCurrentHost() {
+    if (!current) return;
+    const name = current.name;
+    const host = store.getHost(name);
+    if (!host) {
+      const removedSession = current;
+      removedSession.forcedHostRemoval = true;
+      store.addToast({ level: 'warn', summary: `${name} 已从清单移除，详情已关闭` });
+      confirm.cancel?.();
+      close();
+      return;
+    }
+    renderReadonly(host);
+    const merged = reconcile(
+      current.draft, current.config, host.config, current.conflicts,
+    );
+    const draftChanged = !deepEqual(current.draft, merged.draft);
+    current.config = host.config;
+    current.draft = merged.draft;
+    current.conflicts = merged.conflicts;
+    if (draftChanged) writeForm(current.draft);
+    syncDirty();
+  }
 
   const offs = [
     store.on('drawer:changed', (drawer) => {
@@ -488,23 +845,9 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     }),
     store.on('hosts:changed', (name) => {
       if (!current || current.name !== name) return;
-      const host = store.getHost(name);
-      if (!host) {
-        store.addToast({ level: 'warn', summary: `${name} 已从清单移除，详情已关闭` });
-        close();
-        return;
-      }
-      renderReadonly(host);
-      const merged = reconcile(
-        current.draft, current.config, host.config, current.conflicts,
-      );
-      const draftChanged = !deepEqual(current.draft, merged.draft);
-      current.config = host.config;
-      current.draft = merged.draft;
-      current.conflicts = merged.conflicts;
-      if (draftChanged) writeForm(current.draft);
-      syncDirty();
+      reconcileCurrentHost();
     }),
+    store.on('hosts:reset', reconcileCurrentHost),
     store.on('pending:changed', syncDirty),
     store.on('connection:changed', syncDirty),
   ];
@@ -529,6 +872,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     destroy() {
       for (const off of offs) off();
       document.removeEventListener('keydown', onDocKeyDown);
+      clearSettingsSession(current);
+      current = null;
     },
   };
 }

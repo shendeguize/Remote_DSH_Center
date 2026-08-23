@@ -40,6 +40,9 @@ const KILL_ESCALATE_MS = 2_000;
  */
 export const SSH_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 
+/** settings 等敏感内容经 stdin 传输时的 lib 层硬上限（设计 §4.3）。 */
+export const SSH_INPUT_CAP_BYTES = 512 * 1024;
+
 /**
  * 在飞的一次性运输操作。manager 退出时要把它们一并收走：不收就是把 ssh/本机 shell
  * 交给 init 当孤儿，`dshc restart` 之后新老两批命令还会同时操作同一台主机（issue #73）。
@@ -130,6 +133,23 @@ function markExecOrigin(result, origin) {
 }
 
 /**
+ * input 只接受明确的二进制类型，并在最靠近 spawn 的 lib 边界再次限长。
+ * 返回 Buffer view 供 stdin.end 使用；不转字符串，避免内容进入诊断文本。
+ */
+function normalizeChildInput(input) {
+  if (input === undefined) return null;
+  if (!Buffer.isBuffer(input) && !(input instanceof Uint8Array)) {
+    throw new TypeError('input 必须是 Buffer 或 Uint8Array');
+  }
+  if (input.byteLength > SSH_INPUT_CAP_BYTES) {
+    throw new DshError('VALIDATION', 'input 不得超过 512 KiB');
+  }
+  return Buffer.isBuffer(input)
+    ? input
+    : Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+}
+
+/**
  * 收集子进程输出并管理超时/中止的强杀链：TERM → 2s → KILL。
  * @returns {Promise<ExecResult>} 不 reject；调用方看 code/timedOut 分类
  */
@@ -138,7 +158,9 @@ function runChild(bin, args, {
   signal,
   closedMessage = 'manager 正在退出，这次远端命令没有发出',
   origin = 'ssh',
+  input,
 }) {
+  const childInput = normalizeChildInput(input);
   return new Promise((resolve) => {
     if (closed) {
       resolve(markExecOrigin({
@@ -153,7 +175,7 @@ function runChild(bin, args, {
     }
     let child;
     try {
-      child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(bin, args, { stdio: [childInput === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     } catch (err) {
       resolve(markExecOrigin({
         ...EMPTY_OUTPUT, code: null, signal: null, stderr: String(err.message ?? err), timedOut: false, aborted: false,
@@ -216,6 +238,17 @@ function runChild(bin, args, {
       finish(null, null);
     });
     child.on('close', (code, sig) => finish(code, sig));
+
+    if (childInput !== null) {
+      // 对端可能在 input 尚未写完前退出；pipe 的 EPIPE/ERR_STREAM_DESTROYED 不能成为
+      // manager 的未处理异常。命令成败仍由 close/code、timeout/abort 和协议输出判定。
+      child.stdin.on('error', () => {});
+      try {
+        child.stdin.end(childInput);
+      } catch {
+        // 极早退出也可能让 end 同步拒绝；不得把 input 或 stream 异常抛出执行器边界。
+      }
+    }
   });
 }
 
@@ -224,28 +257,42 @@ function runChild(bin, args, {
  * 远端登录 shell 只负责剥一层引号并交给 sh，保证 POSIX 语义与登录 shell 种类无关。
  * @param {string} host 经 assertSafeHost 校验（防 ssh 参数位注入，12 §2.4）
  * @param {string} remoteCmd
- * @param {{timeoutMs?:number, signal?:AbortSignal, extraOpts?:string[]}} [opts]
+ * @param {{timeoutMs?:number, signal?:AbortSignal, extraOpts?:string[],
+ *   input?:Buffer|Uint8Array}} [opts]
  * @returns {Promise<ExecResult>}
  */
-export async function sshExec(host, remoteCmd, { timeoutMs = PROTO_TIMING.onceTimeoutMs, signal, extraOpts = [] } = {}) {
+export async function sshExec(
+  host,
+  remoteCmd,
+  {
+    timeoutMs = PROTO_TIMING.onceTimeoutMs,
+    signal,
+    extraOpts = [],
+    input,
+  } = {},
+) {
   assertSafeHost(host);
   const { bin, prefixArgs } = sshBin();
   const args = [...prefixArgs, ...COMMON_SSH_OPTS, ...extraOpts, host, `sh -c ${shq(remoteCmd)}`];
-  return runChild(bin, args, { timeoutMs, signal });
+  return runChild(bin, args, { timeoutMs, signal, input });
 }
 
 /**
  * 本机一次性命令。command 是 lib/proto 产出的原始模板文本；spawn 的 argv 边界已经
  * 保住整段文本，因此这里只加一层 `-c`，不能再套远端运输使用的 `sh -c <quoted>`。
  * @param {string} command
- * @param {{timeoutMs?:number, signal?:AbortSignal}} [opts]
+ * @param {{timeoutMs?:number, signal?:AbortSignal, input?:Buffer|Uint8Array}} [opts]
  * @returns {Promise<ExecResult>}
  */
-export async function localExec(command, { timeoutMs = PROTO_TIMING.onceTimeoutMs, signal } = {}) {
+export async function localExec(
+  command,
+  { timeoutMs = PROTO_TIMING.onceTimeoutMs, signal, input } = {},
+) {
   const { bin, prefixArgs } = localShBin();
   return runChild(bin, [...prefixArgs, '-c', command], {
     timeoutMs,
     signal,
+    input,
     closedMessage: 'manager 正在退出，这次本机命令没有执行',
     origin: 'local-exec',
   });

@@ -8,6 +8,8 @@ import { PHASES } from './machine.js';
 import { isWorkdirPath, SAFE_HOST_RE } from './shq.js';
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SETTINGS_CHECKSUM_RE = /^cksum-v1:(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,6})$/u;
+const SETTINGS_CHECKSUM_MAX_BYTES = 512 * 1024;
 
 function typeName(v) {
   if (v === null) return 'null';
@@ -327,6 +329,23 @@ export const syncConfigBodySchema = V.all(
     }
   },
 );
+
+/** PUT /api/hosts/:name/dsh-settings：固定路径，不接受任何额外键。 */
+export const dshSettingsPutSchema = V.obj({
+  content: V.str(),
+  baseChecksum: V.nullable(V.custom((value) => {
+    if (typeof value !== 'string') return '须为 cksum-v1 token 或 null';
+    const match = SETTINGS_CHECKSUM_RE.exec(value);
+    if (
+      !match
+      || Number(match[1]) > 0xffff_ffff
+      || Number(match[2]) > SETTINGS_CHECKSUM_MAX_BYTES
+    ) {
+      return '格式无效，应为 cksum-v1:<CRC>:<字节数> 或 null';
+    }
+    return true;
+  })),
+});
 
 /** PUT /api/config/defaults 局部体（13 §2.6）。 */
 export const defaultsPatchSchema = V.obj(

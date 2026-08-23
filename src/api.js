@@ -21,6 +21,7 @@ import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import {
   assertValid,
   defaultsPatchSchema,
+  dshSettingsPutSchema,
   hostConfigPatchSchema,
   localHostCreateSchema,
   setupBodySchema,
@@ -28,16 +29,22 @@ import {
 } from './lib/validate.js';
 import * as launcher from './launcher.js';
 import * as prober from './prober.js';
+import {
+  readDshSettings,
+  SETTINGS_MAX_BYTES,
+  writeDshSettings,
+} from './settings-file.js';
 import * as store from './store.js';
 import * as tunnel from './tunnel.js';
 
 const MAX_BODY_BYTES = 1_048_576;
+const SETTINGS_MAX_BODY_BYTES = 6 * SETTINGS_MAX_BYTES + 4096;
 /**
  * 超限之后还愿意替对面读完的上限（issue #89）。
  * 超一点点多半是「值填大了」，读完再回 400，对面能看到那句人话；
  * 超到这个量级就是在灌了，直接掐——排空不是义务。
  */
-const MAX_DRAIN_BYTES = 4 * MAX_BODY_BYTES;
+const MAX_DRAIN_BYTES = Math.max(4 * MAX_BODY_BYTES, SETTINGS_MAX_BODY_BYTES);
 const SSE_HEARTBEAT_MS = 25_000;
 const SKIP_CONFIG_SYNC_WRITE = Symbol('skip-config-sync-write');
 
@@ -95,7 +102,12 @@ function sendError(res, err) {
   return e;
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, {
+  maxBytes = MAX_BODY_BYTES,
+  fatalUtf8 = false,
+  overLimitCode = 'VALIDATION',
+  redactParseError = false,
+} = {}) {
   return new Promise((resolve, reject) => {
     let size = 0;
     let over = false;
@@ -105,12 +117,12 @@ function readJsonBody(req) {
       if (size > MAX_DRAIN_BYTES) {
         // 排空也得有个头：一直读下去，对面每传 64MB 我们就得吃 64MB 的临时缓冲，
         // 常驻进程的 RSS 会被这么顶上去。到这个量级已经不像「不小心传大了」，掐掉。
-        reject(new DshError('VALIDATION', `请求体超过 ${MAX_BODY_BYTES} 字节上限`));
+        reject(new DshError(overLimitCode, `请求体超过 ${maxBytes} 字节上限`));
         req.destroy();
         return;
       }
       if (over) return; // 超了就一路丢弃：不攒内存，但也不掐连接
-      if (size > MAX_BODY_BYTES) {
+      if (size > maxBytes) {
         over = true;
         chunks.length = 0; // 已经攒的立刻扔掉，超限的体一个字节也不留在内存里
         return;
@@ -122,10 +134,20 @@ function readJsonBody(req) {
       // 等它传完再回话。半路 destroy 或半路回话都会让对面拿到 ECONNRESET/EPIPE，
       // 只看到「网络错误」而不知道是体太大（issue #89）。
       if (over) {
-        reject(new DshError('VALIDATION', `请求体超过 ${MAX_BODY_BYTES} 字节上限`));
+        reject(new DshError(overLimitCode, `请求体超过 ${maxBytes} 字节上限`));
         return;
       }
-      const text = Buffer.concat(chunks).toString('utf8').trim();
+      let text;
+      try {
+        const bytes = Buffer.concat(chunks);
+        text = fatalUtf8
+          ? new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+          : bytes.toString('utf8');
+      } catch {
+        reject(new DshError('VALIDATION', '请求体不是有效的 UTF-8 JSON'));
+        return;
+      }
+      text = text.trim();
       if (text === '') return resolve({});
       try {
         const parsed = JSON.parse(text);
@@ -134,7 +156,10 @@ function readJsonBody(req) {
         }
         resolve(parsed);
       } catch (err) {
-        reject(new DshError('VALIDATION', `请求体不是合法 JSON：${err.message}`));
+        reject(new DshError(
+          'VALIDATION',
+          redactParseError ? '请求体不是合法 JSON' : `请求体不是合法 JSON：${err.message}`,
+        ));
       }
     });
   });
@@ -339,6 +364,20 @@ function requireHost(name) {
   return view;
 }
 
+function rejectQuery(req, url) {
+  if (url.search !== '' || req.url.includes('?')) {
+    throw new DshError('VALIDATION', '该接口不接受 query 参数');
+  }
+}
+
+function decodeSettingsHost(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new DshError('VALIDATION', '主机名 URL 编码无效');
+  }
+}
+
 function requirePhase(view, allowed, action) {
   if (!allowed.includes(view.phase)) {
     throw new DshError('PHASE_CONFLICT', `${action} 要求主机处于 ${allowed.join('/')}，当前为 ${view.phase}`, {
@@ -444,6 +483,34 @@ export function createHandler({ managerCtl }) {
       if (!logName) return sendText(res, 200, '(no log)\n');
       const text = await launcher.tailRemoteLog(view.name, { logName, lines });
       sendText(res, 200, text);
+    }],
+
+    ['GET', /^\/api\/hosts\/([^/]+)\/dsh-settings$/, async (req, res, [name], url) => {
+      rejectQuery(req, url);
+      const view = requireHost(decodeSettingsHost(name));
+      const canonicalName = view.name;
+      const result = await readDshSettings(canonicalName, {
+        resolveLocal: () => requireHost(canonicalName).local,
+      });
+      sendJson(res, 200, result);
+    }],
+
+    ['PUT', /^\/api\/hosts\/([^/]+)\/dsh-settings$/, async (req, res, [name], url) => {
+      rejectQuery(req, url);
+      const view = requireHost(decodeSettingsHost(name));
+      const canonicalName = view.name;
+      const body = await readJsonBody(req, {
+        maxBytes: SETTINGS_MAX_BODY_BYTES,
+        fatalUtf8: true,
+        overLimitCode: 'SETTINGS_TOO_LARGE',
+        redactParseError: true,
+      });
+      assertValid(dshSettingsPutSchema, body, 'settings.yaml 保存请求校验失败');
+      const result = await writeDshSettings(canonicalName, {
+        ...body,
+        resolveLocal: () => requireHost(canonicalName).local,
+      });
+      sendJson(res, 200, result);
     }],
 
     ['PUT', /^\/api\/hosts\/([^/]+)\/config$/, async (req, res, [name]) => {
@@ -602,4 +669,12 @@ export function createHandler({ managerCtl }) {
   return handler;
 }
 
-export { readJsonBody, sendError, sendJson, sendText, SETUP_ALLOWED, MAX_BODY_BYTES };
+export {
+  readJsonBody,
+  sendError,
+  sendJson,
+  sendText,
+  SETUP_ALLOWED,
+  MAX_BODY_BYTES,
+  SETTINGS_MAX_BODY_BYTES,
+};

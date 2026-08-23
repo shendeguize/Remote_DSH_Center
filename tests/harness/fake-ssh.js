@@ -13,6 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { posixCksum, SETTINGS_MAX_BYTES } from '../../src/settings-file.js';
 import { host as hostState, mutate, readState } from './state.js';
 import { unshq, unshqWorkdir } from './shell-word.js';
 
@@ -48,6 +49,9 @@ function must(re, body, what) {
 const logNameOf = (body) => must(/LOG="\$HOME\/\.dsh_center_remote\/([^"]+)"/, body, '日志名')[1];
 
 function classify(body) {
+  // settings 模板也含清理函数与大量旧协议关键字，必须先于既有模板判定。
+  if (body.includes('SETTINGS_READ_DONE=yes')) return 'settings-read';
+  if (body.includes('SETTINGS_WRITE_DONE=yes')) return 'settings-write';
   if (body.includes('PROBE_DONE')) return 'probe';
   if (body.includes('POLL_DONE')) return 'poll';
   if (body.includes('VERIFY_DONE')) return 'verify';
@@ -56,6 +60,49 @@ function classify(body) {
   if (body.includes('echo "PID=$!"')) return 'launch';
   if (body.startsWith('tail -n ')) return 'logtail';
   return die(`无法识别的协议脚本：\n${body}`);
+}
+
+function literalAssignment(body, name, valuePattern, what) {
+  const re = new RegExp(`(?:^|; )${name}='(${valuePattern})'(?=; |$)`, 'gu');
+  const matches = [...body.matchAll(re)];
+  if (matches.length !== 1) {
+    die(`协议形状不符，${name} 赋值应恰好出现一次，无法抽取${what}`);
+  }
+  return matches[0][1];
+}
+
+function settingsArgs(body, kind) {
+  const txn = literalAssignment(
+    body,
+    'T',
+    '[A-Za-z0-9][A-Za-z0-9_-]{0,63}',
+    'settings 事务号',
+  );
+  if (kind === 'settings-read') return { txn };
+
+  const expect = literalAssignment(body, 'EXPECT', '(?:yes|no)', 'settings EXPECT');
+  const baseCrc = literalAssignment(body, 'BASE_CRC', '[0-9]*', 'settings base CRC');
+  const baseSize = literalAssignment(body, 'BASE_SIZE', '[0-9]*', 'settings base size');
+  if (expect === 'no') {
+    if (baseCrc !== '' || baseSize !== '') {
+      die('settings EXPECT=no 时 base CRC/size 必须为空');
+    }
+    return { txn, expect, baseCrc: null, baseSize: null };
+  }
+  if (
+    !/^(?:0|[1-9][0-9]*)$/u.test(baseCrc)
+    || !/^(?:0|[1-9][0-9]*)$/u.test(baseSize)
+    || Number(baseCrc) > 0xffff_ffff
+    || Number(baseSize) > SETTINGS_MAX_BYTES
+  ) {
+    die('settings EXPECT=yes 时 base CRC/size 形状无效');
+  }
+  return {
+    txn,
+    expect,
+    baseCrc: Number(baseCrc),
+    baseSize: Number(baseSize),
+  };
 }
 
 /** 留一份运输层账本，供全链用例断言本机没有误起 ssh -L。 */
@@ -68,6 +115,18 @@ export function recordTransport(event) {
 // ── 协议回放 ─────────────────────────────────────────────────────────────
 
 const out = (s) => process.stdout.write(s);
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    process.stdin.once('error', reject);
+    process.stdin.once('end', () => resolve(Buffer.concat(chunks)));
+    process.stdin.resume();
+  });
+}
 
 function sleepBlocking(ms) {
   const until = Date.now() + ms;
@@ -351,6 +410,221 @@ function replyLogTail(name, body) {
   }
 }
 
+function settingsBytes(h) {
+  if (!Object.hasOwn(h, 'settingsHex') || h.settingsHex === null) return null;
+  if (
+    typeof h.settingsHex !== 'string'
+    || h.settingsHex.length % 2 !== 0
+    || !/^[0-9a-fA-F]*$/u.test(h.settingsHex)
+  ) {
+    die('假远端 settingsHex 状态不是合法 hex');
+  }
+  return Buffer.from(h.settingsHex, 'hex');
+}
+
+function settingsPath(h) {
+  if (typeof h.dshHome !== 'string' || !h.dshHome.startsWith('/')) {
+    die('假远端 dshHome 必须是绝对路径');
+  }
+  return `${h.dshHome}/settings.yaml`;
+}
+
+const SETTINGS_STAGING_PREFIX = '.dsh_center_remote/settings-staging/';
+const SETTINGS_STAGING_RESERVED_RE = /^(?:read-[^/]*\.(?:data|hex|hex-raw)|write-[^/]*\.data)$/u;
+
+function isReservedSettingsStaging(file) {
+  return file.startsWith(SETTINGS_STAGING_PREFIX)
+    && SETTINGS_STAGING_RESERVED_RE.test(file.slice(SETTINGS_STAGING_PREFIX.length));
+}
+
+function beginSettingsStaging(name, kind, txn, content, { record = true } = {}) {
+  const key = `${SETTINGS_STAGING_PREFIX}${kind}-${txn}.data`;
+  mutate((state) => {
+    const h = hostState(state, name);
+    for (const file of Object.keys(h.files)) {
+      if (isReservedSettingsStaging(file)) delete h.files[file];
+    }
+    if (record) h.files[key] = content.toString('hex');
+  });
+  return key;
+}
+
+function clearSettingsStaging(name, key) {
+  mutate((state) => {
+    delete hostState(state, name).files[key];
+  });
+}
+
+function settingsHeader(txn) {
+  out('SETTINGS_PROTO=1\n');
+  out(`SETTINGS_TXN=${txn}\n`);
+}
+
+function settingsFailure(txn, marker, code, commitState = null) {
+  settingsHeader(txn);
+  out(`ERR=${marker}\n`);
+  if (commitState !== null) out(`COMMIT_STATE=${commitState}\n`);
+  process.exit(code);
+}
+
+function replySettingsRead(name, { txn }) {
+  const st = readState();
+  const h = hostState({ hosts: st.hosts ?? {} }, name);
+  if (h.faults.settingsUnsupported) {
+    settingsFailure(txn, 'settings-unsupported', 1);
+  }
+
+  const content = settingsBytes(h);
+  const staging = beginSettingsStaging(
+    name,
+    'read',
+    txn,
+    content ?? Buffer.alloc(0),
+    { record: content !== null || h.faults.settingsReadFail === true },
+  );
+  if (h.faults.settingsReadFail) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-read', 1);
+  }
+  if (content !== null && content.byteLength > SETTINGS_MAX_BYTES) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-too-large', 10);
+  }
+
+  settingsHeader(txn);
+  if (content === null) {
+    out('EXISTS=no\n');
+    out('SIZE=0\n');
+  } else {
+    const crc = posixCksum(content);
+    out('EXISTS=yes\n');
+    out(`SIZE=${content.byteLength}\n`);
+    out(`CRC=${h.faults.settingsProtocolCorrupt ? ((crc + 1) >>> 0) : crc}\n`);
+  }
+  out('PATH_HEX<<DSHC_PATH\n');
+  out(`${Buffer.from(settingsPath(h)).toString('hex')}\n`);
+  out('DSHC_PATH\n');
+  out('CONTENT_HEX<<DSHC_CONTENT\n');
+  if (content !== null && content.byteLength > 0) out(`${content.toString('hex')}\n`);
+  out('DSHC_CONTENT\n');
+  out('SETTINGS_READ_DONE=yes\n');
+  clearSettingsStaging(name, staging);
+}
+
+function matchesSettingsBase(content, { expect, baseCrc, baseSize }) {
+  if (expect === 'no') return content === null;
+  return content !== null
+    && content.byteLength === baseSize
+    && posixCksum(content) === baseCrc;
+}
+
+function replySettingsWrite(name, {
+  txn, expect, baseCrc, baseSize, input,
+}) {
+  const before = readState();
+  const initial = hostState({ hosts: before.hosts ?? {} }, name);
+  if (initial.faults.settingsUnsupported) {
+    settingsFailure(txn, 'settings-unsupported', 1);
+  }
+  const staging = beginSettingsStaging(name, 'write', txn, input);
+  if (initial.faults.settingsCatastrophicAfterStaging) {
+    // 模拟 SIGKILL/机器掉电：没有协议结果，也来不及 trap 清理；下次设置操作负责收尸。
+    process.exit(99);
+  }
+  if (input.byteLength > SETTINGS_MAX_BYTES) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-too-large', 10, 'not-committed');
+  }
+  if (initial.faults.settingsWriteFail) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-write', 12, 'not-committed');
+  }
+
+  // 第一次 CAS：核对 base 后发布上一版备份，正式目标仍保持原样。
+  const firstCas = mutate((state) => {
+    const h = hostState(state, name);
+    const current = settingsBytes(h);
+    if (current !== null && current.byteLength > SETTINGS_MAX_BYTES) {
+      return { stale: false, tooLarge: true, unknownBeforeCommit: false };
+    }
+    if (!matchesSettingsBase(current, { expect, baseCrc, baseSize })) {
+      return { stale: true, tooLarge: false, unknownBeforeCommit: false };
+    }
+    h.backup = current === null
+      ? { previousHex: null, absent: true, mode: 0o600 }
+      : { previousHex: current.toString('hex'), absent: false, mode: 0o600 };
+    return {
+      stale: false,
+      tooLarge: false,
+      unknownBeforeCommit: h.faults.settingsWriteUnknownBeforeCommit === true,
+    };
+  });
+
+  if (firstCas.tooLarge) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-too-large', 10, 'not-committed');
+  }
+  if (firstCas.stale) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-stale', 11, 'not-committed');
+  }
+  if (firstCas.unknownBeforeCommit) {
+    clearSettingsStaging(name, staging);
+    settingsFailure(txn, 'settings-write', 12, 'unknown');
+  }
+
+  // 外部编辑器恰好在两次 CAS 之间落盘；第二次检查必须看见并拒绝覆盖。
+  mutate((state) => {
+    const h = hostState(state, name);
+    const external = h.faults.settingsChangeBeforeSecondCas;
+    if (external === undefined || external === false) return;
+    const content = external === true
+      ? 'external-second-cas: synthetic\n'
+      : String(external);
+    h.settingsHex = Buffer.from(content).toString('hex');
+    h.settingsMode = 0o600;
+  });
+
+  // 第二次 CAS：只有正式目标仍与原 base 一致才到达提交点。
+  const secondCas = mutate((state) => {
+    const h = hostState(state, name);
+    const current = settingsBytes(h);
+    if (current !== null && current.byteLength > SETTINGS_MAX_BYTES) {
+      return { stale: false, tooLarge: true, unknownAfterCommit: false };
+    }
+    if (!matchesSettingsBase(current, { expect, baseCrc, baseSize })) {
+      return { stale: true, tooLarge: false, unknownAfterCommit: false };
+    }
+    h.settingsHex = input.toString('hex');
+    h.settingsMode = 0o600;
+    return {
+      stale: false,
+      tooLarge: false,
+      unknownAfterCommit: h.faults.settingsWriteUnknown === true,
+    };
+  });
+
+  clearSettingsStaging(name, staging);
+  if (secondCas.tooLarge) {
+    settingsFailure(txn, 'settings-too-large', 10, 'not-committed');
+  }
+  if (secondCas.stale) {
+    settingsFailure(txn, 'settings-stale', 11, 'not-committed');
+  }
+  if (secondCas.unknownAfterCommit) {
+    settingsFailure(txn, 'settings-write', 12, 'unknown');
+  }
+
+  const crc = posixCksum(input);
+  settingsHeader(txn);
+  out('PATH_HEX<<DSHC_PATH\n');
+  out(`${Buffer.from(settingsPath(initial)).toString('hex')}\n`);
+  out('DSHC_PATH\n');
+  out(`NEW_SIZE=${input.byteLength}\n`);
+  out(`NEW_CRC=${crc}\n`);
+  out('SETTINGS_WRITE_DONE=yes\n');
+}
+
 /**
  * 同一套协议引擎供 fake-ssh 与 fake-local-sh 共用。运输层只注入主机身份与 HOME；
  * PROBE/LAUNCH/POLL/VERIFY/STOP/LOG/CLEANUP 的解析和状态变更只有这一份。
@@ -358,9 +632,19 @@ function replyLogTail(name, body) {
 export function dispatchProtocol(name, body, {
   home = REMOTE_HOME,
   transport = 'ssh',
+  input = Buffer.alloc(0),
 } = {}) {
   const kind = classify(body);
+  const args = kind.startsWith('settings-') ? settingsArgs(body, kind) : null;
   recordTransport({ transport, kind, host: name, home });
+  if (kind === 'settings-read') {
+    replySettingsRead(name, args);
+    return;
+  }
+  if (kind === 'settings-write') {
+    replySettingsWrite(name, { ...args, input });
+    return;
+  }
   const handlers = {
     probe: replyProbe,
     launch: replyLaunch,
@@ -458,11 +742,12 @@ function admitOrDrop() {
   process.on('exit', release);
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   const parsed = parseArgv(argv);
   const name = parsed.positional[0];
   if (!name) die('缺少目标主机');
 
+  const input = await readStdin();
   const st0 = readState();
   const h0 = hostState({ hosts: st0.hosts ?? {} }, name);
   admitOrDrop();
@@ -488,8 +773,10 @@ export function main(argv = process.argv.slice(2)) {
     if (raw === undefined) die('缺少远端命令');
     if (!raw.startsWith('sh -c ')) die(`远端命令未按 12 §0 包 sh -c：${raw}`);
     const body = unshq(raw.slice('sh -c '.length));
-    dispatchProtocol(name, body, { home: REMOTE_HOME, transport: 'ssh' });
+    dispatchProtocol(name, body, { home: REMOTE_HOME, transport: 'ssh', input });
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(() => die('读取 stdin 失败'));
+}

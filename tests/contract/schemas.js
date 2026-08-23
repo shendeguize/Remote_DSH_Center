@@ -12,6 +12,7 @@ import { SYNC_PROFILE_FIELDS } from '../../src/config-sync.js';
 import { V, validate } from '../../src/lib/validate.js';
 import { PHASES } from '../../src/lib/machine.js';
 import { ERROR_HTTP_STATUS } from '../../src/lib/errors.js';
+import { posixCksum, SETTINGS_MAX_BYTES } from '../../src/settings-file.js';
 
 const port = V.int({ min: 1, max: 65535 });
 const iso = V.str({ pattern: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/ });
@@ -136,6 +137,82 @@ export const managerInfo = V.obj({
 
 export const hostConfigPutResponse = V.obj({ host: hostView });
 export const localHostCreateResponse = V.obj({ host: hostView });
+
+const SETTINGS_CHECKSUM_RE = /^cksum-v1:(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,6})$/u;
+
+function parseSettingsChecksum(value) {
+  if (typeof value !== 'string') return null;
+  const match = SETTINGS_CHECKSUM_RE.exec(value);
+  if (
+    !match
+    || Number(match[1]) > 0xffff_ffff
+    || Number(match[2]) > SETTINGS_MAX_BYTES
+  ) {
+    return null;
+  }
+  return { crc: Number(match[1]), size: Number(match[2]) };
+}
+
+const settingsPath = V.all(
+  V.str({ min: 1 }),
+  V.custom(
+    (value) => typeof value !== 'string'
+      || (value.startsWith('/') && value.endsWith('/settings.yaml'))
+      || 'expected absolute settings.yaml path',
+  ),
+);
+const settingsChecksum = V.custom(
+  (value) => parseSettingsChecksum(value) !== null || 'expected valid cksum-v1 token',
+);
+const settingsSize = V.int({ min: 0, max: SETTINGS_MAX_BYTES });
+
+export const settingsReadResponse = V.all(
+  V.obj({
+    exists: V.bool(),
+    path: settingsPath,
+    content: V.str(),
+    checksum: V.nullable(settingsChecksum),
+    size: settingsSize,
+  }),
+  V.custom((value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return true;
+    if (value.exists === false) {
+      return (
+        value.checksum === null
+        && value.content === ''
+        && value.size === 0
+      ) || 'exists=false requires checksum=null, content="" and size=0';
+    }
+    if (value.exists !== true) return true;
+    const token = parseSettingsChecksum(value.checksum);
+    if (!token || token.size !== value.size) {
+      return 'exists=true requires checksum byte count to match size';
+    }
+    if (typeof value.content !== 'string') return true;
+    const bytes = Buffer.from(value.content, 'utf8');
+    if (bytes.byteLength !== value.size) {
+      return 'exists=true requires UTF-8 content byte count to match size';
+    }
+    return token.crc === posixCksum(bytes)
+      || 'exists=true requires checksum CRC to match content';
+  }),
+);
+
+export const settingsWriteResponse = V.all(
+  V.obj({
+    updated: V.custom((value) => value === true, 'expected true'),
+    path: settingsPath,
+    checksum: settingsChecksum,
+    size: settingsSize,
+  }),
+  V.custom((value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return true;
+    const token = parseSettingsChecksum(value.checksum);
+    return !token
+      || token.size === value.size
+      || 'checksum byte count must match size';
+  }),
+);
 
 const syncConfigTarget = V.obj({
   name: V.str({ min: 1 }),

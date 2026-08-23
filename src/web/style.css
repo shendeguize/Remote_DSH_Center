@@ -522,13 +522,113 @@ body {
 .config-section { display: flex; flex-direction: column; gap: 8px; }
 .config-section h3 { margin: 0; font-size: 13px; color: var(--text-dim); font-weight: 600; }
 .drawer-actions { display: flex; gap: 10px; }
-.probe-detail h3, .remote-log h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); font-weight: 600; }
+.probe-detail h3, .dsh-settings-editor h3, .remote-log h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); font-weight: 600; }
+.dsh-settings-editor {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.dsh-settings-editor label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.dsh-settings-safety {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+.dsh-settings-path-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.dsh-settings-path {
+  max-width: 100%;
+  color: var(--text);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.dsh-settings-content {
+  width: 100%;
+  min-width: 0;
+  min-height: 240px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: 12px/1.5 var(--mono);
+}
+.dsh-settings-content:disabled { background: var(--surface-2); }
+.dsh-settings-preserved {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.dsh-settings-preserved summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 650;
+}
+.dsh-settings-preserved-content {
+  width: 100%;
+  min-width: 0;
+  min-height: 140px;
+  margin-top: 8px;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: 12px/1.5 var(--mono);
+}
+.dsh-settings-status {
+  min-height: 18px;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.dsh-settings-status[data-tone="warn"] { color: var(--degraded); }
+.dsh-settings-status[data-tone="error"] { color: var(--crashed); }
+.dsh-settings-status[data-tone="warn"]::before {
+  content: "注意：";
+  font-weight: 650;
+}
+.dsh-settings-status[data-tone="error"]::before {
+  content: "错误：";
+  font-weight: 650;
+}
+.dsh-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .remote-log-body {
   margin: 0; padding: 8px; max-height: 260px; overflow: auto;
   background: var(--surface-2); border-radius: 6px;
   font-family: var(--mono); font-size: 11px; white-space: pre-wrap;
 }
 .log-actions { margin-top: 8px; }
+
+@media (max-width: 520px) {
+  .host-drawer { padding-inline: 12px; }
+  .drawer-actions, .dsh-settings-actions { flex-wrap: wrap; }
+  .dsh-settings-actions .btn { flex: 1 1 140px; }
+}
 
 /* ── 首启向导 ───────────────────────────────────────────────────────── */
 

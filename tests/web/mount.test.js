@@ -32,6 +32,36 @@ function drawerDetail(drawer, label) {
   return index < 0 ? null : values[index].textContent;
 }
 
+function settingsControls(drawer) {
+  const section = drawer.querySelector('.dsh-settings-editor');
+  const buttons = section?.querySelectorAll('button') ?? [];
+  return {
+    section,
+    textarea: section?.querySelector('.dsh-settings-content') ?? null,
+    preserved: section?.querySelector('.dsh-settings-preserved') ?? null,
+    preservedTextarea: section?.querySelector('.dsh-settings-preserved-content') ?? null,
+    path: section?.querySelector('.dsh-settings-path') ?? null,
+    status: section?.querySelector('.dsh-settings-status') ?? null,
+    load: buttons.find((node) => node.textContent === '加载文件') ?? null,
+    save: buttons.find((node) => node.textContent === '保存文件') ?? null,
+    discard: buttons.find((node) => node.textContent === '放弃文件修改') ?? null,
+  };
+}
+
+function response(status, body) {
+  return {
+    ok: status < 400,
+    status,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function installStorage(t, storage) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
@@ -166,6 +196,9 @@ test('本机抽屉 badge 复用共享文案，不渗入 SSH/远端措辞', async
 
   const drawer = dom.app.querySelector('.host-drawer');
   assert.equal(drawer.querySelector('.drawer-badge .phase-badge').textContent, '本机不可用');
+  const remoteConfigNote = drawer.querySelector('.remote-config-note');
+  assert.equal(remoteConfigNote.hidden, true);
+  assert.equal(remoteConfigNote.textContent, '', '本机抽屉不应保留远端 headless 操作说明');
   assert.doesNotMatch(drawer.textContent, /SSH|远端/);
 });
 
@@ -902,7 +935,7 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
   assert.match(results.textContent, /附加参数/);
   assert.match(results.textContent, /补丁/);
   assert.doesNotMatch(dialog.textContent, /TOP-SECRET-VALUE|SERVER-ONLY-VALUE|--secret-flag/);
-  assert.match(results.textContent, /下次重启生效/);
+  assert.match(results.textContent, /需重启此主机的 dsh web（重启 manager 无效）/);
   assert.match(results.textContent, /不会重启或停止/);
   assert.equal(dialog.querySelector('.config-sync-apply').disabled, false);
 
@@ -938,7 +971,14 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
   assert.equal(app.store.getHost('target-running').config.workdir, '/srv/newest-sse',
     '迟到的无 revision apply 响应不得回退较新 SSE');
   assert.doesNotMatch(dialog.textContent, /TOP-SECRET-VALUE|SERVER-ONLY-VALUE|LATEST-SSE-VALUE|--secret-flag/);
-  assert.equal(app.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
+  assert.equal(
+    app.store.state.toasts.at(-1).summary,
+    '已同步 1 台主机配置；运行中目标需重启 dsh web（重启 manager 无效）',
+  );
+  assert.equal(
+    app.store.state.toasts.at(-1).detail,
+    'target-running：需重启此主机的 dsh web（重启 manager 无效）',
+  );
   const appliedResults = dialog.querySelector('.config-sync-results');
   assert.equal(appliedResults.querySelector('h3').textContent, '同步结果');
   assert.match(appliedResults.textContent, /已变更/);
@@ -1825,6 +1865,749 @@ test('行点击打开抽屉；有脏草稿时关闭要确认', async (t) => {
   assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '脏草稿关闭需确认');
 });
 
+test('dsh 配置文件入口默认不加载；existing 原文往返且 PUT 不回传 path', async (t) => {
+  const original = '\ufeffprovider: ark\r\nsecret: "a\\0b"\r\nnul: \0\r\n';
+  const edited = `${original}enabled: true\r\n`;
+  const loaded = {
+    exists: true,
+    path: '/home/me/.dsh/settings.yaml',
+    content: original,
+    checksum: 'cksum-v1:101:49',
+    size: 49,
+  };
+  const saved = {
+    updated: true,
+    path: loaded.path,
+    checksum: 'cksum-v1:202:64',
+    size: 64,
+  };
+  const { app, dom, calls } = await mount(t, {
+    responder: ({ path, method }) => {
+      if (path === '/api/hosts/gpu-1/dsh-settings' && method === 'GET') return response(200, loaded);
+      if (path === '/api/hosts/gpu-1/dsh-settings' && method === 'PUT') return response(200, saved);
+      return null;
+    },
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = settingsControls(drawer);
+  assert.ok(controls.section, '日志区前应有独立 dsh settings 编辑器');
+  assert.ok(
+    drawer.children.indexOf(controls.section) < drawer.children.indexOf(drawer.querySelector('.remote-log')),
+    'settings 编辑器必须位于日志区之前',
+  );
+  assert.equal(controls.section.closest('form'), null, '文件编辑器不能嵌入主机配置 form');
+  assert.equal(calls.some((call) => call.path.endsWith('/dsh-settings')), false, '打开抽屉不得自动读取秘密');
+  assert.match(controls.section.textContent, /可能包含凭据.*页面内存.*manager 配置.*日志.*SSE/);
+  assert.match(controls.section.textContent, /只原子替换 settings\.yaml.*不修改 dsh CLI.*不自动重启/);
+  assert.equal(controls.textarea.disabled, true);
+  assert.equal(
+    controls.section.querySelector('label').getAttribute('for'),
+    controls.textarea.id,
+    'settings textarea 必须有显式 label',
+  );
+  assert.equal(controls.textarea.getAttribute('autocomplete'), 'off');
+  assert.equal(controls.textarea.getAttribute('autocapitalize'), 'off');
+  assert.equal(controls.status.getAttribute('aria-live'), 'polite');
+  assert.equal(dom.document.activeElement, drawer.querySelector('.drawer-close'), '打开后焦点仍落关闭键');
+
+  controls.load.click();
+  await flush();
+  assert.equal(controls.textarea.value, original, 'BOM/CRLF/NUL 必须逐字进入 value');
+  assert.equal(controls.path.textContent, loaded.path);
+  assert.equal(controls.textarea.disabled, false);
+  const [hostSave, hostDiscard] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+  assert.equal(hostSave.disabled, true);
+  assert.equal(hostDiscard.disabled, true);
+
+  controls.textarea.value = edited;
+  controls.textarea.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true, '文件 dirty 要合并进 drawer dirty');
+  assert.equal(controls.save.disabled, false);
+  assert.equal(controls.discard.disabled, false);
+  assert.equal(hostSave.disabled, true, '文件输入不能点亮主机保存');
+  assert.equal(hostDiscard.disabled, true, '文件输入不能点亮主机放弃');
+
+  controls.save.click();
+  await flush();
+  const put = calls.find((call) => call.path.endsWith('/dsh-settings') && call.method === 'PUT');
+  assert.deepEqual(put.body, {
+    content: edited,
+    baseChecksum: loaded.checksum,
+  });
+  assert.deepEqual(Object.keys(put.body).sort(), ['baseChecksum', 'content'], 'path/force 不得进入 PUT');
+  assert.equal(controls.path.textContent, saved.path);
+  assert.equal(controls.textarea.value, edited);
+  assert.equal(controls.save.disabled, true);
+  assert.equal(app.store.state.drawer.dirty, false);
+  assert.doesNotMatch(drawer.textContent, /provider: ark|enabled: true/, '正文只能存在 textarea.value');
+  assert.doesNotMatch(JSON.stringify(app.store.state.toasts), /provider: ark|enabled: true/);
+});
+
+test('dsh 配置 missing 生成空草稿；本机同样可用且没有 SSH 文案', async (t) => {
+  const local = localHostView('workstation');
+  const { app, dom } = await mount(t, {
+    hosts: [local],
+    responder: ({ path, method }) => (
+      path === '/api/hosts/workstation/dsh-settings' && method === 'GET'
+        ? response(200, {
+          exists: false,
+          path: '/Users/me/.dsh/settings.yaml',
+          content: '',
+          checksum: null,
+          size: 0,
+        })
+        : null
+    ),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="workstation"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = settingsControls(drawer);
+  assert.ok(controls.section, '本机抽屉也要提供文件编辑器');
+  assert.doesNotMatch(drawer.textContent, /SSH/);
+  controls.load.click();
+  await flush();
+  assert.equal(controls.textarea.value, '');
+  assert.match(controls.status.textContent, /文件不存在.*保存将创建/);
+  controls.textarea.value = 'local: draft\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true);
+  controls.discard.click();
+  assert.equal(controls.textarea.value, '', '文件放弃只回到本文件 baseline');
+  assert.equal(app.store.state.drawer.dirty, false);
+});
+
+test('dsh 配置 stale 与结果未知均内联提示并保留用户草稿', async (t) => {
+  for (const failure of [
+    { status: 409, code: 'SETTINGS_STALE', summary: /目标文件已变化.*重新加载.*手工合并/ },
+    { status: 409, code: 'SETTINGS_BUSY', summary: /另一项文件操作进行中/, notStale: true },
+    { status: 409, code: 'VALIDATION', summary: /请求无效/, notStale: true },
+    { status: 500, code: 'PROTO_PARSE', summary: /结果未知.*草稿已保留/ },
+  ]) {
+    await t.test(failure.code, async (st) => {
+      let putCount = 0;
+      const { dom } = await mount(st, {
+        responder: ({ path, method }) => {
+          if (!path.endsWith('/dsh-settings')) return null;
+          if (method === 'GET') {
+            return response(200, {
+              exists: true,
+              path: '/home/me/.dsh/settings.yaml',
+              content: 'base: one\n',
+              checksum: 'cksum-v1:1:10',
+              size: 10,
+            });
+          }
+          putCount += 1;
+          return response(failure.status, {
+            error: `unsafe-${failure.code}-secret`,
+            code: failure.code,
+            detail: 'unsafe-detail-secret',
+          });
+        },
+      });
+      dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+      await flush();
+      const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+      controls.load.click();
+      await flush();
+      controls.textarea.value = `draft: ${failure.code}\n`;
+      controls.textarea.dispatchEvent({ type: 'input' });
+      controls.save.click();
+      await flush();
+
+      assert.equal(putCount, 1);
+      assert.equal(controls.textarea.value, `draft: ${failure.code}\n`);
+      assert.match(controls.status.textContent, failure.summary);
+      assert.equal(controls.save.disabled, false, '失败后仍应允许用户处理当前草稿');
+      assert.doesNotMatch(controls.status.textContent, /unsafe-|detail-secret/);
+      if (failure.notStale) assert.doesNotMatch(controls.status.textContent, /目标文件已变化/);
+    });
+  }
+});
+
+test('stale/结果未知后重新加载：旧 dirty 草稿留在只读对照区，保存后清除', async (t) => {
+  for (const failure of [
+    { status: 409, code: 'SETTINGS_STALE' },
+    { status: 500, code: 'PROTO_PARSE' },
+  ]) {
+    await t.test(failure.code, async (st) => {
+      let reads = 0;
+      let writes = 0;
+      const { dom } = await mount(st, {
+        responder: ({ path, method }) => {
+          if (!path.endsWith('/dsh-settings')) return null;
+          if (method === 'GET') {
+            reads += 1;
+            const content = reads === 1 ? 'base: one\n' : 'remote: newer\n';
+            return response(200, {
+              exists: true,
+              path: '/home/me/.dsh/settings.yaml',
+              content,
+              checksum: `cksum-v1:${reads}:${content.length}`,
+              size: content.length,
+            });
+          }
+          writes += 1;
+          if (writes === 1) {
+            return response(failure.status, {
+              error: 'unsafe-secret',
+              code: failure.code,
+              detail: 'unsafe-detail',
+            });
+          }
+          return response(200, {
+            updated: true,
+            path: '/home/me/.dsh/settings.yaml',
+            checksum: 'cksum-v1:3:14',
+            size: 14,
+          });
+        },
+      });
+      dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+      await flush();
+      const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+      controls.load.click();
+      await flush();
+      const oldDraft = `draft: ${failure.code}\n`;
+      controls.textarea.value = oldDraft;
+      controls.textarea.dispatchEvent({ type: 'input' });
+      controls.save.click();
+      await flush();
+
+      controls.load.click();
+      await flush();
+      dom.app.querySelector('.confirm-dialog').querySelectorAll('button')
+        .find((node) => node.textContent === '重新加载').click();
+      await flush();
+
+      assert.equal(controls.textarea.value, 'remote: newer\n');
+      assert.equal(controls.preserved.hidden, false);
+      assert.equal(controls.preserved.open, false, '旧草稿默认折叠，避免与当前文件混淆');
+      assert.equal(controls.preservedTextarea.readOnly, true);
+      assert.equal(controls.preservedTextarea.value, oldDraft);
+      assert.match(controls.preserved.textContent, /重新加载前的草稿（只读）/);
+      assert.match(controls.status.textContent, /重新加载前的草稿.*手工对照合并/);
+      assert.doesNotMatch(controls.preserved.textContent, new RegExp(failure.code),
+        '旧草稿只进 textarea.value，不进入普通 DOM 文本');
+
+      controls.textarea.value = 'merged: final\n';
+      controls.textarea.dispatchEvent({ type: 'input' });
+      controls.save.click();
+      await flush();
+      assert.equal(controls.preserved.hidden, true, '后续保存成功应清理旧草稿副本');
+      assert.equal(controls.preservedTextarea.value, '');
+    });
+  }
+});
+
+test('本机 stale 使用“目标文件”文案，不渗入远端措辞', async (t) => {
+  const { dom } = await mount(t, {
+    hosts: [localHostView('workstation')],
+    responder: ({ path, method }) => {
+      if (!path.endsWith('/dsh-settings')) return null;
+      if (method === 'GET') {
+        return response(200, {
+          exists: true,
+          path: '/Users/me/.dsh/settings.yaml',
+          content: 'local: base\n',
+          checksum: 'cksum-v1:1:12',
+          size: 12,
+        });
+      }
+      return response(409, { error: 'unsafe', code: 'SETTINGS_STALE' });
+    },
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="workstation"]').click();
+  await flush();
+  const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+  controls.load.click();
+  await flush();
+  controls.textarea.value = 'local: draft\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  controls.save.click();
+  await flush();
+  assert.match(controls.status.textContent, /目标文件已变化/);
+  assert.doesNotMatch(controls.status.textContent, /远端/);
+});
+
+test('重新加载 dirty 文件先确认：取消保留，接受后用新 baseline 覆盖', async (t) => {
+  let reads = 0;
+  const bodies = [
+    {
+      exists: true,
+      path: '/home/me/.dsh/settings.yaml',
+      content: 'version: one\n',
+      checksum: 'cksum-v1:1:13',
+      size: 13,
+    },
+    {
+      exists: true,
+      path: '/home/me/.dsh/settings.yaml',
+      content: 'version: two\n',
+      checksum: 'cksum-v1:2:13',
+      size: 13,
+    },
+  ];
+  const { dom } = await mount(t, {
+    responder: ({ path, method }) => (
+      path.endsWith('/dsh-settings') && method === 'GET'
+        ? response(200, bodies[reads++])
+        : null
+    ),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+  controls.load.click();
+  await flush();
+  controls.textarea.value = 'local: draft\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+
+  controls.load.click();
+  await flush();
+  let dialog = dom.app.querySelector('.confirm-dialog');
+  assert.equal(dialog.open, true);
+  assert.match(dialog.textContent, /重新加载.*未保存.*文件修改/);
+  dialog.querySelectorAll('button').find((node) => node.textContent === '取消').click();
+  await flush();
+  assert.equal(reads, 1);
+  assert.equal(controls.textarea.value, 'local: draft\n');
+
+  controls.load.click();
+  await flush();
+  dialog = dom.app.querySelector('.confirm-dialog');
+  dialog.querySelectorAll('button').find((node) => node.textContent === '重新加载').click();
+  await flush();
+  assert.equal(reads, 2);
+  assert.equal(controls.textarea.value, 'version: two\n');
+  assert.equal(controls.save.disabled, true);
+});
+
+test('load editEpoch 防御迟到覆盖：加载中 textarea 禁用，变化后保留旧 baseline', async (t) => {
+  const reload = deferred();
+  let reads = 0;
+  const { dom, calls } = await mount(t, {
+    responder: ({ path, method }) => {
+      if (!path.endsWith('/dsh-settings')) return null;
+      if (method === 'GET') {
+        reads += 1;
+        if (reads === 1) {
+          return response(200, {
+            exists: true,
+            path: '/home/me/.dsh/settings.yaml',
+            content: 'base: one\n',
+            checksum: 'cksum-v1:1:10',
+            size: 10,
+          });
+        }
+        return reload.promise;
+      }
+      return response(200, {
+        updated: true,
+        path: '/home/me/.dsh/settings.yaml',
+        checksum: 'cksum-v1:3:14',
+        size: 14,
+      });
+    },
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+  controls.load.click();
+  await flush();
+  controls.textarea.value = 'local: before\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  controls.load.click();
+  await flush();
+  dom.app.querySelector('.confirm-dialog').querySelectorAll('button')
+    .find((node) => node.textContent === '重新加载').click();
+  await flush();
+  assert.equal(controls.textarea.disabled, true, '加载中应先阻止正常输入');
+
+  controls.textarea.value = 'local: raced\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  reload.resolve(response(200, {
+    exists: true,
+    path: '/home/me/.dsh/settings.yaml',
+    content: 'remote: newer\n',
+    checksum: 'cksum-v1:2:14',
+    size: 14,
+  }));
+  await flush();
+
+  assert.equal(controls.textarea.disabled, false);
+  assert.equal(controls.textarea.value, 'local: raced\n');
+  assert.match(controls.status.textContent, /草稿已变化.*再次加载/);
+  controls.save.click();
+  await flush();
+  assert.equal(
+    calls.filter((call) => call.path.endsWith('/dsh-settings') && call.method === 'PUT').at(-1).body.baseChecksum,
+    'cksum-v1:1:10',
+    '被 editEpoch 拒绝的响应不能偷换 CAS baseline',
+  );
+});
+
+test('hosts:reset 复用主机三方合并；删除当前主机则强制关闭并清秘密', async (t) => {
+  const original = hostView('gpu-1');
+  const settingsSecret = 'settings-secret: keep-until-remove\n';
+  const { dom, es } = await mount(t, {
+    hash: '#/manage',
+    hosts: [original],
+    responder: ({ path, method }) => (
+      path.endsWith('/dsh-settings') && method === 'GET'
+        ? response(200, {
+          exists: true,
+          path: '/home/me/.dsh/settings.yaml',
+          content: 'settings: base\n',
+          checksum: 'cksum-v1:1:15',
+          size: 15,
+        })
+        : null
+    ),
+  });
+  const originalRow = dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]');
+  originalRow.focus();
+  originalRow.click();
+  await flush();
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = settingsControls(drawer);
+  controls.load.click();
+  await flush();
+  controls.textarea.value = settingsSecret;
+  controls.textarea.dispatchEvent({ type: 'input' });
+
+  const refreshed = hostView('gpu-1', {
+    config: {
+      ...original.config,
+      inject: { ...original.config.inject, env: { RESET: '2' } },
+    },
+  });
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [refreshed],
+    logs: [],
+  });
+  await flush();
+  assert.equal(drawer.querySelector('.drawer-form textarea').value, 'RESET=2',
+    'host config baseline 应按 hosts:changed 同一规则更新');
+  assert.equal(controls.textarea.value, settingsSecret, 'settings 草稿不受 host reset 合并影响');
+
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '前提：drawer 自己的关闭确认已打开');
+
+  es().send('snapshot', {
+    revision: 3,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [hostView('gpu-2')],
+    logs: [],
+  });
+  await flush();
+  assert.equal(drawer.hidden, true, '主机删除必须无确认直接关闭');
+  assert.equal(controls.textarea.value, '');
+  assert.equal(controls.path.textContent, '');
+  assert.equal(controls.status.textContent, '');
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, false, '强制关闭前必须取消遗留确认框');
+  assert.equal(dom.document.activeElement, dom.app.querySelector('.manage-back'),
+    '原触发行已 detach 时应聚焦当前稳定导航');
+  assert.notEqual(dom.document.activeElement, originalRow);
+  assert.match(dom.app.querySelector('.toast-warn').textContent, /已从清单移除/);
+});
+
+test('settings 保存中主机被强制删除：成功仅发安全反馈且不回写已关闭 DOM', async (t) => {
+  const saveResponse = deferred();
+  const secret = 'credential: forced-close-secret\n';
+  const { app, dom, es } = await mount(t, {
+    hash: '#/manage',
+    responder: ({ path, method }) => {
+      if (!path.endsWith('/dsh-settings')) return null;
+      if (method === 'GET') {
+        return response(200, {
+          exists: true,
+          path: '/home/me/.dsh/settings.yaml',
+          content: 'base: true\n',
+          checksum: 'cksum-v1:1:11',
+          size: 11,
+        });
+      }
+      return saveResponse.promise;
+    },
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = settingsControls(drawer);
+  controls.load.click();
+  await flush();
+  controls.textarea.value = secret;
+  controls.textarea.dispatchEvent({ type: 'input' });
+  controls.save.click();
+  assert.equal(app.store.isPending('settings:save', 'gpu-1'), true);
+
+  es().send('snapshot', {
+    revision: 2,
+    manager: MANAGER_INFO,
+    defaults: DEFAULTS,
+    hosts: [],
+    logs: [],
+  });
+  await flush();
+  assert.equal(drawer.hidden, true);
+  assert.equal(controls.textarea.value, '');
+
+  saveResponse.resolve(response(200, {
+    updated: true,
+    path: '/unsafe/secret/settings.yaml',
+    checksum: 'secret-checksum',
+    size: secret.length,
+  }));
+  await flush();
+
+  const toast = app.store.state.toasts.at(-1);
+  assert.equal(toast.level, 'success');
+  assert.equal(toast.summary, 'gpu-1 的 dsh 配置文件已保存（主机详情已关闭）');
+  assert.equal(toast.detail, null);
+  assert.doesNotMatch(dom.app.querySelector('.toast-region').textContent,
+    /forced-close-secret|unsafe\/secret|secret-checksum/);
+  assert.equal(controls.textarea.value, '');
+  assert.equal(controls.path.textContent, '');
+});
+
+test('关闭确认准确合并主机/文件 dirty，确认后清空秘密 DOM 与引用', async (t) => {
+  const secret = 'credential: close-only-secret\n';
+  const { app, dom } = await mount(t, {
+    responder: ({ path, method }) => (
+      path.endsWith('/dsh-settings') && method === 'GET'
+        ? response(200, {
+          exists: true,
+          path: '/home/me/.dsh/settings.yaml',
+          content: 'baseline: true\n',
+          checksum: 'cksum-v1:9:15',
+          size: 15,
+        })
+        : null
+    ),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const drawer = dom.app.querySelector('.host-drawer');
+  const controls = settingsControls(drawer);
+  controls.load.click();
+  await flush();
+  const env = drawer.querySelector('.drawer-form textarea');
+  const [hostSave] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+  env.value = 'HOST_DIRTY=1';
+  drawer.querySelector('.drawer-form').dispatchEvent({ type: 'input' });
+  assert.equal(hostSave.disabled, false);
+  assert.equal(controls.save.disabled, true, '主机 dirty 不能点亮文件保存');
+  controls.textarea.value = secret;
+  controls.textarea.dispatchEvent({ type: 'input' });
+  assert.equal(app.store.state.drawer.dirty, true);
+  assert.doesNotMatch(drawer.textContent, /close-only-secret/, '秘密只能在 textarea.value');
+
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+  const dialog = dom.app.querySelector('.confirm-dialog');
+  assert.equal(dialog.open, true);
+  assert.match(dialog.textContent, /主机配置/);
+  assert.match(dialog.textContent, /dsh 配置文件/);
+  dialog.querySelectorAll('button').find((node) => node.textContent === '放弃').click();
+  await flush();
+
+  assert.equal(drawer.hidden, true);
+  assert.equal(controls.textarea.value, '');
+  assert.equal(controls.path.textContent, '');
+  assert.equal(controls.status.textContent, '');
+  assert.equal(app.store.state.drawer.dirty, false);
+  assert.doesNotMatch(drawer.textContent, /close-only-secret|baseline: true/);
+});
+
+test('close/reopen 同名主机隔离迟到 load，旧秘密不能注入新 session', async (t) => {
+  const first = deferred();
+  let reads = 0;
+  const { dom } = await mount(t, {
+    responder: ({ path, method }) => {
+      if (!path.endsWith('/dsh-settings') || method !== 'GET') return null;
+      reads += 1;
+      if (reads === 1) return first.promise;
+      return response(200, {
+        exists: true,
+        path: '/home/me/.dsh/settings.yaml',
+        content: 'fresh: yes\n',
+        checksum: 'cksum-v1:2:11',
+        size: 11,
+      });
+    },
+  });
+  const row = dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]');
+  row.click();
+  await flush();
+  let drawer = dom.app.querySelector('.host-drawer');
+  let controls = settingsControls(drawer);
+  controls.load.click();
+  assert.equal(controls.load.disabled, true);
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+  assert.equal(controls.textarea.value, '');
+
+  row.click();
+  await flush();
+  drawer = dom.app.querySelector('.host-drawer');
+  controls = settingsControls(drawer);
+  assert.equal(controls.textarea.value, '');
+  assert.equal(controls.path.textContent, '');
+  first.resolve(response(200, {
+    exists: true,
+    path: '/old/secret/settings.yaml',
+    content: 'late-secret: must-not-appear\n',
+    checksum: 'cksum-v1:1:29',
+    size: 29,
+  }));
+  await flush();
+  assert.equal(controls.textarea.value, '', '旧 session 响应不得写入重开的同名主机');
+  assert.equal(controls.path.textContent, '');
+  assert.doesNotMatch(drawer.textContent, /must-not-appear|\/old\/secret/);
+
+  controls.load.click();
+  await flush();
+  assert.equal(controls.textarea.value, 'fresh: yes\n');
+});
+
+test('settings pending 与断联实时更新按钮：save 阻止加载/关闭，写后续编辑保持 dirty', async (t) => {
+  const loadResponse = deferred();
+  const saveResponse = deferred();
+  const { dom, es } = await mount(t, {
+    responder: ({ path, method }) => {
+      if (!path.endsWith('/dsh-settings')) return null;
+      return method === 'GET' ? loadResponse.promise : saveResponse.promise;
+    },
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+  const controls = settingsControls(dom.app.querySelector('.host-drawer'));
+  controls.load.click();
+  assert.equal(controls.load.disabled, true, '同类 load pending 要立刻禁用');
+  loadResponse.resolve(response(200, {
+    exists: true,
+    path: '/home/me/.dsh/settings.yaml',
+    content: 'base: true\n',
+    checksum: 'cksum-v1:1:11',
+    size: 11,
+  }));
+  await flush();
+  controls.textarea.value = 'base: changed\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  controls.save.click();
+  assert.equal(controls.save.disabled, true, '同类 save pending 要立刻禁用');
+  assert.equal(controls.load.disabled, true, 'save pending 时不能并发 load');
+  assert.equal(controls.textarea.disabled, false, '保存中仍允许继续编辑下一版草稿');
+  assert.equal(controls.discard.disabled, true);
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+  drawer.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  dom.app.querySelector('.drawer-scrim').click();
+  await flush();
+  assert.equal(drawer.hidden, false, '保存中 close/Esc/scrim 都不得关闭');
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, false, '保存中不应弹放弃确认');
+  assert.match(controls.status.textContent, /保存正在进行.*完成后再关闭.*不会取消写入/);
+
+  controls.textarea.value = 'base: edited-after-submit\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  saveResponse.resolve(response(200, {
+    updated: true,
+    path: '/home/me/.dsh/settings.yaml',
+    checksum: 'cksum-v1:2:14',
+    size: 14,
+  }));
+  await flush();
+  assert.equal(controls.textarea.value, 'base: edited-after-submit\n');
+  assert.equal(controls.save.disabled, false);
+  assert.equal(controls.load.disabled, false);
+  assert.equal(controls.status.dataset.tone, 'warn');
+  assert.match(controls.status.textContent, /已保存提交时版本.*当前仍有未保存修改/);
+
+  drawer.querySelector('.drawer-close').click();
+  await flush();
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, true, '保存完成后恢复普通 dirty 关闭确认');
+  dom.app.querySelector('.confirm-dialog').querySelectorAll('button')
+    .find((node) => node.textContent === '取消').click();
+  await flush();
+
+  es().open();
+  for (const fn of es().listeners.get('error') ?? []) fn({});
+  await flush();
+  controls.textarea.value = 'offline: draft\n';
+  controls.textarea.dispatchEvent({ type: 'input' });
+  assert.equal(controls.save.disabled, true, '断联时 save 必须禁用');
+  assert.equal(controls.load.disabled, false, '断联/resync 仍应允许 settings GET');
+});
+
+test('主机配置保存期间锁定表单和关闭；迟到响应不覆盖程序性后续 edit', async (t) => {
+  const saveResponse = deferred();
+  const original = hostView('gpu-1');
+  const saved = hostView('gpu-1', {
+    config: { ...original.config, workdir: '/srv/submitted' },
+  });
+  const { app, dom } = await mount(t, {
+    hosts: [original],
+    responder: ({ path, method }) => (
+      path === '/api/hosts/gpu-1/config' && method === 'PUT'
+        ? saveResponse.promise
+        : null
+    ),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const workdir = drawer.querySelector('input[type="text"]');
+  const [save, discard] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+  workdir.value = '/srv/submitted';
+  form.dispatchEvent({ type: 'input' });
+  save.click();
+
+  assert.equal(app.store.isPending('config:save', 'gpu-1'), true);
+  for (const control of [...form.querySelectorAll('input'), ...form.querySelectorAll('textarea')]) {
+    assert.equal(control.disabled, true, 'config:save pending 应锁定全部主机配置输入');
+  }
+  assert.equal(save.disabled, true);
+  assert.equal(discard.disabled, true);
+
+  drawer.querySelector('.drawer-close').click();
+  drawer.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  dom.app.querySelector('.drawer-scrim').click();
+  await flush();
+  assert.equal(drawer.hidden, false);
+  assert.equal(dom.app.querySelector('.confirm-dialog').open, false);
+  assert.match(app.store.state.toasts.at(-1).summary, /配置正在保存.*完成后再关闭.*不会取消写入/);
+
+  workdir.value = '/srv/programmatic-after-submit';
+  form.dispatchEvent({ type: 'input' });
+  saveResponse.resolve(response(200, { host: saved }));
+  await flush();
+
+  assert.equal(workdir.value, '/srv/programmatic-after-submit',
+    '保存响应只能经 store 三方合并，不能直接 writeForm 覆盖后续 edit');
+  assert.equal(drawer.querySelector('.card-notice').hidden, false, '同字段后续 edit 应显式成为冲突');
+  assert.equal(app.store.getHost('gpu-1').config.workdir, '/srv/submitted');
+  assert.equal(app.store.isPending('config:save', 'gpu-1'), false);
+  for (const control of [...form.querySelectorAll('input'), ...form.querySelectorAll('textarea')]) {
+    assert.equal(control.disabled, false);
+  }
+  assert.equal(discard.disabled, false);
+});
+
 test('抽屉保存归一化后无有效差异：零 PUT、canonical 回填并清脏', async (t) => {
   const base = hostView('gpu-1');
   const host = hostView('gpu-1', {
@@ -2143,6 +2926,19 @@ test('抽屉里的启动目录：改值只提交 workdir，非法值就地报错
   const box = drawer.querySelector('input[type="text"]');
   assert.ok(box, '注入配置区应有启动目录输入框');
   assert.match(box.getAttribute('placeholder'), /家目录/);
+  const workdirField = box.closest('.field');
+  assert.match(workdirField.querySelector('label').textContent, /^启动目录（进程 CWD）/);
+  assert.equal(
+    workdirField.querySelector('.field-hint').textContent,
+    '这是 dsh web 进程的 CWD；新会话未显式选择 Workspace 时会回落到这里。它不会自动登记 Workspace，也不会替换浏览器恢复的历史 Session。',
+  );
+  assert.doesNotMatch(workdirField.textContent, /默认 workspace 根|加载 AGENTS\.md/);
+  const remoteConfigNote = drawer.querySelector('.remote-config-note');
+  assert.equal(remoteConfigNote.hidden, false);
+  assert.equal(
+    remoteConfigNote.textContent,
+    'dsh web 的“打开配置文件”发生在目标主机；目标主机没有桌面环境时，请使用下方“dsh 配置文件”编辑器，无需通过 SSH。',
+  );
   const form = drawer.querySelector('.drawer-form');
   const save = drawer.querySelectorAll('.btn').find((b) => b.textContent === '保存');
 
@@ -2238,14 +3034,21 @@ test('抽屉里的「重启后生效」徽标：仅当运行实例与已存配�
   host.config = { ...host.config, workdir: '/root/b' };
   host.web = { ...host.web, workdir: '/root/a' };
 
-  const { dom } = await mount(t, { hosts: [host] });
+  const { dom, es } = await mount(t, { hosts: [host] });
   dom.app.querySelector('.host-table tbody tr').click();
   await flush();
 
   const drawer = dom.app.querySelector('.host-drawer');
   const badgeEl = drawer.querySelector('.pending-badge');
   assert.equal(badgeEl.hidden, false, '两值不等且实例在跑 → 提示重启');
-  assert.equal(badgeEl.textContent, '重启后生效');
+  assert.equal(badgeEl.textContent, '需重启此主机的 dsh web（重启 manager 无效）');
+
+  es().send('host-changed', {
+    revision: 2,
+    host: { ...host, web: { ...host.web, pid: 1000, workdir: '/root/b' } },
+  });
+  await flush();
+  assert.equal(badgeEl.hidden, true, '主机 dsh web 用新 workdir 重启后提示应消失');
 });
 
 test('抽屉里的「重启后生效」徽标：值一致时隐藏；实测工作目录照常展示', async (t) => {
@@ -2278,6 +3081,9 @@ test('manager 重启需确认，确认后发请求', async (t) => {
 
   const dialog = dom.app.querySelector('.confirm-dialog');
   assert.equal(dialog.open, true);
+  assert.match(dialog.textContent, /存活的受管实例.*复核接管.*只重建隧道/);
+  assert.match(dialog.textContent, /ready.*autoStart.*才会拉起/);
+  assert.doesNotMatch(dialog.textContent, /按 autoStart 重建/);
   dialog.querySelectorAll('.btn').find((b) => b.textContent === '重启').click();
   await flush();
 

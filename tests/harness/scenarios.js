@@ -9,6 +9,99 @@ export const SCENARIOS = {
   /** 健康的 ready 主机（基线）。 */
   healthy: () => newHostState(),
 
+  /** settings.yaml 缺失（正常初始态）。 */
+  'settings-missing': () => newHostState(),
+
+  /** 普通 UTF-8 settings.yaml；内容只用合成测试值。 */
+  'settings-existing': (content = 'provider: synthetic\nkey: test-only\n') => newHostState({
+    settingsHex: Buffer.from(content).toString('hex'),
+    settingsMode: 0o600,
+  }),
+
+  /** 存在但为零字节的 settings.yaml。 */
+  'settings-empty': () => newHostState({
+    settingsHex: '',
+    settingsMode: 0o600,
+  }),
+
+  /** 非法 UTF-8：截断/错误 continuation 组合。 */
+  'settings-invalid-utf8': () => newHostState({
+    settingsHex: Buffer.from([0xc3, 0x28]).toString('hex'),
+    settingsMode: 0o600,
+  }),
+
+  /** 精确 512 KiB 的合法读取边界。 */
+  'settings-exact-cap': () => newHostState({
+    settingsHex: Buffer.alloc(512 * 1024, 0x78).toString('hex'),
+    settingsMode: 0o600,
+  }),
+
+  /** 512 KiB + 1，READ 必须以 settings-too-large 快败。 */
+  'settings-too-large': () => newHostState({
+    settingsHex: Buffer.alloc(512 * 1024 + 1, 0x78).toString('hex'),
+    settingsMode: 0o600,
+  }),
+
+  /** POSIX 工具/方言能力不满足，只禁用 settings 编辑。 */
+  'settings-unsupported': () => newHostState({
+    faults: { settingsUnsupported: true },
+  }),
+
+  /** 目标类型/权限等普通读取故障。 */
+  'settings-read-fail': () => newHostState({
+    faults: { settingsReadFail: true },
+  }),
+
+  /** 成功形状内故意回放错误 CRC，覆盖安全 PROTO_PARSE。 */
+  'settings-protocol-corrupt': () => newHostState({
+    settingsHex: Buffer.from('protocol-corrupt: synthetic\n').toString('hex'),
+    settingsMode: 0o600,
+    faults: { settingsProtocolCorrupt: true },
+  }),
+
+  /** 提交点前写失败，正式目标与备份都不动。 */
+  'settings-write-fail': () => newHostState({
+    faults: { settingsWriteFail: true },
+  }),
+
+  /** staging 已接收后灾难中断；允许遗留，下一次 settings 操作必须清理。 */
+  'settings-staging-catastrophic': () => newHostState({
+    faults: { settingsCatastrophicAfterStaging: true },
+  }),
+
+  /** 备份已发布、尚未提交时结果无法确认；正式目标仍保持 base。 */
+  'settings-write-unknown-before-commit': (
+    content = 'unknown-before-base: synthetic\n',
+  ) => newHostState({
+    settingsHex: Buffer.from(content).toString('hex'),
+    settingsMode: 0o600,
+    faults: { settingsWriteUnknownBeforeCommit: true },
+  }),
+
+  /** 模拟已提交但无法确认响应，调用方必须重新 GET。 */
+  'settings-write-unknown-after-commit': (
+    content = 'unknown-after-base: synthetic\n',
+  ) => newHostState({
+    settingsHex: Buffer.from(content).toString('hex'),
+    settingsMode: 0o600,
+    faults: { settingsWriteUnknown: true },
+  }),
+
+  /** 兼容旧场景名：同 unknown-after-commit。 */
+  'settings-write-unknown': () => newHostState({
+    faults: { settingsWriteUnknown: true },
+  }),
+
+  /** 第一次 CAS 后由外部编辑器改写，第二次 CAS 必须拒绝覆盖。 */
+  'settings-change-before-second-cas': (
+    content = 'second-cas-base: synthetic\n',
+    external = 'second-cas-external: synthetic\n',
+  ) => newHostState({
+    settingsHex: Buffer.from(content).toString('hex'),
+    settingsMode: 0o600,
+    faults: { settingsChangeBeforeSecondCas: external },
+  }),
+
   /** dsh 未安装 → no_dsh(missing-bin)。 */
   'no-dsh-missing-bin': () => newHostState({ dshInstalled: false }),
 

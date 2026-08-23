@@ -63,6 +63,9 @@
 | STOP 指纹不符 → 拒杀（KILL_REFUSED，不清 state） | `tests/harness/harness.test.js`（pid-reuse）、`tests/integration/flows.test.js`、IT-05 |
 | STOP 缺指纹拒绝拼装 | `tests/lib/proto.test.js` §1.3 |
 | LOG 尾部读取 / 文件缺失 → `(no log)` | `tests/lib/proto.test.js` §1.4、`tests/harness/harness.test.js`、`tests/integration/cli.test.js` |
+| SETTINGS READ/WRITE 模板逐字一致、`sh -n` 语法、固定 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`、新退出码 10/11/12 不撞 8/9；POSIX `cksum` 能力探测同时核对算法，`od` hex 输出在 macOS/BSD 上也不超过 2 MiB transport 上限 | `tests/lib/proto.test.js` |
+| SETTINGS READ：missing/empty/UTF-8/精确 512 KiB 成功；超限、非法 UTF-8、工具不支持、读取失败、CRC/framing/txn 污染严格分类，正文与协议噪声不进入错误 | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| SETTINGS WRITE：base checksum CAS、backup 后二次 CAS、同目录临时文件 + `mv` 提交、chmod 600；提交前/后中断保守报告 commit state，stale 不覆盖，unknown 要求 GET；正常退出和后续操作只清理 reserved staging | `tests/lib/proto.test.js`、`tests/settings-file.test.js`、`tests/integration/settings.test.js` |
 | patch 清理协议（空格包裹匹配 + 兼职 mkdir） | `tests/lib/proto.test.js` §1.5 |
 | 远端 patch 同步：首传 / hash 未变跳过 / 改内容换名 / 已移除项与旧文件清理；建目录失败不继续半套上传 | `tests/harness/harness.test.js`、`tests/launcher.test.js`、`tests/patchsync.test.js`、IT-09 |
 | 本机 patch 目标防护：dangling symlink 不覆盖、不沿链写出受控目录；256 个稳定候选全占用时有界失败且保留既有项 | `tests/patchsync.test.js` |
@@ -75,7 +78,7 @@
 
 | 分支 / 场景 | 覆盖 |
 |---|---|
-| `localExec` argv 为可覆盖前缀 + `-c` + 原始协议正文；ExecResult、2 MiB 留尾、timeout / AbortSignal 的 TERM→KILL 语义与 ssh 一致，本机失败归 `LOCAL_TIMEOUT / LOCAL_EXEC_FAILED` | `tests/lib/ssh.test.js`（argv / 结果形状 / 输出封顶 / timeout / abort）、`tests/launcher.test.js`（与 ssh 分支逐字对照五类协议模板） |
+| `sshExec` / `localExec` 接受有界 binary stdin，拒绝非 Buffer/Uint8Array 与超限输入，spawn/error/EPIPE/abort 都安全收口；`localExec` argv 为可覆盖前缀 + `-c` + 原始协议正文，ExecResult、2 MiB 留尾、timeout / AbortSignal 的 TERM→KILL 语义与 ssh 一致，本机失败归 `LOCAL_TIMEOUT / LOCAL_EXEC_FAILED` | `tests/lib/ssh.test.js`（stdin / argv / 结果形状 / 输出封顶 / timeout / abort）、`tests/launcher.test.js` |
 | `localCopy` 目标只许在真实 HOME 的 `.dsh_center_remote/` 内：拒绝绝对路径、`..`、NUL、中间目录 symlink；同目录临时文件提交，源失败/预中止不留正式文件，rename 后迟到 abort 不回滚 | `tests/lib/ssh.test.js`（正常复制 / 提交点 / 路径穿越 / symlink / 失败与中止） |
 | ssh / localExec / localCopy 共用在飞账本与关停闩：关停收敛、闩后不启动、`reopenSsh` 恢复；本机 copy/exec 错误不伪装成 SSH 错误 | `tests/lib/ssh.test.js`（`shutdownSsh`、`liveChildCount`、共享闩、`execFailure`） |
 | PROBE 与 LAUNCH/POLL/VERIFY/STOP/LOG 只按显式 `local` 分流；同一 proto builder 输出逐字一致，普通主机名不触发本机猜测 | `tests/prober.test.js`、`tests/launcher.test.js` |
@@ -87,6 +90,7 @@
 | 本机进程崩溃：HTTP 失败后巡检经同一 VERIFY 判死，清 direct entry 并 `running → crashed` | `tests/harness/local-flow.test.js`「本机巡检」 |
 | 本机 PID 复用：STOP 指纹不符返回 `KILL_REFUSED`，保留 state.web / direct entry / mappedUrl 与存活进程；后续巡检不退化为 no-tunnel | `tests/harness/local-flow.test.js`「本机停止」 |
 | 本机 STOP timeout：保留 running 与 direct entry / mappedUrl，后续巡检仍正常；再次 STOP 成功后才清 web / direct / mappedUrl | `tests/harness/local-flow.test.js`「STOP timeout」 |
+| 本机 settings-file 复用同一模板、解析器、CAS 与固定路径规则，经 stdin 完成 missing→create→read→update→stale；不经过 fake ssh | `tests/harness/local-flow.test.js`、`tests/settings-file.test.js` |
 
 ## 3. 隧道与巡检分支（11 §5）
 
@@ -108,11 +112,26 @@
 | 关停收走在飞的一次性 ssh（TERM→KILL），且落闩不再起新的 | `tests/lib/ssh.test.js`（`shutdownSsh` 两条） |
 | 本机 direct entry 恒等端口、无子进程、HTTP 直达实际 web 端口；崩溃巡检不走隧道重建 | `tests/tunnel.test.js`、`tests/harness/local-flow.test.js` |
 
-## 4. 故障注入场景库（`tests/harness/scenarios.js` 15 个）
+## 4. 故障注入场景库（`tests/harness/scenarios.js` 30 个）
 
 | 场景 | 覆盖它的用例 |
 |---|---|
 | healthy | 全部集成主干（flows / loop / cli / sse / setup） |
+| settings-missing | `tests/integration/settings.test.js`（missing→create） |
+| settings-existing | `tests/integration/settings.test.js`（GET/PUT/backup/stale 主干） |
+| settings-empty | `tests/integration/settings.test.js`（零字节存在态） |
+| settings-invalid-utf8 | `tests/integration/settings.test.js`（422 且不泄漏原始字节） |
+| settings-exact-cap | `tests/integration/settings.test.js`（精确 512 KiB GET/PUT） |
+| settings-too-large | `tests/integration/settings.test.js`（超一字节即 413） |
+| settings-unsupported | `tests/integration/settings.test.js`（501，其他生命周期协议不受影响） |
+| settings-read-fail | `tests/integration/settings.test.js`（固定目标读取失败） |
+| settings-protocol-corrupt | `tests/integration/settings.test.js`（CRC/成功帧损坏） |
+| settings-write-fail | `tests/integration/settings.test.js`（提交前失败不改正式文件） |
+| settings-staging-catastrophic | `tests/integration/settings.test.js`（灾难中断后的 reserved staging 收敛） |
+| settings-write-unknown-before-commit | `tests/integration/settings.test.js`（提交前结果未知） |
+| settings-write-unknown-after-commit | `tests/integration/settings.test.js`（已提交但响应未知，必须 GET） |
+| settings-write-unknown | `tests/integration/settings.test.js`（兼容 unknown-after-commit 场景名） |
+| settings-change-before-second-cas | `tests/integration/settings.test.js`（backup 后外部改写，二次 CAS 拒绝覆盖） |
 | no-dsh-missing-bin | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
 | no-dsh-no-profile | 同上 |
 | unreachable | 同上 + IT-01 |
@@ -141,6 +160,8 @@
 | 批量同步响应的条件契约：`dryRun:true` 必须带 opaque `previewToken` 且 applied/hosts 为空；`dryRun:false` 不回 token 并返回应用结果，判别字段缺失或非法不能误入任一分支 | `tests/api.test.js`、`tests/demo-contract.test.js`（共用 `tests/contract/schemas.js`） |
 | preview token 绑定源、目标集合与五类同步字段：对象/目标顺序稳定且不泄漏 secret；源或任一目标的 profile 变化、会话重置（manager 重启边界）都会 `CONFIG_STALE`，范围外字段变化不误判；apply 在提交点重新核对后只做一次原子落盘，全一致时不重写 | `tests/config-sync.test.js`、`tests/api.test.js`、`tests/demo-contract.test.js`、`tests/integration/ui-live.test.js` |
 | 主机配置与全局默认经真 PUT 持久化并由 SSE/REST/页面 store 收敛；`CONFIG_STALE` 返回 409 且磁盘逐字不变 | `tests/integration/flows.test.js`、`tests/integration/ui-live.test.js` |
+| `GET/PUT /api/hosts/:name/dsh-settings` 只接受无 query、无尾斜杠的固定资源；先过 setup/主机/body/schema/UTF-8/512 KiB 校验，再在 hostQueue 队首重查主机与 local 身份；同主机最多一个 settings 操作占位，忙时 409 快败 | `tests/api.test.js`、`tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| settings 响应契约覆盖 missing/existing 与 write 结果；CAS stale/too-large/invalid-UTF8/unsupported/read-write fail/transport unknown 映射稳定，非成功响应、解析错误、toast/detail 不回显 content、hex、stdin、stderr 或任意服务端 code | `tests/contract/schemas.js`、`tests/api.test.js`、`tests/settings-file.test.js`、`tests/integration/settings.test.js`、`tests/web/actions.test.js` |
 | 请求体解析边界（空体 / 非法 JSON / 超限 → VALIDATION） | `tests/api.test.js` |
 | 错误码族与 HTTP 状态映射（VALIDATION/PHASE_CONFLICT/KILL_REFUSED/NOT_FOUND/SETUP_REQUIRED…） | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
 | setup 门禁：未初始化时白名单外全 409 | `tests/integration/setup.test.js`、IT-12（页面侧人工） |
@@ -182,7 +203,8 @@
 | 12 degraded 已自愈时不再发重连 | `tests/web/actions.test.js` |
 | 13 stop 后当前正显示 iframe | `tests/web/panes.test.js` |
 | 14 配置草稿与运行态分离 | `tests/web/drawer.test.js`、`tests/web/form.test.js` |
-| 启动目录输入：非法值就地报错且不发请求、空串提交 null、只提交改动键 | `tests/web/form.test.js`（`parseWorkdir`/`buildHostPatch`）、`tests/web/mount.test.js` |
+| 启动目录输入与说明：非法值就地报错且不发请求、空串提交 null、只提交改动键；明确它是进程 CWD / 新会话无显式 Workspace 时的回落目录，不会自动登记 Workspace 或替换历史 Session | `tests/web/form.test.js`（`parseWorkdir`/`buildHostPatch`）、`tests/web/mount.test.js` |
+| 远端抽屉说明 dsh web「打开配置文件」发生在目标主机，headless 主机可使用本抽屉的文件编辑器或 dsh Web 结构化设置；本机抽屉隐藏桌面限制说明 | `tests/web/mount.test.js` |
 | 「重启后生效」徽标只在运行实例值与已存配置不一致时出现 | `tests/web/drawer.test.js`（`workdirPending`）、`tests/web/mount.test.js` |
 | 实际工作目录展示：有值即显示，不可读显示「—」不编造 | `tests/web/mount.test.js`、`tests/integration/flows.test.js`（后端侧 `web.cwd`） |
 | 15 patch 路径无效 / 同步失败提示 | `tests/web/form.test.js`、`tests/web/actions.test.js`（错误 detail 展开） |
@@ -208,6 +230,8 @@
 | 批量同步原生 dialog：源/目标互斥、最多 200 目标；预览只显字段名、不把 secret 值放进 DOM；apply 原样转发 preview token，源/任一目标变化后的 `CONFIG_STALE` 会就地要求重预览；preview/apply 竞态与迟到响应都以 revision/SSE 为真相，运行实例标明下次重启生效 | `tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js`、`scripts/ui-smoke.mjs` S14 |
 | 批量同步失败：pending 释放、旧结果作废、禁止重复应用；本次错误在原生 dialog 内可访问展示且按文本渲染，不会误取并发 toast | `tests/web/actions.test.js`、`tests/web/mount.test.js` |
 | 主机抽屉/全局默认保存：字段级三方合并分别认领 workdir 与 inject 子字段，吸收未编辑字段、保留本地已编辑字段，双方等价改动不假冲突；保存只发相对最新 baseline 的用户 diff；`CONFIG_STALE` 保草稿，映射区间下限 1024 | `tests/web/drawer.test.js`、`tests/web/form.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
+| dsh 配置文件编辑器按按钮惰性加载（打开抽屉不取 secret），只展示后端解析路径；GET/PUT payload 与错误全面脱敏，dirty/保存中/主机配置保存中共同参与关闭保护；CAS stale/unknown 重新加载会保留只读旧草稿供手工合并，成功保存或关闭清除副本 | `tests/web/actions.test.js`、`tests/web/mount.test.js` |
+| 抽屉并发与移除：主机配置保存中锁定字段且不可关闭，迟到响应受 revision/reset epoch guard 约束，不覆盖后续输入、不复活已删除主机；强制移除会关闭确认框、把 settings 保存结果安全转为 toast，并将焦点落回仍连接的管理入口 | `tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/web/a11y.test.js` |
 | manager 当前监听端口与 configured port 分离；保存、跨标签更新、重连 snapshot 后「重启生效」提示均按两者真实差异派生 | `tests/web/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
 | 抽屉模态期间 toast 留在 aria-live 中但控件退出 Tab 环，确认框仍可操作；抽屉关闭恢复交互，toast 自动/手动关闭与 destroy 都清理定时器 | `tests/web/a11y.test.js`、`tests/web/toast-region.test.js` |
 | iframe 首载：本机/远端 loading 在 `load` 后隐藏，切页 keep-alive 不重置；recreate/reload 重现 loading，后端 phase 遮罩优先且 starting 无 URL 时有可访问占位 | `tests/web/panes.test.js`、`tests/web/a11y.test.js`、`tests/web/ui-live.test.js`、`scripts/ui-smoke.mjs` S4h/S7b |
@@ -264,7 +288,7 @@
 
 | 交付面 | 覆盖 |
 |---|---|
-| 浏览器内假 manager 对齐产品路由、HostView.local、`POST /api/hosts/local`、单例约束、setup 身份保持与 SSE；批量同步也真实 preview/apply、校验源/目标变化与 reset 后 token 过期，超过 64 个无关 preview 不驱逐有效 token；状态机仍复用产品真身 | `tests/demo-contract.test.js`、`site/demo/demo-manager.js`、`site/demo/demo-routes.js` |
+| 浏览器内假 manager 对齐产品路由、HostView.local、`POST /api/hosts/local`、单例约束、setup 身份保持与 SSE；批量同步也真实 preview/apply、校验源/目标变化与 reset 后 token 过期，超过 64 个无关 preview 不驱逐有效 token；settings GET/PUT 对齐固定路由、setup gate、query/尾斜杠、schema/size/UTF-8/CAS/unreachable 顺序且不落 secret；状态机仍复用产品真身 | `tests/demo-contract.test.js`、`site/demo/demo-manager.js`、`site/demo/demo-routes.js` |
 | mock dsh web 提供独立侧栏/工作区轮廓、query 标识与输入保活钩子，供 iframe 的真实加载与 keep-alive 判据使用 | `tests/demo-contract.test.js`、`site/mock-dsh-web/index.html` |
 | `site:check` 真浏览器走 Hub 首屏 → ready 一步拉起 → iframe → manage → 返回保活 → 断联/恢复 → setup，并检查资源 2xx 与控制台 | `scripts/site-check.mjs`；纯等待语义由 `tests/site-tooling.test.js` 覆盖 |
 | `site:shots` 固定生成 Hub dashboard、manage drawer、真实 mock iframe、远端 degraded 与带本机候选的 setup；图片路径由双语 README 链接检查兜住 | `scripts/site-shots.mjs`、`scripts/site-check.mjs` |
@@ -361,20 +385,20 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 `dshc version --json`，断言 `node.execPath` 落在包内 `runtime/bin/node`——这条是「自带运行时
 真的在用」的唯一硬证据（也是流水线 verify 段的断言，PV-3）。
 
-## 9. 门槛核对结果（最近一次 `npm run coverage:gate`）
+## 9. 门槛核对结果（最近一次完整 `npm run check`）
 
-最近一次完整闸门为 **935/935** 通过，53 个 `src/**/*.js` 均有 lcov 记录；
+最近一次完整闸门为 **1045/1045** 通过，54 个 `src/**/*.js` 均有 lcov 记录；
 真浏览器 Chrome 检查 **26/26** 通过。
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---:|---:|---|
-| `src/**`（overall） | 13794/14353（96.11%） | ≥ 95% | 达标 |
-| `src/lib/**` | 2011/2059（97.67%） | ≥ 90% | 达标 |
-| `src/*.js` | 5961/6406（93.05%） | ≥ 75% | 达标 |
-| `src/web/`（不含 components） | 2192/2201（99.59%） | ≥ 80% | 达标 |
-| `src/web/components/**` | 3630/3687（98.45%） | 仅报告 | 不单独设卡，仍计入 overall |
+| `src/**`（overall） | 15180/15765（96.29%） | ≥ 95% | 达标 |
+| `src/lib/**` | 2282/2330（97.94%） | ≥ 90% | 达标 |
+| `src/*.js` | 6573/7031（93.49%） | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 2354/2369（99.37%） | ≥ 80% | 达标 |
+| `src/web/components/**` | 3971/4035（98.41%） | 仅报告 | 不单独设卡，仍计入 overall |
 
-全仓 branch 为 3776/4248（88.89%），function 为 1161/1241（93.55%）；
+全仓 branch 为 4164/4677（89.03%），function 为 1243/1324（93.88%）；
 两者仅诊断，不参与门槛。
 
 ## 10. 功能矩阵口径与豁免
@@ -386,7 +410,7 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 | 项 | 原因 | 替身覆盖 |
 |---|---|---|
 | IT-04 两次拉起失败 | 真机无法让 `--port 0` 也绑定失败 | 假远端 `bind-busy-twice` |
-| IT-14 启动目录真机验收（补丁 v0.0.1/01 的 WS-01/WS-10） | 需真远端 + 浏览器内确认 dsh 的 workspace picker 默认根与 AGENTS.md 加载——这是 dsh 自身行为，假远端无从模拟 | 我们这侧的全链（脚本 cd 段、state/HostView 回写、失败分类、UI、CLI）已全自动化；假远端只能证明「cd 到了那里」，证不了「dsh 因此把它当工作区根」 |
+| IT-14 启动目录真机验收（补丁 v0.0.1/01 的 WS-01/WS-10） | 需真远端读取 dsh web 进程 CWD，并在真实浏览器区分「新会话无显式 Workspace 时回落」与「恢复历史 Session」；启动 CWD 不会自动登记 Workspace，也不会替换历史 Session | 我们这侧的全链（脚本 cd 段、state/HostView 回写、失败分类、UI、CLI）已全自动化；DOM 回归锁定准确提示，假远端只能证明「cd 到了那里」 |
 | IT-10 远端禁止转发 | 需改共享节点 sshd 配置并重启服务 | 假远端 `forward-disabled` |
 | IT-12 页面向导 | 需人工点击（UI-28 清单第 1 项） | CLI 侧向导 `tests/setup-wizard.test.js`、挂载测试 `tests/web/setup-mount.test.js`、门禁跳转 `tests/integration/ui-live.test.js` |
 | UI 观感（字号/对比度/留白）与灰度可辨 | 好不好看只能人眼判 | `npm run ui:smoke` 出两个宽度的截图供人过目；结构性判据（文字+形状、不溢出）已自动化 |

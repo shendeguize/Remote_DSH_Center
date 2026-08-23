@@ -180,6 +180,204 @@ export function buildPatchCleanupScript({ keepNames = [] }) {
   ].join('; ');
 }
 
+// ── settings.yaml 固定路径读写协议 ───────────────────────────────────────
+
+const SETTINGS_TXN_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const SETTINGS_CHECKSUM_RE = /^cksum-v1:(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,6})$/;
+
+function settingsTxnToken(txn) {
+  if (typeof txn !== 'string' || !SETTINGS_TXN_RE.test(txn)) {
+    throw new DshError('VALIDATION', `非法 settings 事务号：${JSON.stringify(txn)}`, {
+      detail: `事务号须匹配 ${SETTINGS_TXN_RE}`,
+    });
+  }
+  return shq(txn);
+}
+
+function settingsBase(baseChecksum) {
+  if (baseChecksum === null) {
+    return { expect: shq('no'), crc: shq(''), size: shq('') };
+  }
+  if (typeof baseChecksum !== 'string') {
+    throw new DshError('VALIDATION', 'settings baseChecksum 必须是 cksum-v1 token 或 null');
+  }
+  const match = SETTINGS_CHECKSUM_RE.exec(baseChecksum);
+  if (!match || Number(match[1]) > 4_294_967_295 || Number(match[2]) > 524_288) {
+    throw new DshError('VALIDATION', `非法 settings checksum：${JSON.stringify(baseChecksum)}`, {
+      detail: 'checksum 须为 cksum-v1:<0..4294967295>:<0..524288>，且十进制数不得有前导零',
+    });
+  }
+  return { expect: shq('yes'), crc: shq(match[1]), size: shq(match[2]) };
+}
+
+/**
+ * 固定读取 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`。
+ * 内容经 POSIX od 输出 hex；txn 只派生管理目录内的短命快照名。
+ */
+export function buildSettingsReadScript({ txn } = {}) {
+  const txnTok = settingsTxnToken(txn);
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    'umask 077',
+    'set -f',
+    `T=${txnTok}`,
+    'H="${DSH_HOME:-$HOME/.dsh}"',
+    'P="$H/settings.yaml"',
+    'R="$HOME/.dsh_center_remote"',
+    'S="$R/settings-staging"',
+    'SNAP="$S/read-$T.data"',
+    'HEX_RAW="$S/read-$T.hex-raw"',
+    'HEX="$S/read-$T.hex"',
+    'unsupported() { echo "ERR=settings-unsupported"; exit 1; }',
+    'read_fail() { echo "ERR=settings-read"; exit 1; }',
+    'is_uint() { case "$1" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }',
+    'parse_cksum() { set -- $1; [ "$#" -eq 2 ] || return 1; is_uint "$1" || return 1; is_uint "$2" || return 1; CK_CRC=$1; CK_SIZE=$2; }',
+    'ensure_dir() { D=$1; if [ -L "$D" ]; then return 1; elif [ -e "$D" ]; then [ -d "$D" ] || return 1; else mkdir "$D" || return 1; fi; chmod 700 "$D" || return 1; }',
+    'cleanup_staging() { set +f; rm -f "$S"/read-*.data "$S"/read-*.hex "$S"/read-*.hex-raw "$S"/write-*.data; RC=$?; set -f; return "$RC"; }',
+    'cleanup_commit() { set +f; rm -f "$H"/.settings.yaml.dshc-*.tmp; RC=$?; set -f; return "$RC"; }',
+    'emit_path() { printf \'%s\' "$P" | od -A n -v -t x1 > "$HEX_RAW" 2>/dev/null || read_fail; tr -d \'[:space:]\' < "$HEX_RAW" > "$HEX" || read_fail; echo "PATH_HEX<<DSHC_PATH"; cat "$HEX" || { echo; echo "DSHC_PATH"; read_fail; }; echo; echo "DSHC_PATH"; }',
+    'echo "SETTINGS_PROTO=1"',
+    'printf \'SETTINGS_TXN=%s\\n\' "$T"',
+    'case "$HOME" in /*) ;; *) unsupported ;; esac',
+    'case "$H" in /*) ;; *) unsupported ;; esac',
+    'for C in command test printf mkdir chmod rm dd wc cksum od tr cat mv; do command -v "$C" >/dev/null 2>&1 || unsupported; done',
+    'OD_PROBE=$(printf \'\\001\\377\' | od -A n -v -t x1 2>/dev/null | tr -d \'[:space:]\') || unsupported',
+    '[ "$OD_PROBE" = 01ff ] || unsupported',
+    'CK_OUT=$(printf x | cksum 2>/dev/null) || unsupported',
+    'parse_cksum "$CK_OUT" || unsupported',
+    '[ "$CK_CRC" = 12738659 ] && [ "$CK_SIZE" = 1 ] || unsupported',
+    'ensure_dir "$R" || read_fail',
+    'ensure_dir "$S" || read_fail',
+    'cleanup_staging || read_fail',
+    'if [ -d "$H" ]; then cleanup_commit || read_fail; fi',
+    'trap \'rm -f "$SNAP" "$HEX_RAW" "$HEX"\' 0',
+    'trap \'read_fail\' 1 2 3 15',
+    'if [ -L "$P" ]; then read_fail; fi',
+    'if [ ! -e "$P" ]; then echo "EXISTS=no"; echo "SIZE=0"; emit_path; echo "CONTENT_HEX<<DSHC_CONTENT"; echo "DSHC_CONTENT"; echo "SETTINGS_READ_DONE=yes"; exit 0; fi',
+    '[ -f "$P" ] || read_fail',
+    'dd if="$P" of="$SNAP" bs=524289 count=1 2>/dev/null || read_fail',
+    'chmod 600 "$SNAP" || read_fail',
+    'SIZE_RAW=$(wc -c < "$SNAP" 2>/dev/null) || read_fail',
+    'SIZE=$(printf \'%s\' "$SIZE_RAW" | tr -d \'[:space:]\') || read_fail',
+    'is_uint "$SIZE" || read_fail',
+    '[ "$SIZE" -le 524288 ] || { echo "ERR=settings-too-large"; exit 10; }',
+    'CK_OUT=$(cksum < "$SNAP" 2>/dev/null) || read_fail',
+    'parse_cksum "$CK_OUT" || read_fail',
+    '[ "$CK_SIZE" = "$SIZE" ] || read_fail',
+    'echo "EXISTS=yes"',
+    'printf \'SIZE=%s\\n\' "$SIZE"',
+    'printf \'CRC=%s\\n\' "$CK_CRC"',
+    'emit_path',
+    'od -A n -v -t x1 "$SNAP" > "$HEX_RAW" 2>/dev/null || read_fail',
+    'tr -d \'[:space:]\' < "$HEX_RAW" > "$HEX" || read_fail',
+    'HEX_SIZE_RAW=$(wc -c < "$HEX" 2>/dev/null) || read_fail',
+    'HEX_SIZE=$(printf \'%s\' "$HEX_SIZE_RAW" | tr -d \'[:space:]\') || read_fail',
+    '[ "$HEX_SIZE" -eq "$((SIZE * 2))" ] || read_fail',
+    'echo "CONTENT_HEX<<DSHC_CONTENT"',
+    'cat "$HEX" || { echo; echo "DSHC_CONTENT"; read_fail; }',
+    'echo',
+    'echo "DSHC_CONTENT"',
+    'echo "SETTINGS_READ_DONE=yes"',
+  ].join('; ');
+}
+
+/**
+ * 从 stdin 接收新内容并以 cksum-v1 双复核 CAS 提交到固定 settings 路径。
+ * baseChecksum=null 表示只允许创建；string 表示只允许替换逐字相同的基线 token。
+ */
+export function buildSettingsWriteScript({ txn, baseChecksum } = {}) {
+  const txnTok = settingsTxnToken(txn);
+  const base = settingsBase(baseChecksum);
+  return [
+    'LC_ALL=C',
+    'export LC_ALL',
+    'umask 077',
+    'set -f',
+    `T=${txnTok}`,
+    `EXPECT=${base.expect}`,
+    `BASE_CRC=${base.crc}`,
+    `BASE_SIZE=${base.size}`,
+    'H="${DSH_HOME:-$HOME/.dsh}"',
+    'P="$H/settings.yaml"',
+    'R="$HOME/.dsh_center_remote"',
+    'S="$R/settings-staging"',
+    'B="$R/settings-backup"',
+    'STAGE="$S/write-$T.data"',
+    'TEMP="$H/.settings.yaml.dshc-$T.tmp"',
+    'PREV="$B/previous.yaml"',
+    'ABSENT="$B/previous.absent"',
+    'BTMP="$B/previous-$T.tmp"',
+    'ATMP="$B/absent-$T.tmp"',
+    'COMMITTED=no',
+    'commit_state() { if [ "$COMMITTED" = no ]; then echo "COMMIT_STATE=not-committed"; else echo "COMMIT_STATE=unknown"; fi; }',
+    'unsupported() { echo "ERR=settings-unsupported"; exit 1; }',
+    'write_fail() { echo "ERR=settings-write"; commit_state; exit 12; }',
+    'stale() { echo "ERR=settings-stale"; commit_state; exit 11; }',
+    'too_large() { echo "ERR=settings-too-large"; commit_state; exit 10; }',
+    'is_uint() { case "$1" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }',
+    'parse_cksum() { set -- $1; [ "$#" -eq 2 ] || return 1; is_uint "$1" || return 1; is_uint "$2" || return 1; CK_CRC=$1; CK_SIZE=$2; }',
+    'ensure_dir() { D=$1; if [ -L "$D" ]; then return 1; elif [ -e "$D" ]; then [ -d "$D" ] || return 1; else mkdir "$D" || return 1; fi; chmod 700 "$D" || return 1; }',
+    'cleanup_managed() { set +f; rm -f "$S"/read-*.data "$S"/read-*.hex "$S"/read-*.hex-raw "$S"/write-*.data "$B"/previous-*.tmp "$B"/absent-*.tmp; RC=$?; set -f; return "$RC"; }',
+    'cleanup_commit() { set +f; rm -f "$H"/.settings.yaml.dshc-*.tmp; RC=$?; set -f; return "$RC"; }',
+    'emit_path() { echo "PATH_HEX<<DSHC_PATH"; if printf \'%s\' "$P" | od -A n -v -t x1; then :; else echo "DSHC_PATH"; write_fail; fi; echo "DSHC_PATH"; }',
+    'read_current() { CUR_EXISTS=no; CUR_CRC=; CUR_SIZE=; if [ -L "$P" ]; then return 2; fi; if [ ! -e "$P" ]; then return 0; fi; [ -f "$P" ] || return 2; CUR_RAW=$(wc -c < "$P" 2>/dev/null) || return 3; CUR_SIZE=$(printf \'%s\' "$CUR_RAW" | tr -d \'[:space:]\') || return 3; is_uint "$CUR_SIZE" || return 3; [ "$CUR_SIZE" -le 524288 ] || return 4; CUR_OUT=$(cksum < "$P" 2>/dev/null) || return 3; parse_cksum "$CUR_OUT" || return 3; [ "$CK_SIZE" = "$CUR_SIZE" ] || return 5; CUR_EXISTS=yes; CUR_CRC=$CK_CRC; CUR_SIZE=$CK_SIZE; return 0; }',
+    'load_current() { read_current; RC=$?; case "$RC" in 0) return 0 ;; 4) too_large ;; 5) stale ;; *) write_fail ;; esac; }',
+    'match_base() { if [ "$EXPECT" = no ]; then [ "$CUR_EXISTS" = no ]; else [ "$CUR_EXISTS" = yes ] && [ "$CUR_CRC" = "$BASE_CRC" ] && [ "$CUR_SIZE" = "$BASE_SIZE" ]; fi; }',
+    'echo "SETTINGS_PROTO=1"',
+    'printf \'SETTINGS_TXN=%s\\n\' "$T"',
+    'case "$HOME" in /*) ;; *) unsupported ;; esac',
+    'case "$H" in /*) ;; *) unsupported ;; esac',
+    'for C in command test printf mkdir chmod rm dd wc cksum od tr cat mv; do command -v "$C" >/dev/null 2>&1 || unsupported; done',
+    'OD_PROBE=$(printf \'\\001\\377\' | od -A n -v -t x1 2>/dev/null | tr -d \'[:space:]\') || unsupported',
+    '[ "$OD_PROBE" = 01ff ] || unsupported',
+    'CK_OUT=$(printf x | cksum 2>/dev/null) || unsupported',
+    'parse_cksum "$CK_OUT" || unsupported',
+    '[ "$CK_CRC" = 12738659 ] && [ "$CK_SIZE" = 1 ] || unsupported',
+    'ensure_dir "$R" || write_fail',
+    'ensure_dir "$S" || write_fail',
+    'ensure_dir "$B" || write_fail',
+    'for F in "$PREV" "$ABSENT"; do if [ -L "$F" ]; then write_fail; fi; if [ -e "$F" ] && [ ! -f "$F" ]; then write_fail; fi; done',
+    'cleanup_managed || write_fail',
+    'trap \'rm -f "$STAGE" "$TEMP" "$BTMP" "$ATMP"\' 0',
+    'trap \'write_fail\' 1 2 3 15',
+    'cat > "$STAGE" || write_fail',
+    'chmod 600 "$STAGE" || write_fail',
+    'NEW_RAW=$(wc -c < "$STAGE" 2>/dev/null) || write_fail',
+    'NEW_SIZE=$(printf \'%s\' "$NEW_RAW" | tr -d \'[:space:]\') || write_fail',
+    'is_uint "$NEW_SIZE" || write_fail',
+    '[ "$NEW_SIZE" -le 524288 ] || too_large',
+    'NEW_OUT=$(cksum < "$STAGE" 2>/dev/null) || write_fail',
+    'parse_cksum "$NEW_OUT" || write_fail',
+    '[ "$CK_SIZE" = "$NEW_SIZE" ] || write_fail',
+    'NEW_CRC=$CK_CRC',
+    'NEW_SIZE=$CK_SIZE',
+    'load_current',
+    'match_base || stale',
+    '[ -d "$H" ] || write_fail',
+    'cd "$H" || write_fail',
+    'cleanup_commit || write_fail',
+    'cat "$STAGE" > "$TEMP" || write_fail',
+    'chmod 600 "$TEMP" || write_fail',
+    'TEMP_OUT=$(cksum < "$TEMP" 2>/dev/null) || write_fail',
+    'parse_cksum "$TEMP_OUT" || write_fail',
+    '[ "$CK_CRC" = "$NEW_CRC" ] && [ "$CK_SIZE" = "$NEW_SIZE" ] || write_fail',
+    'if [ "$CUR_EXISTS" = yes ]; then if [ -L "$P" ] || [ ! -f "$P" ]; then write_fail; fi; cat "$P" > "$BTMP" || write_fail; chmod 600 "$BTMP" || write_fail; BACK_OUT=$(cksum < "$BTMP" 2>/dev/null) || write_fail; parse_cksum "$BACK_OUT" || write_fail; [ "$CK_CRC" = "$BASE_CRC" ] && [ "$CK_SIZE" = "$BASE_SIZE" ] || stale; mv -f "$BTMP" "$PREV" || write_fail; rm -f "$ABSENT" || write_fail; else : > "$ATMP" || write_fail; chmod 600 "$ATMP" || write_fail; mv -f "$ATMP" "$ABSENT" || write_fail; rm -f "$PREV" || write_fail; fi',
+    'load_current',
+    'match_base || stale',
+    'COMMITTED=unknown',
+    'mv -f "$TEMP" "$P" || write_fail',
+    'COMMITTED=yes',
+    'load_current',
+    '[ "$CUR_EXISTS" = yes ] || write_fail',
+    '[ "$CUR_CRC" = "$NEW_CRC" ] && [ "$CUR_SIZE" = "$NEW_SIZE" ] || stale',
+    'emit_path',
+    'printf \'NEW_SIZE=%s\\n\' "$NEW_SIZE"',
+    'printf \'NEW_CRC=%s\\n\' "$NEW_CRC"',
+    'echo "SETTINGS_WRITE_DONE=yes"',
+  ].join('; ');
+}
+
 // ── §7 协议输出解析器 ────────────────────────────────────────────────────
 
 const KV_RE = /^([A-Z][A-Z0-9_]*)=(.*)$/;

@@ -228,17 +228,32 @@ to `--port 0` and lets the target OS assign one. A remote also gets a local mapp
 from the configured range, fixed across restarts. A local host uses its actual web port.
 
 Each host may also set a **working directory** (`hosts.<host>.workdir`) — the process
-working directory of the target `dsh web`, which is also dsh's default workspace root and
-where `AGENTS.md` is loaded from. Empty (`null`) means the target account's home directory.
-Only absolute paths or `~`, `~/…` are accepted (`~` is expanded by that account); if the directory
-cannot be entered, the start fails loudly instead of silently falling back to home.
+working directory of the target `dsh web`, the fallback for a new Session with no explicit
+Workspace/cwd, and where `AGENTS.md` is loaded from. It does not register that path as a dsh Web
+Workspace or replace a historical Session restored by the browser; add the path as a Workspace
+in dsh Web on first use. Empty (`null`) means the target account's home directory. Only absolute
+paths or `~`, `~/…` are accepted (`~` is expanded by that account); if the directory cannot be
+entered, the start fails loudly instead of silently falling back to home.
 
 ```bash
 dshc config set hosts.gpu-1.workdir '~/projects/foo'   # empty string or null clears it back to home
 ```
 
 Like the other injection settings, this follows the **takes effect on next start** rule:
-saving never disturbs a running instance (the UI shows a "restart to apply" badge).
+saving never disturbs a running instance. The UI tells you to restart that host's `dsh web`;
+restarting only the manager does not switch the working directory of a surviving instance.
+
+An SSH mapping brings the page to the local browser, not the remote host's desktop capability.
+The remote dsh Web "Open configuration file" action still invokes a desktop opener on the target.
+For a headless Linux host, open that host's details on the management page and use the
+"dsh configuration file" section to read and edit
+`${DSH_HOME:-$HOME/.dsh}/settings.yaml` over SSH; a local entry uses the equivalent local
+transport. Center treats it as opaque UTF-8 text and never parses or rewrites YAML fields, so it
+does not depend on dsh's current configuration schema. Reads and writes are limited to 512 KiB.
+Before saving, a checksum verifies that another editor has not changed the file; Center then
+creates a backup and atomically replaces it. On a conflict or unknown save result, the page asks
+you to reload and preserves the old draft for manual merging. Current dsh versions watch and
+reload this file themselves; Center does not modify the dsh CLI or restart the instance.
 
 ## Commands
 
@@ -268,11 +283,16 @@ under that assumption:
   resolves to 127.0.0.1", which would otherwise put the page inside their origin). The CLI
   sends no `Origin` and is unaffected.
 - Remote data uses plain `ssh -L`, with encryption and authentication entirely from your
-  ssh config and keys. Local data connects directly to loopback, with no SSH. This tool
-  never handles credentials and stores no passwords.
-- The managed side, local or remote, writes only `~/.dsh_center_remote/` under that
-  account's HOME (logs and patch files). Local patch sync never cleans up existing files
-  it cannot prove ownership of, and its destination is constrained to that directory.
+  ssh config and keys. Local data connects directly to loopback, with no SSH. A dsh
+  configuration file may contain credentials: its body exists only briefly in manager/browser
+  memory and one-shot command stdin, and is never written to manager config, logs, or SSE.
+  Do not expose the manager page or browser session to untrusted users.
+- Apart from an explicit "Save file" action, managed-side artifacts are confined to
+  `~/.dsh_center_remote/` under that account's HOME (logs, patches, settings staging, and one
+  backup). That explicit action may write only the resolved
+  `${DSH_HOME:-$HOME/.dsh}/settings.yaml`; the API accepts no arbitrary path. Local patch sync
+  never cleans up existing files it cannot prove ownership of, and its destination is
+  constrained to that directory.
 - Injected env vars and extra args go verbatim onto the target command line, where `ps`
   can see them — **do not put secrets there**.
 - Local and remote stopping only applies to a process whose fingerprint matches verbatim,

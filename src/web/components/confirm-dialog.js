@@ -55,6 +55,7 @@ export function createConfirmDialog() {
       cancelBtn.focus();
     });
   }
+  confirm.cancel = () => finish(false);
 
   return { root: dialog, confirm };
 }

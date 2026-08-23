@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import path from 'node:path';
 import {
   COMMON_SSH_OPTS,
   TUNNEL_SSH_OPTS,
+  SSH_INPUT_CAP_BYTES,
   SSH_OUTPUT_CAP_BYTES,
   localExec,
   localCopy,
@@ -60,6 +62,31 @@ const LOCAL_RESULT = shim('local-result.cjs', `
 process.stdout.write('local-out');
 process.stderr.write('local-err');
 process.exit(7);
+`);
+
+const STDIN_CAPTURE = shim('stdin-capture.cjs', `
+const { createHash } = require('node:crypto');
+const fs = require('node:fs');
+const stdinIsCharacterDevice = fs.fstatSync(0).isCharacterDevice();
+const chunks = [];
+process.stdin.on('data', (chunk) => chunks.push(chunk));
+process.stdin.on('end', () => {
+  const input = Buffer.concat(chunks);
+  const text = input.toString('utf8');
+  process.stdout.write(JSON.stringify({
+    size: input.length,
+    sha256: createHash('sha256').update(input).digest('hex'),
+    argvHasInput: process.argv.slice(2).some((arg) => text !== '' && arg.includes(text)),
+    envHasInput: Object.values(process.env).some((value) => text !== '' && value.includes(text)),
+    stdinIsCharacterDevice,
+  }));
+});
+`);
+
+const CLOSE_STDIN_EARLY = shim('close-stdin-early.cjs', `
+const fs = require('node:fs');
+fs.closeSync(0);
+setTimeout(() => process.exit(23), 50);
 `);
 
 /**
@@ -120,6 +147,108 @@ test('localExec argv：前导参数 + -c + 原始模板文本，不套远端 sh 
   assert.deepEqual(JSON.parse(res.stdout), ['-c', command]);
 });
 
+test('sshExec/localExec 无 input 时继续把 stdin 接到 ignore', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_SSH_BIN;
+    delete process.env.DSHC_LOCAL_SH_BIN;
+  });
+  process.env.DSHC_SSH_BIN = STDIN_CAPTURE;
+  process.env.DSHC_LOCAL_SH_BIN = STDIN_CAPTURE;
+
+  const remote = JSON.parse((await sshExec('gpu-1', 'capture')).stdout);
+  const local = JSON.parse((await localExec('capture')).stdout);
+
+  for (const captured of [remote, local]) {
+    assert.equal(captured.size, 0);
+    assert.equal(captured.stdinIsCharacterDevice, true, '无 input 必须维持 stdio=ignore，不创建 pipe');
+  }
+});
+
+test('sshExec/localExec 只经 pipe 原样传入二进制 input，不进入 argv/env', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_SSH_BIN;
+    delete process.env.DSHC_LOCAL_SH_BIN;
+  });
+  process.env.DSHC_SSH_BIN = STDIN_CAPTURE;
+  process.env.DSHC_LOCAL_SH_BIN = STDIN_CAPTURE;
+  const input = Buffer.from('dshc-stdin-only-\0-秘密-20260823');
+  const expectedHash = createHash('sha256').update(input).digest('hex');
+
+  const remoteResult = await sshExec('gpu-1', 'capture', { input });
+  const localResult = await localExec('capture', { input: new Uint8Array(input) });
+
+  for (const result of [remoteResult, localResult]) {
+    assert.deepEqual(Object.keys(result).sort(), [
+      'aborted',
+      'code',
+      'signal',
+      'stderr',
+      'stderrDropped',
+      'stdout',
+      'stdoutDropped',
+      'timedOut',
+    ]);
+    const captured = JSON.parse(result.stdout);
+    assert.equal(result.code, 0);
+    assert.equal(captured.size, input.length);
+    assert.equal(captured.sha256, expectedHash);
+    assert.equal(captured.argvHasInput, false);
+    assert.equal(captured.envHasInput, false);
+    assert.equal(captured.stdinIsCharacterDevice, false);
+  }
+});
+
+test('sshExec/localExec input 二次限长：exact cap 成功，cap+1 与非二进制拒绝', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_SSH_BIN;
+    delete process.env.DSHC_LOCAL_SH_BIN;
+  });
+  process.env.DSHC_SSH_BIN = STDIN_CAPTURE;
+  process.env.DSHC_LOCAL_SH_BIN = STDIN_CAPTURE;
+  assert.equal(SSH_INPUT_CAP_BYTES, 512 * 1024);
+
+  const exact = Buffer.alloc(SSH_INPUT_CAP_BYTES, 0xa5);
+  const remote = await sshExec('gpu-1', 'capture', { input: exact });
+  const local = await localExec('capture', { input: new Uint8Array(exact) });
+  assert.equal(JSON.parse(remote.stdout).size, SSH_INPUT_CAP_BYTES);
+  assert.equal(JSON.parse(local.stdout).size, SSH_INPUT_CAP_BYTES);
+
+  const over = Buffer.alloc(SSH_INPUT_CAP_BYTES + 1);
+  await assert.rejects(
+    () => sshExec('gpu-1', 'capture', { input: over }),
+    (err) => err?.code === 'VALIDATION' && /512 KiB/u.test(err.message),
+  );
+  await assert.rejects(
+    () => localExec('capture', { input: over }),
+    (err) => err?.code === 'VALIDATION' && /512 KiB/u.test(err.message),
+  );
+  await assert.rejects(
+    () => sshExec('gpu-1', 'capture', { input: 'not-binary' }),
+    (err) => err instanceof TypeError && /Buffer|Uint8Array/u.test(err.message),
+  );
+  await assert.rejects(
+    () => localExec('capture', { input: new DataView(new ArrayBuffer(1)) }),
+    (err) => err instanceof TypeError && /Buffer|Uint8Array/u.test(err.message),
+  );
+});
+
+test('sshExec/localExec 子进程早退关闭 stdin 时不产生未处理 EPIPE', async (t) => {
+  t.after(() => {
+    delete process.env.DSHC_SSH_BIN;
+    delete process.env.DSHC_LOCAL_SH_BIN;
+  });
+  process.env.DSHC_SSH_BIN = CLOSE_STDIN_EARLY;
+  process.env.DSHC_LOCAL_SH_BIN = CLOSE_STDIN_EARLY;
+  const input = Buffer.alloc(SSH_INPUT_CAP_BYTES, 0x5a);
+
+  const remote = await sshExec('gpu-1', 'exit-early', { input });
+  const local = await localExec('exit-early', { input });
+  assert.equal(remote.code, 23);
+  assert.equal(local.code, 23);
+  assert.equal(remote.stderr, '');
+  assert.equal(local.stderr, '');
+});
+
 test('localExec 保留 stdout/stderr/退出码的 ExecResult 形状', async (t) => {
   t.after(() => { delete process.env.DSHC_LOCAL_SH_BIN; });
   process.env.DSHC_LOCAL_SH_BIN = LOCAL_RESULT;
@@ -169,6 +298,18 @@ test('sshExec 超时：TERM 强杀并标记 timedOut，不 reject', async (t) =>
   const res = await sshExec('gpu-1', 'sleep', { timeoutMs: 600 });
   assert.equal(res.timedOut, true);
   assert.equal(res.stdout, 'got-term', '先发 SIGTERM');
+});
+
+test('sshExec 带满额 input 超时仍走 TERM 强杀且无未处理 stdin 错误', async (t) => {
+  t.after(() => { delete process.env.DSHC_SSH_BIN; });
+  process.env.DSHC_SSH_BIN = SLOW;
+
+  const res = await sshExec('gpu-1', 'sleep', {
+    timeoutMs: 300,
+    input: Buffer.alloc(SSH_INPUT_CAP_BYTES),
+  });
+  assert.equal(res.timedOut, true);
+  assert.equal(res.stdout, 'got-term');
 });
 
 test('sshExec 对赖着不死的子进程升级到 SIGKILL', async (t) => {

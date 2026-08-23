@@ -6,21 +6,63 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 
-import { MAX_BODY_BYTES, SETUP_ALLOWED, createSseHub, readJsonBody } from '../src/api.js';
+import {
+  MAX_BODY_BYTES,
+  SETTINGS_MAX_BODY_BYTES,
+  SETUP_ALLOWED,
+  createSseHub,
+  readJsonBody,
+} from '../src/api.js';
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { logEvent, _resetForTest } from '../src/lib/bus.js';
+import { dshSettingsPutSchema, validate } from '../src/lib/validate.js';
+import { posixCksum, SETTINGS_MAX_BYTES } from '../src/settings-file.js';
 import * as store from '../src/store.js';
 import { bootServer } from './integration/helpers.js';
 import { newHostState } from './harness/index.js';
 import {
-  assertRest, hostConfigPutResponse, localHostCreateResponse, syncConfigResponse,
+  assertRest,
+  assertShape,
+  hostConfigPutResponse,
+  localHostCreateResponse,
+  settingsReadResponse,
+  settingsWriteResponse,
+  syncConfigResponse,
 } from './contract/schemas.js';
 
 const bodyOf = (text) => Readable.from([Buffer.from(text)]);
+
+function rawRequest(base, method, route, payload) {
+  const url = new URL(route, base);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => {
+        let json = null;
+        try { json = JSON.parse(text); } catch { /* 测试失败时保留原文供断言 */ }
+        resolve({ status: res.statusCode, text, json });
+      });
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
 
 function syncServerOptions({ setupCompleted = true } = {}) {
   return {
@@ -77,6 +119,122 @@ test('readJsonBody：空体 → {}，非法 JSON / 非对象 / 超限 → VALIDA
   await assert.rejects(() => readJsonBody(huge), (e) => /上限/.test(e.message));
 });
 
+test('readJsonBody：settings 专用 wire 上限不放宽默认 1 MiB，并保持有限排空', async () => {
+  assert.equal(SETTINGS_MAX_BODY_BYTES, 6 * SETTINGS_MAX_BYTES + 4096);
+
+  const content = '\u0000'.repeat(SETTINGS_MAX_BYTES);
+  const wire = JSON.stringify({ content, baseChecksum: null });
+  assert.ok(Buffer.byteLength(wire) > MAX_BODY_BYTES, '样本必须越过通用 1 MiB wire 上限');
+  assert.ok(Buffer.byteLength(wire) <= SETTINGS_MAX_BODY_BYTES, '512 KiB 最坏转义仍须过专用 wire 上限');
+
+  await assert.rejects(
+    () => readJsonBody(bodyOf(wire)),
+    (error) => error.code === 'VALIDATION' && error.message.includes(String(MAX_BODY_BYTES)),
+  );
+  assert.deepEqual(
+    await readJsonBody(bodyOf(wire), { maxBytes: SETTINGS_MAX_BODY_BYTES, fatalUtf8: true }),
+    { content, baseChecksum: null },
+  );
+
+  const overContent = '\u0000'.repeat(525_000);
+  const overWire = JSON.stringify({ content: overContent, baseChecksum: null });
+  assert.ok(Buffer.byteLength(overWire) > SETTINGS_MAX_BODY_BYTES);
+  await assert.rejects(
+    () => readJsonBody(bodyOf(overWire), {
+      maxBytes: SETTINGS_MAX_BODY_BYTES,
+      overLimitCode: 'SETTINGS_TOO_LARGE',
+    }),
+    (error) => error.code === 'SETTINGS_TOO_LARGE'
+      && error.message.includes(String(SETTINGS_MAX_BODY_BYTES)),
+  );
+});
+
+test('readJsonBody：settings 模式明确拒绝非法 UTF-8 JSON', async () => {
+  const invalidUtf8Json = Buffer.concat([
+    Buffer.from('{"content":"'),
+    Buffer.from([0xff]),
+    Buffer.from('","baseChecksum":null}'),
+  ]);
+
+  assert.deepEqual(
+    await readJsonBody(Readable.from([invalidUtf8Json])),
+    { content: '\ufffd', baseChecksum: null },
+    '默认 reader 保持既有 UTF-8 替换行为',
+  );
+  await assert.rejects(
+    () => readJsonBody(Readable.from([invalidUtf8Json]), { fatalUtf8: true }),
+    (error) => error.code === 'VALIDATION' && /UTF-8 JSON/u.test(error.message),
+  );
+
+  const secret = 'UNIQUE_SETTINGS_SECRET_7f9c';
+  await assert.rejects(
+    () => readJsonBody(bodyOf(`{"content":"${secret}"`), { redactParseError: true }),
+    (error) => error.code === 'VALIDATION'
+      && error.message === '请求体不是合法 JSON'
+      && !error.message.includes(secret),
+  );
+});
+
+test('settings PUT schema：双字段必填，拒绝 path/未知键与非法 checksum', () => {
+  assert.equal(validate(dshSettingsPutSchema, { content: '', baseChecksum: null }).ok, true);
+  assert.equal(validate(dshSettingsPutSchema, {
+    content: 'model: test\n',
+    baseChecksum: 'cksum-v1:4294967295:12',
+  }).ok, true);
+
+  const invalidBodies = [
+    { content: '' },
+    { baseChecksum: null },
+    { content: '', baseChecksum: null, path: '/tmp/settings.yaml' },
+    { content: '', baseChecksum: null, filename: 'settings.yaml' },
+    { content: '', baseChecksum: 'sha256:abc' },
+    { content: '', baseChecksum: 'cksum-v1:4294967296:0' },
+    { content: '', baseChecksum: 'cksum-v1:1:524289' },
+  ];
+  for (const body of invalidBodies) {
+    assert.equal(validate(dshSettingsPutSchema, body).ok, false, JSON.stringify(body));
+  }
+});
+
+test('settings REST contract：read 条件形状与 write 不回显 content', () => {
+  const missing = {
+    exists: false,
+    path: '/home/test/.dsh/settings.yaml',
+    content: '',
+    checksum: null,
+    size: 0,
+  };
+  const existingContent = '中文\n';
+  const existingBytes = Buffer.from(existingContent, 'utf8');
+  const existingCrc = posixCksum(existingBytes);
+  const existing = {
+    exists: true,
+    path: '/home/test/.dsh/settings.yaml',
+    content: existingContent,
+    checksum: `cksum-v1:${existingCrc}:${existingBytes.byteLength}`,
+    size: existingBytes.byteLength,
+  };
+  const written = {
+    updated: true,
+    path: '/home/test/.dsh/settings.yaml',
+    checksum: 'cksum-v1:456:7',
+    size: 7,
+  };
+  assertShape(settingsReadResponse, missing, 'settings missing');
+  assertShape(settingsReadResponse, existing, 'settings existing');
+  assertShape(settingsWriteResponse, written, 'settings write');
+
+  assert.equal(validate(settingsReadResponse, { ...missing, checksum: 'cksum-v1:1:0' }).ok, false);
+  assert.equal(validate(settingsReadResponse, { ...existing, size: 6 }).ok, false);
+  const wrongCrc = existingCrc === 0 ? 1 : 0;
+  assert.equal(validate(settingsReadResponse, {
+    ...existing,
+    checksum: `cksum-v1:${wrongCrc}:${existingBytes.byteLength}`,
+  }).ok, false);
+  assert.equal(validate(settingsWriteResponse, { ...written, updated: false }).ok, false);
+  assert.equal(validate(settingsWriteResponse, { ...written, content: 'secret' }).ok, false);
+});
+
 test('setup 门禁白名单＝13 §4 的六项', () => {
   assert.deepEqual([...SETUP_ALLOWED].sort(), [
     'GET /api/config',
@@ -86,6 +244,98 @@ test('setup 门禁白名单＝13 §4 的六项', () => {
     'POST /api/hosts/probe',
     'POST /api/setup',
   ]);
+});
+
+test('settings API：query、非法 body、未知主机均在目标执行前拒绝', async (t) => {
+  const ctx = await bootServer(t, { skipBoot: true });
+  assert.deepEqual(ctx.harness.transportCalls(), []);
+
+  const cases = [
+    ['GET', '/api/hosts/gpu-1/dsh-settings?path=%2Ftmp%2Fx', undefined, 400, 'VALIDATION'],
+    ['PUT', '/api/hosts/gpu-1/dsh-settings?unused=1', {
+      content: '', baseChecksum: null,
+    }, 400, 'VALIDATION'],
+    ['PUT', '/api/hosts/gpu-1/dsh-settings', {
+      content: '', baseChecksum: null, path: '/tmp/settings.yaml',
+    }, 400, 'VALIDATION'],
+    ['PUT', '/api/hosts/gpu-1/dsh-settings', {
+      content: '', baseChecksum: 'bad-token',
+    }, 400, 'VALIDATION'],
+    ['GET', '/api/hosts/missing/dsh-settings', undefined, 404, 'NOT_FOUND'],
+    ['PUT', '/api/hosts/missing/dsh-settings', {
+      content: '', baseChecksum: null,
+    }, 404, 'NOT_FOUND'],
+  ];
+
+  for (const [method, route, body, status, code] of cases) {
+    // eslint-disable-next-line no-await-in-loop -- 每个前置拒绝都要逐一确认目标端账本不变
+    const res = await ctx.api(method, route, body);
+    assert.equal(res.status, status, `${method} ${route}: ${res.text}`);
+    assert.equal(res.json.code, code);
+    assert.deepEqual(ctx.harness.transportCalls(), [], `${method} ${route} 不得执行目标命令`);
+  }
+});
+
+test('settings API：畸形 host 编码统一为无 stack detail 的 VALIDATION', async (t) => {
+  const ctx = await bootServer(t, { skipBoot: true });
+  for (const method of ['GET', 'PUT']) {
+    // eslint-disable-next-line no-await-in-loop -- GET/PUT 都必须独立通过路由边界
+    const res = await ctx.api(
+      method,
+      '/api/hosts/%/dsh-settings',
+      method === 'PUT' ? { content: '', baseChecksum: null } : undefined,
+    );
+    assert.equal(res.status, 400, res.text);
+    assert.equal(res.json.code, 'VALIDATION');
+    assert.equal(Object.hasOwn(res.json, 'detail'), false);
+    assert.doesNotMatch(res.text, /URIError|stack|decodeURIComponent/u);
+    assert.deepEqual(ctx.harness.transportCalls(), []);
+  }
+});
+
+test('settings PUT：非法 JSON 脱敏，525000 NUL wire 超限映射 413', async (t) => {
+  const ctx = await bootServer(t, { skipBoot: true });
+  const secret = 'UNIQUE_SETTINGS_SECRET_4a26';
+  const malformed = await rawRequest(
+    ctx.base,
+    'PUT',
+    '/api/hosts/gpu-1/dsh-settings',
+    `{"content":"${secret}","baseChecksum":null`,
+  );
+  assert.equal(malformed.status, 400, malformed.text);
+  assert.equal(malformed.json.code, 'VALIDATION');
+  assert.equal(malformed.json.error, '请求体不是合法 JSON');
+  assert.doesNotMatch(malformed.text, new RegExp(secret, 'u'));
+
+  const overWire = JSON.stringify({
+    content: '\u0000'.repeat(525_000),
+    baseChecksum: null,
+  });
+  const oversized = await rawRequest(
+    ctx.base,
+    'PUT',
+    '/api/hosts/gpu-1/dsh-settings',
+    overWire,
+  );
+  assert.equal(oversized.status, 413, oversized.text);
+  assert.equal(oversized.json.code, 'SETTINGS_TOO_LARGE');
+  assert.deepEqual(ctx.harness.transportCalls(), []);
+});
+
+test('settings API：GET/PUT 默认受 setup gate 阻断且不执行目标命令', async (t) => {
+  const ctx = await bootServer(t, { setupCompleted: false, skipBoot: true });
+
+  const get = await ctx.get('/api/hosts/gpu-1/dsh-settings');
+  assert.equal(get.status, 409);
+  assert.equal(get.json.code, 'SETUP_REQUIRED');
+
+  const put = await ctx.api('PUT', '/api/hosts/gpu-1/dsh-settings', {
+    content: '',
+    baseChecksum: null,
+  });
+  assert.equal(put.status, 409);
+  assert.equal(put.json.code, 'SETUP_REQUIRED');
+  assert.deepEqual(ctx.harness.transportCalls(), []);
 });
 
 test('POST /api/hosts/local：缺省名称取 hostname，并以 201 持久化本机身份', async (t) => {

@@ -54,6 +54,10 @@ const LOG_LIMIT = 50;
 const DEFAULT_LOCAL_NAME = 'local-host';
 const SAFE_HOST_RE = /^[A-Za-z0-9._-]+$/;
 const SYNC_TARGET_LIMIT = 200;
+const SETTINGS_MAX_BYTES = 512 * 1024;
+const SETTINGS_BODY_FIELDS = new Set(['content', 'baseChecksum']);
+const SETTINGS_CHECKSUM_RE = /^cksum-v1:(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,6})$/u;
+const CRC_POLYNOMIAL = 0x04c11db7;
 const OPAQUE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const PREVIEW_TOKEN_DOMAIN = 'dsh-center-demo-preview-v1\0';
 const SHA256_INITIAL = Object.freeze([
@@ -86,6 +90,111 @@ const SYNC_PROFILE_FIELDS = Object.freeze([
   'inject.extraArgs',
   'inject.patches',
 ]);
+
+const CRC_TABLE = Object.freeze(Array.from({ length: 256 }, (_, index) => {
+  let crc = (index << 24) >>> 0;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = (crc & 0x80000000) !== 0
+      ? (((crc << 1) ^ CRC_POLYNOMIAL) >>> 0)
+      : ((crc << 1) >>> 0);
+  }
+  return crc;
+}));
+
+const crcByte = (crc, byte) => (
+  (((crc << 8) >>> 0) ^ CRC_TABLE[((crc >>> 24) ^ byte) & 0xff]) >>> 0
+);
+
+/**
+ * POSIX `cksum` CRC 的纯浏览器实现，仅用于在线 demo 镜像生产 CAS 协议。
+ * 它不是密码学 hash，不得用于凭据或安全判定。
+ */
+export function posixCksum(input) {
+  if (!(input instanceof Uint8Array)) {
+    throw new TypeError('posixCksum input 必须是 Uint8Array');
+  }
+  let crc = 0;
+  for (const byte of input) crc = crcByte(crc, byte);
+  let length = input.byteLength;
+  while (length > 0) {
+    crc = crcByte(crc, length & 0xff);
+    length = Math.floor(length / 256);
+  }
+  return (~crc) >>> 0;
+}
+
+function hasUnpairedSurrogate(content) {
+  for (let index = 0; index < content.length; index += 1) {
+    const unit = content.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = content.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function settingsValidation(detail) {
+  throw new FakeApiError(
+    400,
+    'VALIDATION',
+    'settings.yaml 保存请求校验失败',
+    detail,
+  );
+}
+
+function assertSettingsRequest(request) {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+    settingsValidation(`<root>: expected object, got ${request === null ? 'null' : Array.isArray(request) ? 'array' : typeof request}`);
+  }
+  const errors = [];
+  for (const field of SETTINGS_BODY_FIELDS) {
+    if (!Object.hasOwn(request, field)) errors.push(`${field}: required`);
+  }
+  for (const key of Object.keys(request)) {
+    if (!SETTINGS_BODY_FIELDS.has(key)) errors.push(`${key}: unknown key`);
+  }
+  if (Object.hasOwn(request, 'content') && typeof request.content !== 'string') {
+    errors.push(`content: expected string, got ${request.content === null ? 'null' : typeof request.content}`);
+  }
+  if (Object.hasOwn(request, 'baseChecksum') && request.baseChecksum !== null) {
+    const match = typeof request.baseChecksum === 'string'
+      ? SETTINGS_CHECKSUM_RE.exec(request.baseChecksum)
+      : null;
+    if (
+      !match
+      || Number(match[1]) > 0xffff_ffff
+      || Number(match[2]) > SETTINGS_MAX_BYTES
+    ) {
+      errors.push('baseChecksum: 格式无效，应为 cksum-v1:<CRC>:<字节数> 或 null');
+    }
+  }
+  if (errors.length > 0) settingsValidation(errors.join('\n'));
+}
+
+function encodeSettingsContent(content) {
+  if (hasUnpairedSurrogate(content)) {
+    throw new FakeApiError(
+      400,
+      'VALIDATION',
+      'content 含未配对的 Unicode surrogate，无法无损编码为 UTF-8',
+    );
+  }
+  const bytes = new TextEncoder().encode(content);
+  if (bytes.byteLength > SETTINGS_MAX_BYTES) {
+    throw new FakeApiError(
+      413,
+      'SETTINGS_TOO_LARGE',
+      'settings.yaml 超过 512 KiB，无法安全处理',
+    );
+  }
+  return bytes;
+}
+
+const settingsChecksum = (bytes) => `cksum-v1:${posixCksum(bytes)}:${bytes.byteLength}`;
 
 function cloneInject(value) {
   return {
@@ -280,6 +389,8 @@ export function createFakeManager({
   const hosts = new Map();
   /** @type {Map<string, {gen:number, seed:object}>} 私有元信息：不能混进 HostView，会污染契约 */
   const meta = new Map();
+  /** settings 正文只驻留在此私有 Map，不进入 HostView/config/SSE。 */
+  const settingsFiles = new Map();
   const pendingTimers = new Set();
 
   let revision = 0;
@@ -475,6 +586,7 @@ export function createFakeManager({
     clearTimers();
     hosts.clear();
     meta.clear();
+    settingsFiles.clear();
     logs = [];
     revision = 0;
     previewSessionSalt = randomBytes(32);
@@ -854,6 +966,75 @@ export function createFakeManager({
     return fakeLog(name, host.web.port, Math.min(lines, 60));
   }
 
+  function assertSettingsReachable(host) {
+    if (host.phase === 'unreachable') {
+      throw new FakeApiError(
+        502,
+        'SSH_UNREACHABLE',
+        `无法通过 SSH 连接主机 ${host.name}`,
+      );
+    }
+  }
+
+  function dshSettingsPath(name, host) {
+    const seed = seedOf(name);
+    const user = seed?.sshInfo?.user;
+    const dshHome = seed?.dsh?.dshHome
+      ?? (host.local ? '/Users/demo/.dsh' : user === 'root' ? '/root/.dsh' : `/home/${user}/.dsh`);
+    return `${dshHome.replace(/\/+$/u, '')}/settings.yaml`;
+  }
+
+  function readDshSettings(name) {
+    gate();
+    const host = need(name);
+    assertSettingsReachable(host);
+    const path = dshSettingsPath(name, host);
+    if (!settingsFiles.has(name)) {
+      return {
+        exists: false,
+        path,
+        content: '',
+        checksum: null,
+        size: 0,
+      };
+    }
+    const content = settingsFiles.get(name);
+    const bytes = encodeSettingsContent(content);
+    return {
+      exists: true,
+      path,
+      content,
+      checksum: settingsChecksum(bytes),
+      size: bytes.byteLength,
+    };
+  }
+
+  function writeDshSettings(name, request) {
+    gate();
+    const host = need(name);
+    assertSettingsRequest(request);
+    const bytes = encodeSettingsContent(request.content);
+    assertSettingsReachable(host);
+    const path = dshSettingsPath(name, host);
+    const currentChecksum = settingsFiles.has(name)
+      ? settingsChecksum(encodeSettingsContent(settingsFiles.get(name)))
+      : null;
+    if (request.baseChecksum !== currentChecksum) {
+      throw new FakeApiError(
+        409,
+        'SETTINGS_STALE',
+        'settings.yaml 已变化，请重新 GET 后再保存',
+      );
+    }
+    settingsFiles.set(name, request.content);
+    return {
+      updated: true,
+      path,
+      checksum: settingsChecksum(bytes),
+      size: bytes.byteLength,
+    };
+  }
+
   const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject']);
 
   function saveHostConfig(name, patch) {
@@ -1022,6 +1203,8 @@ export function createFakeManager({
     reconnectHost,
     // 其他 REST
     hostLog,
+    readDshSettings,
+    writeDshSettings,
     saveHostConfig,
     saveDefaults,
     reload,

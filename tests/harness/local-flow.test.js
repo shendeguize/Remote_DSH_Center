@@ -13,6 +13,7 @@ import * as monitor from '../../src/monitor.js';
 import { hashFile, remoteName } from '../../src/patchsync.js';
 import * as ports from '../../src/ports.js';
 import { probeHost } from '../../src/prober.js';
+import { readDshSettings, writeDshSettings } from '../../src/settings-file.js';
 import * as store from '../../src/store.js';
 import * as tunnel from '../../src/tunnel.js';
 
@@ -111,6 +112,55 @@ function assertLocalTransportOnly(harness) {
   assert.ok(calls.every((call) => call.transport === 'local'), JSON.stringify(calls));
   assert.equal(calls.some((call) => call.kind === 'tunnel'), false, '本机路径不得启动 fake-ssh tunnel child');
 }
+
+test('本机 settings：fake-local stdin 走同一 read/write 协议，transport 全为 local', async (t) => {
+  const { harness } = await localFixture(t);
+  const resolveLocal = () => store.getHostView(LOCAL_HOST).local;
+  const content = '\ufeffprovider: synthetic-local\r\nnul: \0\r\n';
+
+  const missing = await readDshSettings(LOCAL_HOST, { resolveLocal });
+  assert.deepEqual(missing, {
+    exists: false,
+    path: path.join(harness.localHomeDir, '.dsh', 'settings.yaml'),
+    content: '',
+    checksum: null,
+    size: 0,
+  });
+
+  const written = await writeDshSettings(LOCAL_HOST, {
+    resolveLocal,
+    content,
+    baseChecksum: null,
+  });
+  assert.equal(written.updated, true);
+  assert.equal(written.size, Buffer.byteLength(content));
+  assert.equal(Object.hasOwn(written, 'content'), false);
+
+  const loaded = await readDshSettings(LOCAL_HOST, { resolveLocal });
+  assert.equal(loaded.content, content);
+  assert.equal(loaded.checksum, written.checksum);
+  assert.equal(harness.hostState(LOCAL_HOST).settingsMode, 0o600);
+  assert.deepEqual(harness.hostState(LOCAL_HOST).backup, {
+    previousHex: null,
+    absent: true,
+    mode: 0o600,
+  });
+  assert.deepEqual(
+    harness.transportCalls().map(({ transport, kind }) => ({ transport, kind })),
+    [
+      { transport: 'local', kind: 'settings-read' },
+      { transport: 'local', kind: 'settings-write' },
+      { transport: 'local', kind: 'settings-read' },
+    ],
+  );
+  assert.equal(
+    Object.keys(harness.remoteFiles(LOCAL_HOST))
+      .some((name) => name.startsWith('.dsh_center_remote/settings-staging/')),
+    false,
+    '本机 settings 成功路径不得遗留 staging',
+  );
+  assertLocalTransportOnly(harness);
+});
 
 test('本机全链：probe → launch → direct HTTP/HostView → stop', async (t) => {
   const {

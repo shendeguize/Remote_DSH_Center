@@ -19,6 +19,21 @@ const CALL = {
 
 const NEEDS_CONFIRM = new Set(['stop', 'restart']);
 export const CONFIG_SYNC_TARGET_LIMIT = 200;
+export const HOST_WEB_RESTART_NOTICE = '需重启此主机的 dsh web（重启 manager 无效）';
+const HOST_RESTART_PHASES = new Set(['running', 'degraded', 'starting']);
+
+function workdirChangePending(patch, hostBeforeSave, savedHost) {
+  if (!Object.hasOwn(patch, 'workdir') || !HOST_RESTART_PHASES.has(savedHost?.phase)) {
+    return false;
+  }
+
+  const savedWorkdir = savedHost.config?.workdir ?? null;
+  if (savedHost.web) return (savedHost.web.workdir ?? null) !== savedWorkdir;
+
+  return savedHost.phase === 'starting'
+    && hostBeforeSave?.phase === 'starting'
+    && (hostBeforeSave.config?.workdir ?? null) !== savedWorkdir;
+}
 
 export function createActions({ store, confirm, navigate }) {
   /** 统一错误呈现：ApiError 的 detail 落可展开区域（10 §3.9）。 */
@@ -51,18 +66,38 @@ export function createActions({ store, confirm, navigate }) {
   }
 
   /**
-   * 包住一次写操作：pending 生命周期 + 202 accepted + 超时只解 loading。
+   * 包住一次受保护操作：pending 生命周期 + 202 accepted + 超时只解 loading。
    * @param {{
    *   action:string, host?:string|null, run:()=>Promise<any>,
-   *   settleOnResolve?:boolean, failureMessage?:string,
-   *   onError?:(toast:{id:number,level:string,summary:string,detail:string|null})=>void,
+   *   settleOnResolve?:boolean, failureMessage?:string, requireWritable?:boolean,
+   *   onError?:(toast:{
+   *     id:number,level:string,summary:string,detail:string|null,
+   *     code:string|null,status:number|null,
+   *   })=>void,
    * }} opts
    */
   async function guarded({
-    action, host = null, run, settleOnResolve = false, failureMessage, onError,
+    action,
+    host = null,
+    run,
+    settleOnResolve = false,
+    failureMessage,
+    onError,
+    requireWritable = true,
   }) {
-    if (!store.canWrite()) {
-      store.addToast({ level: 'warn', summary: '与 manager 失联，写操作已暂停' });
+    if (requireWritable && !store.canWrite()) {
+      const presentation = {
+        level: 'warn',
+        summary: '与 manager 失联，写操作已暂停',
+        detail: null,
+      };
+      const toast = store.addToast(presentation);
+      onError?.({
+        ...presentation,
+        id: toast.id,
+        code: null,
+        status: null,
+      });
       return null;
     }
     if (store.isPending(action, host)) return null;
@@ -166,15 +201,25 @@ export function createActions({ store, confirm, navigate }) {
   }
 
   async function saveHostConfig(name, patch) {
+    const hostBeforeSave = store.getHost(name);
+    let hostMergeGuard = null;
     const res = await guarded({
       action: 'config:save',
       host: name,
       settleOnResolve: true,
-      run: () => api.saveHostConfig(name, patch),
+      run: () => {
+        hostMergeGuard = store.captureHostMergeGuard();
+        return api.saveHostConfig(name, patch);
+      },
     });
-    if (res?.host) {
-      store.upsertHost(res.host);
-      store.addToast({ level: 'success', summary: `${name} 配置已保存` });
+    if (res?.host && hostMergeGuard !== null) {
+      store.mergeActionHosts([res.host], hostMergeGuard);
+    }
+    if (res?.host && store.getHost(name)) {
+      const restartNotice = workdirChangePending(patch, hostBeforeSave, res.host)
+        ? `；${HOST_WEB_RESTART_NOTICE}`
+        : '';
+      store.addToast({ level: 'success', summary: `${name} 配置已保存${restartNotice}` });
     }
     return res;
   }
@@ -208,11 +253,41 @@ export function createActions({ store, confirm, navigate }) {
       store.mergeActionHosts(res.hosts, hostMergeGuard);
     }
     const count = Array.isArray(res.applied) ? res.applied.length : 0;
+    const restartTargets = (res.targets ?? [])
+      .filter((target) => target.changed && HOST_RESTART_PHASES.has(store.getHost(target.name)?.phase))
+      .map((target) => target.name);
+    const restartSummary = restartTargets.length > 0
+      ? '；运行中目标需重启 dsh web（重启 manager 无效）'
+      : '';
     store.addToast({
       level: 'success',
-      summary: count > 0 ? `已同步 ${count} 台主机配置` : '目标配置已一致',
+      summary: count > 0 ? `已同步 ${count} 台主机配置${restartSummary}` : '目标配置已一致',
+      detail: restartTargets.length > 0
+        ? restartTargets.map((name) => `${name}：${HOST_WEB_RESTART_NOTICE}`).join('\n')
+        : null,
     });
     return res;
+  }
+
+  async function loadDshSettings(name, { onError } = {}) {
+    return guarded({
+      action: 'settings:load',
+      host: name,
+      settleOnResolve: true,
+      onError,
+      requireWritable: false,
+      run: () => api.getDshSettings(name),
+    });
+  }
+
+  async function saveDshSettings(name, payload, { onError } = {}) {
+    return guarded({
+      action: 'settings:save',
+      host: name,
+      settleOnResolve: true,
+      onError,
+      run: () => api.saveDshSettings(name, payload),
+    });
   }
 
   async function saveDefaults(patch) {
@@ -248,7 +323,8 @@ export function createActions({ store, confirm, navigate }) {
     const ok = await confirm({
       title: '重启 manager？',
       lines: [
-        '所有隧道会先关闭再按 autoStart 重建；已打开的页面标签会短暂失联。',
+        '存活的受管实例会按原 PID 与命令指纹复核接管，只重建隧道或直连登记：远端重建隧道、本机重新登记直连；不会重启这些 dsh web。',
+        '只有恢复时探测为 ready 且已启用 autoStart 的主机才会拉起 dsh web；已打开的页面标签会短暂失联。',
         '前台模式不支持自我重启，manager 会直接拒绝。',
       ],
       confirmLabel: '重启',
@@ -299,6 +375,8 @@ export function createActions({ store, confirm, navigate }) {
     setAutoStart,
     saveHostConfig,
     syncConfig,
+    loadDshSettings,
+    saveDshSettings,
     saveDefaults,
     reload,
     restartManager,

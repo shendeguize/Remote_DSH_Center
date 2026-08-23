@@ -4,7 +4,7 @@
  * UI 只消费 changedFields，绝不读取或展示配置值（尤其是环境变量与 secret）。
  */
 
-import { CONFIG_SYNC_TARGET_LIMIT } from '../actions.js';
+import { CONFIG_SYNC_TARGET_LIMIT, HOST_WEB_RESTART_NOTICE } from '../actions.js';
 import { button, clear, el } from '../utils.js';
 
 const FIELD_LABEL = Object.freeze({
@@ -287,7 +287,9 @@ export function createConfigSyncDialog({ store, actions }) {
       ]);
       const host = store.getHost(plan.name);
       if (plan.changed && RESTART_PHASES.has(host?.phase)) {
-        item.append(el('span.config-sync-restart-note', { text: '状态提示：下次重启生效' }));
+        item.append(el('span.config-sync-restart-note', {
+          text: `状态提示：${HOST_WEB_RESTART_NOTICE}`,
+        }));
       }
       list.append(item);
     }
@@ -295,7 +297,7 @@ export function createConfigSyncDialog({ store, actions }) {
       el('h3', { id: 'config-sync-results-title', text: isApplied ? '同步结果' : '同步预览' }),
       list,
       el('p.config-sync-no-restart', {
-        text: '本动作不会重启或停止任何主机；运行中的配置将在下次重启生效。',
+        text: `本动作不会重启或停止任何主机；运行中的配置${HOST_WEB_RESTART_NOTICE}。`,
       }),
     ]));
   }

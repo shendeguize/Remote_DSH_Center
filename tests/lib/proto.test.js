@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   buildProbeScript,
@@ -9,10 +13,13 @@ import {
   buildStopScript,
   buildLogTailScript,
   buildPatchCleanupScript,
+  buildSettingsReadScript,
+  buildSettingsWriteScript,
   parseProtoOutput,
   parseLaunchUrl,
   kvOne,
 } from '../../src/lib/proto.js';
+import { localExec, SSH_OUTPUT_CAP_BYTES } from '../../src/lib/ssh.js';
 
 // ── §7 解析器 ────────────────────────────────────────────────────────────
 
@@ -290,4 +297,641 @@ test('§1.5 patch 清理模板：空格包裹匹配法 + 兼职 mkdir', () => {
 test('§1.5 空清单表示全清', () => {
   const s = buildPatchCleanupScript({ keepNames: [] });
   assert.ok(s.includes('case "  " in'));
+});
+
+// ── settings.yaml 固定路径协议 ────────────────────────────────────────────
+
+function runSh(script, { env = {}, input = Buffer.alloc(0) } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', script], {
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.on('error', reject);
+    child.on('close', (code, signal) => resolve({
+      code,
+      signal,
+      stdout: Buffer.concat(stdout).toString('utf8'),
+      stderr: Buffer.concat(stderr).toString('utf8'),
+    }));
+    child.stdin.end(input);
+  });
+}
+
+function checkShSyntax(script) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-n', '-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stderr = [];
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.on('error', reject);
+    child.on('close', (code) => resolve({
+      code,
+      stderr: Buffer.concat(stderr).toString('utf8'),
+    }));
+  });
+}
+
+const SETTINGS_READ_SNAPSHOT = [
+  'LC_ALL=C',
+  'export LC_ALL',
+  'umask 077',
+  'set -f',
+  "T='read_01'",
+  'H="${DSH_HOME:-$HOME/.dsh}"',
+  'P="$H/settings.yaml"',
+  'R="$HOME/.dsh_center_remote"',
+  'S="$R/settings-staging"',
+  'SNAP="$S/read-$T.data"',
+  'HEX_RAW="$S/read-$T.hex-raw"',
+  'HEX="$S/read-$T.hex"',
+  'unsupported() { echo "ERR=settings-unsupported"; exit 1; }',
+  'read_fail() { echo "ERR=settings-read"; exit 1; }',
+  'is_uint() { case "$1" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }',
+  'parse_cksum() { set -- $1; [ "$#" -eq 2 ] || return 1; is_uint "$1" || return 1; is_uint "$2" || return 1; CK_CRC=$1; CK_SIZE=$2; }',
+  'ensure_dir() { D=$1; if [ -L "$D" ]; then return 1; elif [ -e "$D" ]; then [ -d "$D" ] || return 1; else mkdir "$D" || return 1; fi; chmod 700 "$D" || return 1; }',
+  'cleanup_staging() { set +f; rm -f "$S"/read-*.data "$S"/read-*.hex "$S"/read-*.hex-raw "$S"/write-*.data; RC=$?; set -f; return "$RC"; }',
+  'cleanup_commit() { set +f; rm -f "$H"/.settings.yaml.dshc-*.tmp; RC=$?; set -f; return "$RC"; }',
+  'emit_path() { printf \'%s\' "$P" | od -A n -v -t x1 > "$HEX_RAW" 2>/dev/null || read_fail; tr -d \'[:space:]\' < "$HEX_RAW" > "$HEX" || read_fail; echo "PATH_HEX<<DSHC_PATH"; cat "$HEX" || { echo; echo "DSHC_PATH"; read_fail; }; echo; echo "DSHC_PATH"; }',
+  'echo "SETTINGS_PROTO=1"',
+  'printf \'SETTINGS_TXN=%s\\n\' "$T"',
+  'case "$HOME" in /*) ;; *) unsupported ;; esac',
+  'case "$H" in /*) ;; *) unsupported ;; esac',
+  'for C in command test printf mkdir chmod rm dd wc cksum od tr cat mv; do command -v "$C" >/dev/null 2>&1 || unsupported; done',
+  'OD_PROBE=$(printf \'\\001\\377\' | od -A n -v -t x1 2>/dev/null | tr -d \'[:space:]\') || unsupported',
+  '[ "$OD_PROBE" = 01ff ] || unsupported',
+  'CK_OUT=$(printf x | cksum 2>/dev/null) || unsupported',
+  'parse_cksum "$CK_OUT" || unsupported',
+  '[ "$CK_CRC" = 12738659 ] && [ "$CK_SIZE" = 1 ] || unsupported',
+  'ensure_dir "$R" || read_fail',
+  'ensure_dir "$S" || read_fail',
+  'cleanup_staging || read_fail',
+  'if [ -d "$H" ]; then cleanup_commit || read_fail; fi',
+  'trap \'rm -f "$SNAP" "$HEX_RAW" "$HEX"\' 0',
+  'trap \'read_fail\' 1 2 3 15',
+  'if [ -L "$P" ]; then read_fail; fi',
+  'if [ ! -e "$P" ]; then echo "EXISTS=no"; echo "SIZE=0"; emit_path; echo "CONTENT_HEX<<DSHC_CONTENT"; echo "DSHC_CONTENT"; echo "SETTINGS_READ_DONE=yes"; exit 0; fi',
+  '[ -f "$P" ] || read_fail',
+  'dd if="$P" of="$SNAP" bs=524289 count=1 2>/dev/null || read_fail',
+  'chmod 600 "$SNAP" || read_fail',
+  'SIZE_RAW=$(wc -c < "$SNAP" 2>/dev/null) || read_fail',
+  'SIZE=$(printf \'%s\' "$SIZE_RAW" | tr -d \'[:space:]\') || read_fail',
+  'is_uint "$SIZE" || read_fail',
+  '[ "$SIZE" -le 524288 ] || { echo "ERR=settings-too-large"; exit 10; }',
+  'CK_OUT=$(cksum < "$SNAP" 2>/dev/null) || read_fail',
+  'parse_cksum "$CK_OUT" || read_fail',
+  '[ "$CK_SIZE" = "$SIZE" ] || read_fail',
+  'echo "EXISTS=yes"',
+  'printf \'SIZE=%s\\n\' "$SIZE"',
+  'printf \'CRC=%s\\n\' "$CK_CRC"',
+  'emit_path',
+  'od -A n -v -t x1 "$SNAP" > "$HEX_RAW" 2>/dev/null || read_fail',
+  'tr -d \'[:space:]\' < "$HEX_RAW" > "$HEX" || read_fail',
+  'HEX_SIZE_RAW=$(wc -c < "$HEX" 2>/dev/null) || read_fail',
+  'HEX_SIZE=$(printf \'%s\' "$HEX_SIZE_RAW" | tr -d \'[:space:]\') || read_fail',
+  '[ "$HEX_SIZE" -eq "$((SIZE * 2))" ] || read_fail',
+  'echo "CONTENT_HEX<<DSHC_CONTENT"',
+  'cat "$HEX" || { echo; echo "DSHC_CONTENT"; read_fail; }',
+  'echo',
+  'echo "DSHC_CONTENT"',
+  'echo "SETTINGS_READ_DONE=yes"',
+].join('; ');
+
+const SETTINGS_WRITE_SNAPSHOT = [
+  'LC_ALL=C',
+  'export LC_ALL',
+  'umask 077',
+  'set -f',
+  "T='write_01'",
+  "EXPECT='yes'",
+  "BASE_CRC='123456789'",
+  "BASE_SIZE='42'",
+  'H="${DSH_HOME:-$HOME/.dsh}"',
+  'P="$H/settings.yaml"',
+  'R="$HOME/.dsh_center_remote"',
+  'S="$R/settings-staging"',
+  'B="$R/settings-backup"',
+  'STAGE="$S/write-$T.data"',
+  'TEMP="$H/.settings.yaml.dshc-$T.tmp"',
+  'PREV="$B/previous.yaml"',
+  'ABSENT="$B/previous.absent"',
+  'BTMP="$B/previous-$T.tmp"',
+  'ATMP="$B/absent-$T.tmp"',
+  'COMMITTED=no',
+  'commit_state() { if [ "$COMMITTED" = no ]; then echo "COMMIT_STATE=not-committed"; else echo "COMMIT_STATE=unknown"; fi; }',
+  'unsupported() { echo "ERR=settings-unsupported"; exit 1; }',
+  'write_fail() { echo "ERR=settings-write"; commit_state; exit 12; }',
+  'stale() { echo "ERR=settings-stale"; commit_state; exit 11; }',
+  'too_large() { echo "ERR=settings-too-large"; commit_state; exit 10; }',
+  'is_uint() { case "$1" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }',
+  'parse_cksum() { set -- $1; [ "$#" -eq 2 ] || return 1; is_uint "$1" || return 1; is_uint "$2" || return 1; CK_CRC=$1; CK_SIZE=$2; }',
+  'ensure_dir() { D=$1; if [ -L "$D" ]; then return 1; elif [ -e "$D" ]; then [ -d "$D" ] || return 1; else mkdir "$D" || return 1; fi; chmod 700 "$D" || return 1; }',
+  'cleanup_managed() { set +f; rm -f "$S"/read-*.data "$S"/read-*.hex "$S"/read-*.hex-raw "$S"/write-*.data "$B"/previous-*.tmp "$B"/absent-*.tmp; RC=$?; set -f; return "$RC"; }',
+  'cleanup_commit() { set +f; rm -f "$H"/.settings.yaml.dshc-*.tmp; RC=$?; set -f; return "$RC"; }',
+  'emit_path() { echo "PATH_HEX<<DSHC_PATH"; if printf \'%s\' "$P" | od -A n -v -t x1; then :; else echo "DSHC_PATH"; write_fail; fi; echo "DSHC_PATH"; }',
+  'read_current() { CUR_EXISTS=no; CUR_CRC=; CUR_SIZE=; if [ -L "$P" ]; then return 2; fi; if [ ! -e "$P" ]; then return 0; fi; [ -f "$P" ] || return 2; CUR_RAW=$(wc -c < "$P" 2>/dev/null) || return 3; CUR_SIZE=$(printf \'%s\' "$CUR_RAW" | tr -d \'[:space:]\') || return 3; is_uint "$CUR_SIZE" || return 3; [ "$CUR_SIZE" -le 524288 ] || return 4; CUR_OUT=$(cksum < "$P" 2>/dev/null) || return 3; parse_cksum "$CUR_OUT" || return 3; [ "$CK_SIZE" = "$CUR_SIZE" ] || return 5; CUR_EXISTS=yes; CUR_CRC=$CK_CRC; CUR_SIZE=$CK_SIZE; return 0; }',
+  'load_current() { read_current; RC=$?; case "$RC" in 0) return 0 ;; 4) too_large ;; 5) stale ;; *) write_fail ;; esac; }',
+  'match_base() { if [ "$EXPECT" = no ]; then [ "$CUR_EXISTS" = no ]; else [ "$CUR_EXISTS" = yes ] && [ "$CUR_CRC" = "$BASE_CRC" ] && [ "$CUR_SIZE" = "$BASE_SIZE" ]; fi; }',
+  'echo "SETTINGS_PROTO=1"',
+  'printf \'SETTINGS_TXN=%s\\n\' "$T"',
+  'case "$HOME" in /*) ;; *) unsupported ;; esac',
+  'case "$H" in /*) ;; *) unsupported ;; esac',
+  'for C in command test printf mkdir chmod rm dd wc cksum od tr cat mv; do command -v "$C" >/dev/null 2>&1 || unsupported; done',
+  'OD_PROBE=$(printf \'\\001\\377\' | od -A n -v -t x1 2>/dev/null | tr -d \'[:space:]\') || unsupported',
+  '[ "$OD_PROBE" = 01ff ] || unsupported',
+  'CK_OUT=$(printf x | cksum 2>/dev/null) || unsupported',
+  'parse_cksum "$CK_OUT" || unsupported',
+  '[ "$CK_CRC" = 12738659 ] && [ "$CK_SIZE" = 1 ] || unsupported',
+  'ensure_dir "$R" || write_fail',
+  'ensure_dir "$S" || write_fail',
+  'ensure_dir "$B" || write_fail',
+  'for F in "$PREV" "$ABSENT"; do if [ -L "$F" ]; then write_fail; fi; if [ -e "$F" ] && [ ! -f "$F" ]; then write_fail; fi; done',
+  'cleanup_managed || write_fail',
+  'trap \'rm -f "$STAGE" "$TEMP" "$BTMP" "$ATMP"\' 0',
+  'trap \'write_fail\' 1 2 3 15',
+  'cat > "$STAGE" || write_fail',
+  'chmod 600 "$STAGE" || write_fail',
+  'NEW_RAW=$(wc -c < "$STAGE" 2>/dev/null) || write_fail',
+  'NEW_SIZE=$(printf \'%s\' "$NEW_RAW" | tr -d \'[:space:]\') || write_fail',
+  'is_uint "$NEW_SIZE" || write_fail',
+  '[ "$NEW_SIZE" -le 524288 ] || too_large',
+  'NEW_OUT=$(cksum < "$STAGE" 2>/dev/null) || write_fail',
+  'parse_cksum "$NEW_OUT" || write_fail',
+  '[ "$CK_SIZE" = "$NEW_SIZE" ] || write_fail',
+  'NEW_CRC=$CK_CRC',
+  'NEW_SIZE=$CK_SIZE',
+  'load_current',
+  'match_base || stale',
+  '[ -d "$H" ] || write_fail',
+  'cd "$H" || write_fail',
+  'cleanup_commit || write_fail',
+  'cat "$STAGE" > "$TEMP" || write_fail',
+  'chmod 600 "$TEMP" || write_fail',
+  'TEMP_OUT=$(cksum < "$TEMP" 2>/dev/null) || write_fail',
+  'parse_cksum "$TEMP_OUT" || write_fail',
+  '[ "$CK_CRC" = "$NEW_CRC" ] && [ "$CK_SIZE" = "$NEW_SIZE" ] || write_fail',
+  'if [ "$CUR_EXISTS" = yes ]; then if [ -L "$P" ] || [ ! -f "$P" ]; then write_fail; fi; cat "$P" > "$BTMP" || write_fail; chmod 600 "$BTMP" || write_fail; BACK_OUT=$(cksum < "$BTMP" 2>/dev/null) || write_fail; parse_cksum "$BACK_OUT" || write_fail; [ "$CK_CRC" = "$BASE_CRC" ] && [ "$CK_SIZE" = "$BASE_SIZE" ] || stale; mv -f "$BTMP" "$PREV" || write_fail; rm -f "$ABSENT" || write_fail; else : > "$ATMP" || write_fail; chmod 600 "$ATMP" || write_fail; mv -f "$ATMP" "$ABSENT" || write_fail; rm -f "$PREV" || write_fail; fi',
+  'load_current',
+  'match_base || stale',
+  'COMMITTED=unknown',
+  'mv -f "$TEMP" "$P" || write_fail',
+  'COMMITTED=yes',
+  'load_current',
+  '[ "$CUR_EXISTS" = yes ] || write_fail',
+  '[ "$CUR_CRC" = "$NEW_CRC" ] && [ "$CUR_SIZE" = "$NEW_SIZE" ] || stale',
+  'emit_path',
+  'printf \'NEW_SIZE=%s\\n\' "$NEW_SIZE"',
+  'printf \'NEW_CRC=%s\\n\' "$NEW_CRC"',
+  'echo "SETTINGS_WRITE_DONE=yes"',
+].join('; ');
+
+test('settings READ/WRITE 模板逐字快照且保持单行', () => {
+  const read = buildSettingsReadScript({ txn: 'read_01' });
+  const write = buildSettingsWriteScript({
+    txn: 'write_01',
+    baseChecksum: 'cksum-v1:123456789:42',
+  });
+  noRawNewline(read, 'settings-read');
+  noRawNewline(write, 'settings-write');
+  assert.equal(read, SETTINGS_READ_SNAPSHOT);
+  assert.equal(write, SETTINGS_WRITE_SNAPSHOT);
+});
+
+test('settings 模板严格拒绝非法 txn 与 checksum，不给注入落点', () => {
+  for (const txn of ['', '.hidden', '-option', '../escape', 'a/b', 'a b', 'a;echo PWN', 'a\nb', 'a'.repeat(65), 42, null]) {
+    assert.throws(
+      () => buildSettingsReadScript({ txn }),
+      (err) => err.code === 'VALIDATION',
+      `READ 应拒绝 txn=${JSON.stringify(txn)}`,
+    );
+    assert.throws(
+      () => buildSettingsWriteScript({ txn, baseChecksum: null }),
+      (err) => err.code === 'VALIDATION',
+      `WRITE 应拒绝 txn=${JSON.stringify(txn)}`,
+    );
+  }
+
+  for (const baseChecksum of [
+    undefined,
+    '',
+    'cksum-v2:1:1',
+    'cksum-v1:-1:1',
+    'cksum-v1:1:-1',
+    'cksum-v1:01:1',
+    'cksum-v1:1:01',
+    'cksum-v1:4294967296:1',
+    'cksum-v1:1:524289',
+    'cksum-v1:1:1; echo PWN',
+    123,
+    {},
+  ]) {
+    assert.throws(
+      () => buildSettingsWriteScript({ txn: 'safe', baseChecksum }),
+      (err) => err.code === 'VALIDATION',
+      `应拒绝 checksum=${JSON.stringify(baseChecksum)}`,
+    );
+  }
+});
+
+test('settings txn/checksum 边界被接受并经 shq 固定为单词', () => {
+  const maxTxn = `t${'a'.repeat(63)}`;
+  const read = buildSettingsReadScript({ txn: maxTxn });
+  assert.ok(read.includes(`T='${maxTxn}'`));
+
+  const max = buildSettingsWriteScript({
+    txn: maxTxn,
+    baseChecksum: 'cksum-v1:4294967295:524288',
+  });
+  assert.ok(max.includes("BASE_CRC='4294967295'"));
+  assert.ok(max.includes("BASE_SIZE='524288'"));
+
+  const absent = buildSettingsWriteScript({ txn: 'create_1', baseChecksum: null });
+  assert.ok(absent.includes("EXPECT='no'"));
+  assert.ok(absent.includes("BASE_CRC=''"));
+  assert.ok(absent.includes("BASE_SIZE=''"));
+});
+
+test('settings 模板只用 POSIX sh 基线并可通过 sh -n', async () => {
+  for (const script of [
+    buildSettingsReadScript({ txn: 'syntax_read' }),
+    buildSettingsWriteScript({ txn: 'syntax_write', baseChecksum: null }),
+  ]) {
+    assert.doesNotMatch(script, /\b(?:base64|openssl)\b/);
+    assert.doesNotMatch(script, /\[\[|function\s|pipefail|<\(/);
+    const result = await checkShSyntax(script);
+    assert.equal(result.code, 0, result.stderr);
+  }
+});
+
+test('settings 相对 DSH_HOME 以 unsupported marker 普通非零退出', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-unsupported-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const env = { HOME: home, DSH_HOME: 'relative-home' };
+
+  for (const [script, input] of [
+    [buildSettingsReadScript({ txn: 'unsupported_read' }), Buffer.alloc(0)],
+    [buildSettingsWriteScript({ txn: 'unsupported_write', baseChecksum: null }), Buffer.from('x')],
+  ]) {
+    const result = await runSh(script, { env, input });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /^SETTINGS_PROTO=1\nSETTINGS_TXN=unsupported_(?:read|write)\nERR=settings-unsupported\n$/);
+  }
+  await assert.rejects(stat(join(home, '.dsh_center_remote')), { code: 'ENOENT' });
+});
+
+test('settings READ 缺失文件返回版本、hex 固定路径、空内容与完成哨兵', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-missing-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, 'dsh home');
+  await mkdir(dshHome);
+
+  const result = await runSh(buildSettingsReadScript({ txn: 'missing_read' }), {
+    env: { HOME: home, DSH_HOME: dshHome },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const out = parseProtoOutput(result.stdout, { requireDone: 'SETTINGS_READ_DONE' });
+  assert.equal(kvOne(out, 'SETTINGS_PROTO'), '1');
+  assert.equal(kvOne(out, 'SETTINGS_TXN'), 'missing_read');
+  assert.equal(kvOne(out, 'EXISTS'), 'no');
+  assert.equal(kvOne(out, 'SIZE'), '0');
+  assert.equal(out.blocks.CONTENT_HEX, '');
+  assert.match(out.blocks.PATH_HEX, /^[0-9a-f]+$/);
+  assert.equal(
+    Buffer.from(out.blocks.PATH_HEX.replace(/\s/g, ''), 'hex').toString('utf8'),
+    join(dshHome, 'settings.yaml'),
+  );
+  assert.deepEqual(await readdir(join(home, '.dsh_center_remote/settings-staging')), []);
+});
+
+test('settings 非 POSIX cksum CRC 在读写前 unsupported，目标不动', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-cksum-probe-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const bin = join(home, 'bin');
+  await mkdir(dshHome);
+  await mkdir(bin);
+  const target = join(dshHome, 'settings.yaml');
+  await writeFile(target, 'original');
+  const cksum = join(bin, 'cksum');
+  await writeFile(cksum, '#!/bin/sh\ncat >/dev/null\nprintf "1 1\\n"\n');
+  await chmod(cksum, 0o700);
+  const env = { HOME: home, DSH_HOME: dshHome, PATH: `${bin}:${process.env.PATH}` };
+
+  for (const [txn, script, input] of [
+    ['bad_crc_read', buildSettingsReadScript({ txn: 'bad_crc_read' }), Buffer.alloc(0)],
+    ['bad_crc_write', buildSettingsWriteScript({ txn: 'bad_crc_write', baseChecksum: null }), Buffer.from('new')],
+  ]) {
+    const result = await runSh(script, { env, input });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, new RegExp(`^SETTINGS_PROTO=1\\nSETTINGS_TXN=${txn}\\nERR=settings-unsupported\\n$`));
+    assert.equal(await readFile(target, 'utf8'), 'original');
+  }
+  await assert.rejects(stat(join(home, '.dsh_center_remote')), { code: 'ENOENT' });
+});
+
+test('settings READ 以 524288/524289 字节验证有界快照与 exit 10', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-read-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  await mkdir(dshHome);
+  const target = join(dshHome, 'settings.yaml');
+  const env = { HOME: home, DSH_HOME: dshHome };
+  const script = buildSettingsReadScript({ txn: 'boundary_read' });
+
+  await writeFile(target, Buffer.alloc(524288, 0x61));
+  const oldHome = process.env.HOME;
+  const oldDshHome = process.env.DSH_HOME;
+  process.env.HOME = home;
+  process.env.DSH_HOME = dshHome;
+  const atLimit = await localExec(script, { timeoutMs: 15_000 });
+  process.env.HOME = oldHome;
+  if (oldDshHome === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = oldDshHome;
+  assert.equal(atLimit.code, 0, atLimit.stderr);
+  assert.equal(atLimit.stdoutDropped, 0);
+  assert.ok(Buffer.byteLength(atLimit.stdout) < SSH_OUTPUT_CAP_BYTES);
+  assert.match(atLimit.stdout, /SIZE=524288\n/);
+  assert.match(atLimit.stdout, /SETTINGS_READ_DONE=yes\n/);
+  const parsed = parseProtoOutput(atLimit.stdout, { requireDone: 'SETTINGS_READ_DONE' });
+  const hex = parsed.blocks.CONTENT_HEX;
+  assert.match(hex, /^[0-9a-f]+$/);
+  assert.equal(hex.length, 524288 * 2);
+
+  await writeFile(target, Buffer.alloc(524289, 0x61));
+  const tooLarge = await runSh(script, { env });
+  assert.equal(tooLarge.code, 10);
+  assert.match(tooLarge.stdout, /ERR=settings-too-large\n/);
+  assert.doesNotMatch(tooLarge.stdout, /CONTENT_HEX<</);
+});
+
+test('settings READ 不吞 od 运行时失败', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-od-fail-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const bin = join(home, 'bin');
+  await mkdir(dshHome);
+  await mkdir(bin);
+  await writeFile(join(dshHome, 'settings.yaml'), 'abc');
+  const od = join(bin, 'od');
+  await writeFile(
+    od,
+    '#!/bin/sh\ncase "$*" in *read-od_fail.data*) printf aa; exit 7 ;; *) exec /usr/bin/od "$@" ;; esac\n',
+  );
+  await chmod(od, 0o700);
+  const result = await runSh(buildSettingsReadScript({ txn: 'od_fail' }), {
+    env: { HOME: home, DSH_HOME: dshHome, PATH: `${bin}:${process.env.PATH}` },
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /ERR=settings-read\n/);
+  assert.doesNotMatch(result.stdout, /CONTENT_HEX<</);
+});
+
+test('settings WRITE 在 mv 前先进入 unknown，TERM 窗口保守报告未知', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-commit-race-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const bin = join(home, 'bin');
+  await mkdir(dshHome);
+  await mkdir(bin);
+  const mv = join(bin, 'mv');
+  await writeFile(
+    mv,
+    '#!/bin/sh\ndest=\nfor arg do dest=$arg; done\n/bin/mv "$@" || exit $?\ncase "$dest" in */settings.yaml) kill -TERM "$PPID" ;; esac\n',
+  );
+  await chmod(mv, 0o700);
+  const script = buildSettingsWriteScript({ txn: 'race_1', baseChecksum: null });
+  assert.ok(script.indexOf('COMMITTED=unknown') < script.indexOf('mv -f "$TEMP" "$P"'));
+  assert.ok(script.indexOf('mv -f "$TEMP" "$P"') < script.indexOf('COMMITTED=yes'));
+
+  const result = await runSh(script, {
+    env: { HOME: home, DSH_HOME: dshHome, PATH: `${bin}:${process.env.PATH}` },
+    input: Buffer.from('committed'),
+  });
+  assert.equal(result.code, 12);
+  assert.match(result.stdout, /ERR=settings-write\nCOMMIT_STATE=unknown\n/);
+  assert.equal(await readFile(join(dshHome, 'settings.yaml'), 'utf8'), 'committed');
+});
+
+test('settings WRITE 第二次 CAS 捕获 backup 发布后的外部写入', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-second-cas-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const bin = join(home, 'bin');
+  const target = join(dshHome, 'settings.yaml');
+  const staging = join(home, '.dsh_center_remote/settings-staging');
+  const backup = join(home, '.dsh_center_remote/settings-backup/previous.yaml');
+  await mkdir(dshHome);
+  await mkdir(bin);
+  await writeFile(target, 'base-content');
+  const env = { HOME: home, DSH_HOME: dshHome };
+  const baseline = await runSh(buildSettingsReadScript({ txn: 'cas_base_read' }), { env });
+  const baseOut = parseProtoOutput(baseline.stdout, { requireDone: 'SETTINGS_READ_DONE' });
+  const baseChecksum = `cksum-v1:${kvOne(baseOut, 'CRC')}:${kvOne(baseOut, 'SIZE')}`;
+
+  const mv = join(bin, 'mv');
+  await writeFile(
+    mv,
+    '#!/bin/sh\ndest=\nfor arg do dest=$arg; done\n/bin/mv "$@" || exit $?\ncase "$dest" in */previous.yaml) printf %s external-writer > "$TARGET_PATH" ;; esac\n',
+  );
+  await chmod(mv, 0o700);
+  const result = await runSh(
+    buildSettingsWriteScript({ txn: 'second_cas', baseChecksum }),
+    {
+      env: { ...env, PATH: `${bin}:${process.env.PATH}`, TARGET_PATH: target },
+      input: Buffer.from('center-new-content'),
+    },
+  );
+  assert.equal(result.code, 11);
+  assert.match(result.stdout, /ERR=settings-stale\nCOMMIT_STATE=not-committed\n/);
+  assert.equal(await readFile(target, 'utf8'), 'external-writer');
+  assert.equal(await readFile(backup, 'utf8'), 'base-content');
+  assert.deepEqual(await readdir(staging), []);
+  assert.deepEqual(
+    (await readdir(dshHome)).filter((name) => name.startsWith('.settings.yaml.dshc-')),
+    [],
+  );
+});
+
+test('settings WRITE 正式 mv 前 TERM 报 unknown 且不提交', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-before-mv-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const bin = join(home, 'bin');
+  const target = join(dshHome, 'settings.yaml');
+  const staging = join(home, '.dsh_center_remote/settings-staging');
+  await mkdir(dshHome);
+  await mkdir(bin);
+  await writeFile(target, 'old-base');
+  const env = { HOME: home, DSH_HOME: dshHome };
+  const baseline = await runSh(buildSettingsReadScript({ txn: 'term_base_read' }), { env });
+  const baseOut = parseProtoOutput(baseline.stdout, { requireDone: 'SETTINGS_READ_DONE' });
+  const baseChecksum = `cksum-v1:${kvOne(baseOut, 'CRC')}:${kvOne(baseOut, 'SIZE')}`;
+
+  const mv = join(bin, 'mv');
+  await writeFile(
+    mv,
+    '#!/bin/sh\ndest=\nfor arg do dest=$arg; done\ncase "$dest" in */settings.yaml) kill -TERM "$PPID"; exit 143 ;; *) exec /bin/mv "$@" ;; esac\n',
+  );
+  await chmod(mv, 0o700);
+  const result = await runSh(
+    buildSettingsWriteScript({ txn: 'term_before_mv', baseChecksum }),
+    {
+      env: { ...env, PATH: `${bin}:${process.env.PATH}` },
+      input: Buffer.from('must-not-commit'),
+    },
+  );
+  assert.equal(result.code, 12);
+  assert.match(result.stdout, /ERR=settings-write\nCOMMIT_STATE=unknown\n/);
+  assert.equal(await readFile(target, 'utf8'), 'old-base');
+  assert.deepEqual(await readdir(staging), []);
+  assert.deepEqual(
+    (await readdir(dshHome)).filter((name) => name.startsWith('.settings.yaml.dshc-')),
+    [],
+  );
+});
+
+test('settings 下一次操作清理 SIGKILL 遗留且保留非 reserved 文件', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-orphans-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  const staging = join(home, '.dsh_center_remote/settings-staging');
+  await mkdir(dshHome);
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(dshHome, 'settings.yaml'), 'ok');
+  await writeFile(join(dshHome, '.settings.yaml.dshc-dead.tmp'), 'orphan');
+  await writeFile(join(dshHome, '.settings.yaml.keep'), 'keep');
+  await writeFile(join(staging, 'read-dead.data'), 'orphan');
+  await writeFile(join(staging, 'read-dead.hex'), 'orphan');
+  await writeFile(join(staging, 'write-dead.data'), 'orphan');
+  await writeFile(join(staging, 'keep.data'), 'keep');
+
+  const result = await runSh(buildSettingsReadScript({ txn: 'cleanup_next' }), {
+    env: { HOME: home, DSH_HOME: dshHome },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual((await readdir(staging)).sort(), ['keep.data']);
+  assert.deepEqual((await readdir(dshHome)).sort(), ['.settings.yaml.keep', 'settings.yaml']);
+});
+
+test('settings WRITE 从 stdin 创建、CAS 更新、备份并保持 0600', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-write-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, 'dsh home');
+  await mkdir(dshHome);
+  const target = join(dshHome, 'settings.yaml');
+  const env = { HOME: home, DSH_HOME: dshHome };
+  const original = Buffer.from('token: "$()\'\\nline"\0', 'utf8');
+
+  const create = await runSh(
+    buildSettingsWriteScript({ txn: 'create_1', baseChecksum: null }),
+    { env, input: original },
+  );
+  assert.equal(create.code, 0, `${create.stdout}\n${create.stderr}`);
+  assert.match(create.stdout, /SETTINGS_PROTO=1\n/);
+  assert.match(create.stdout, /SETTINGS_TXN=create_1\n/);
+  assert.match(create.stdout, /SETTINGS_WRITE_DONE=yes\n/);
+  assert.deepEqual(await readFile(target), original);
+  assert.equal((await stat(target)).mode & 0o777, 0o600);
+  await stat(join(home, '.dsh_center_remote/settings-backup/previous.absent'));
+
+  const crc = /NEW_CRC=(\d+)/.exec(create.stdout)[1];
+  const size = /NEW_SIZE=(\d+)/.exec(create.stdout)[1];
+  const replacement = Buffer.from('next: 中文\r\n', 'utf8');
+  const update = await runSh(
+    buildSettingsWriteScript({ txn: 'update_1', baseChecksum: `cksum-v1:${crc}:${size}` }),
+    { env, input: replacement },
+  );
+  assert.equal(update.code, 0, `${update.stdout}\n${update.stderr}`);
+  assert.deepEqual(await readFile(target), replacement);
+  assert.deepEqual(
+    await readFile(join(home, '.dsh_center_remote/settings-backup/previous.yaml')),
+    original,
+  );
+  await assert.rejects(
+    stat(join(home, '.dsh_center_remote/settings-backup/previous.absent')),
+    { code: 'ENOENT' },
+  );
+
+  const stale = await runSh(
+    buildSettingsWriteScript({ txn: 'stale_1', baseChecksum: `cksum-v1:${crc}:${size}` }),
+    { env, input: Buffer.from('must not win') },
+  );
+  assert.equal(stale.code, 11);
+  assert.match(stale.stdout, /ERR=settings-stale\nCOMMIT_STATE=not-committed\n/);
+  assert.deepEqual(await readFile(target), replacement);
+  assert.deepEqual(await readdir(join(home, '.dsh_center_remote/settings-staging')), []);
+  assert.deepEqual(
+    (await readdir(dshHome)).filter((name) => name.startsWith('.settings.yaml.dshc-')),
+    [],
+  );
+});
+
+test('settings WRITE 远端复核 524289 字节并拒绝目标/管理目录 symlink', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dshc-proto-safety-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const dshHome = join(home, '.dsh');
+  await mkdir(dshHome);
+  const target = join(dshHome, 'settings.yaml');
+  const outside = join(home, 'outside');
+  await mkdir(outside);
+  const env = { HOME: home, DSH_HOME: dshHome };
+
+  const atLimit = await runSh(
+    buildSettingsWriteScript({ txn: 'limit_1', baseChecksum: null }),
+    { env, input: Buffer.alloc(524288, 0x61) },
+  );
+  assert.equal(atLimit.code, 0, `${atLimit.stdout}\n${atLimit.stderr}`);
+  assert.match(atLimit.stdout, /NEW_SIZE=524288\n/);
+  await rm(target);
+
+  const oversized = await runSh(
+    buildSettingsWriteScript({ txn: 'large_1', baseChecksum: null }),
+    { env, input: Buffer.alloc(524289, 0x61) },
+  );
+  assert.equal(oversized.code, 10);
+  await assert.rejects(stat(target), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(join(home, '.dsh_center_remote/settings-staging')), []);
+
+  const secret = join(outside, 'secret');
+  await writeFile(secret, 'do-not-follow');
+  await symlink(secret, target);
+  const readLink = await runSh(buildSettingsReadScript({ txn: 'link_read' }), { env });
+  assert.equal(readLink.code, 1);
+  assert.match(readLink.stdout, /ERR=settings-read\n/);
+  assert.doesNotMatch(readLink.stdout, /646f2d6e6f742d666f6c6c6f77/);
+  const writeLink = await runSh(
+    buildSettingsWriteScript({ txn: 'link_write', baseChecksum: null }),
+    { env, input: Buffer.from('overwrite') },
+  );
+  assert.equal(writeLink.code, 12);
+  assert.equal(await readFile(secret, 'utf8'), 'do-not-follow');
+
+  await rm(target);
+  await mkdir(target);
+  const readDirectory = await runSh(buildSettingsReadScript({ txn: 'dir_read' }), { env });
+  assert.equal(readDirectory.code, 1);
+  assert.match(readDirectory.stdout, /ERR=settings-read\n/);
+  const writeDirectory = await runSh(
+    buildSettingsWriteScript({ txn: 'dir_write', baseChecksum: null }),
+    { env, input: Buffer.from('blocked') },
+  );
+  assert.equal(writeDirectory.code, 12);
+  await rm(target, { recursive: true });
+
+  await writeFile(target, 'plain');
+  const managed = join(home, '.dsh_center_remote');
+  await rm(managed, { recursive: true, force: true });
+  await symlink(outside, managed);
+  const managedLink = await runSh(buildSettingsReadScript({ txn: 'managed_read' }), { env });
+  assert.equal(managedLink.code, 1);
+  assert.match(managedLink.stdout, /ERR=settings-read\n/);
+  const managedWrite = await runSh(
+    buildSettingsWriteScript({ txn: 'managed_write', baseChecksum: null }),
+    { env, input: Buffer.from('blocked') },
+  );
+  assert.equal(managedWrite.code, 12);
+  assert.deepEqual(await readFile(target, 'utf8'), 'plain');
 });

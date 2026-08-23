@@ -208,13 +208,29 @@ test('关停正撞上重连的一拍：不许再冒新的隧道子进程（issue
   assert.deepEqual(tunnelChildren(), [], '关停之后不许再有隧道子进程：那是没人管的孤儿');
 });
 
-test('manager 重启：running 主机不重拉、只重建隧道；autoStart 已运行则跳过', async (t) => {
+test('manager 重启接管旧 workdir/PID；健康 autoStart:false 也恢复，主机重启才应用新目录', async (t) => {
   const ctx = await bootServer(t, {
-    hosts: { keep: SCENARIOS.healthy(), lost: SCENARIOS.healthy() },
-    hostConfig: { keep: { autoStart: true }, lost: { autoStart: false } },
+    hosts: {
+      keep: SCENARIOS.healthy(),
+      manual: SCENARIOS.healthy(),
+      lost: SCENARIOS.healthy(),
+    },
+    hostConfig: {
+      keep: { autoStart: true, workdir: '/root/a' },
+      manual: { autoStart: false },
+      lost: { autoStart: false },
+    },
   });
 
   const first = await waitPhase(ctx, 'keep', 'running', { timeoutMs: 15_000 });
+  assert.equal(first.web.workdir, '/root/a');
+  const changed = await ctx.api('PUT', '/api/hosts/keep/config', { workdir: '/root/b' });
+  assert.equal(changed.json.host.web.pid, first.web.pid, '运行中保存配置不得自动重启');
+  assert.equal(changed.json.host.web.workdir, '/root/a');
+  assert.equal(changed.json.host.config.workdir, '/root/b', '新目录保持 pending');
+
+  await ctx.api('POST', '/api/hosts/manual/start');
+  const manualFirst = await waitPhase(ctx, 'manual', 'running');
   await ctx.api('POST', '/api/hosts/lost/start');
   const lostFirst = await waitPhase(ctx, 'lost', 'running');
 
@@ -225,14 +241,30 @@ test('manager 重启：running 主机不重拉、只重建隧道；autoStart 已
 
   const keep = await waitPhase(ctx, 'keep', 'running', { timeoutMs: 15_000 });
   assert.equal(keep.web.pid, first.web.pid, '同一远端进程被接管，未重拉');
+  assert.equal(keep.web.workdir, '/root/a', 'manager 重启不能把存活实例切到新 workdir');
+  assert.equal(keep.config.workdir, '/root/b', 'manager 重启后新 workdir 仍保持 pending');
   assert.equal(keep.tunnel.localPort, first.tunnel.localPort);
   assert.equal(keep.tunnel.connected, true);
   assert.equal((await fetchText(keep.mappedUrl)).status, 200);
   assert.equal(ctx.harness.liveProcesses('keep').length, 1, '远端没有多出第二个实例');
 
+  const manual = await waitPhase(ctx, 'manual', 'running', { timeoutMs: 15_000 });
+  assert.equal(manual.config.autoStart, false);
+  assert.equal(manual.web.pid, manualFirst.web.pid,
+    '存活受管实例的恢复不依赖 autoStart，只复核接管并重建隧道');
+  assert.equal(ctx.harness.liveProcesses('manual').length, 1);
+
   const lost = await waitPhase(ctx, 'lost', 'crashed', { timeoutMs: 15_000 });
   assert.equal(lost.tunnel, null);
   assert.equal(lost.web.pid, lostFirst.web.pid, 'web 记录留证');
+
+  const events = await ctx.sse();
+  const restarted = await ctx.api('POST', '/api/hosts/keep/restart');
+  await events.wait((f) => f.type === 'operation-done' && f.data.operationId === restarted.json.operationId);
+  const applied = await waitPhase(ctx, 'keep', 'running');
+  assert.notEqual(applied.web.pid, first.web.pid, '只有主机 dsh web 重启才换实例');
+  assert.equal(applied.web.workdir, '/root/b');
+  assert.equal(applied.config.workdir, '/root/b', '实例与配置一致后不再 pending');
 });
 
 /**

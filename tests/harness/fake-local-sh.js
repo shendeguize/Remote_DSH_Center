@@ -23,4 +23,24 @@ if (!home) {
   process.exit(250);
 }
 
-dispatchProtocol(host, argv[1], { home, transport: 'local' });
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    process.stdin.once('error', reject);
+    process.stdin.once('end', () => resolve(Buffer.concat(chunks)));
+    process.stdin.resume();
+  });
+}
+
+let input;
+try {
+  input = await readStdin();
+} catch {
+  process.stderr.write('fake-local-sh: 读取 stdin 失败\n');
+  process.exit(250);
+}
+
+dispatchProtocol(host, argv[1], { home, transport: 'local', input });
