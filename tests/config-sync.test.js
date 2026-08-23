@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   applyConfigSync,
+  createConfigSyncPreview,
   planConfigSync,
+  requireConfigSyncPreview,
   SYNC_PROFILE_FIELDS,
   syncProfileOf,
 } from '../src/config-sync.js';
@@ -96,6 +98,77 @@ test('syncProfileOf 只取固定 profile，并与主机配置深度隔离', () =
   profile.inject.extraArgs.push('--other');
   profile.inject.patches.push('other.patch');
   assert.deepEqual(source.inject, inject({ TOKEN: 'source' }, ['--verbose'], ['fix.patch']));
+});
+
+test('preview token 对目标/对象键顺序稳定，绑定全部同步 profile 且不泄漏 secret', () => {
+  const secret = 'TOP-SECRET-PREVIEW-VALUE';
+  const config = configOf({
+    source: host({
+      remoteWebPort: 9010,
+      workdir: '/source',
+      inject: inject({ ZED: 'last', TOKEN: secret, ALPHA: 'first' }, ['--source'], ['source.patch']),
+    }),
+    a: host({
+      remoteWebPort: 9020,
+      workdir: '/a',
+      inject: inject({ OLD: 'a' }, ['--a'], ['a.patch']),
+    }),
+    b: host({
+      remoteWebPort: 9030,
+      workdir: '/b',
+      inject: inject({ OLD: 'b' }, ['--b'], ['b.patch']),
+    }),
+  });
+  const request = { source: 'source', targets: ['b', 'a'] };
+  const preview = createConfigSyncPreview(config, request);
+
+  assert.match(preview.previewToken, /^v1\.[A-Za-z0-9_-]{43}$/);
+  assert.doesNotMatch(preview.previewToken, new RegExp(secret));
+  assert.deepEqual(preview.plan.targets.map(({ name }) => name), ['b', 'a']);
+
+  const reordered = structuredClone(config);
+  reordered.hosts.source.inject.env = {
+    ALPHA: 'first',
+    TOKEN: secret,
+    ZED: 'last',
+  };
+  const reorderedPreview = createConfigSyncPreview(reordered, {
+    source: 'source',
+    targets: ['a', 'b'],
+  });
+  assert.equal(reorderedPreview.previewToken, preview.previewToken, '集合与对象键顺序不应改变 token');
+
+  reordered.hosts.source.enabled = false;
+  reordered.hosts.a.autoStart = true;
+  assert.equal(
+    createConfigSyncPreview(reordered, request).previewToken,
+    preview.previewToken,
+    '同步范围外字段不应让 preview 过期',
+  );
+
+  for (const [label, mutate] of [
+    ['source', (draft) => { draft.hosts.source.inject.env.TOKEN = 'changed-source'; }],
+    ['target-a', (draft) => { draft.hosts.a.workdir = '/changed-target'; }],
+    ['target-b', (draft) => { draft.hosts.b.inject.extraArgs.push('--changed-target'); }],
+  ]) {
+    const changed = structuredClone(config);
+    mutate(changed);
+    assert.notEqual(
+      createConfigSyncPreview(changed, request).previewToken,
+      preview.previewToken,
+      `${label} 的同步 profile 变化必须改变 token`,
+    );
+    assert.throws(
+      () => requireConfigSyncPreview(changed, request, preview.previewToken),
+      assertDshError('CONFIG_STALE', /重新预览|预览.*过期/),
+    );
+  }
+
+  assert.deepEqual(
+    requireConfigSyncPreview(config, { source: 'source', targets: ['a', 'b'] }, preview.previewToken)
+      .targets.map(({ name }) => name),
+    ['a', 'b'],
+  );
 });
 
 test('plan 按目标输入顺序产出五路径粒度差异，且完全不改输入', () => {

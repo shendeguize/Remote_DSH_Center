@@ -207,13 +207,26 @@ test('defaultsPatchSchema 局部体', () => {
   assert.match(validate(defaultsPatchSchema, { localPortRange: [2, 3] }).errors.join(), /expected int 1024/);
 });
 
-test('syncConfigBodySchema：主机名安全、目标数 1..200、dryRun 必填', () => {
+test('syncConfigBodySchema：preview 无 token，apply 必须携带字符串 token', () => {
   const validBody = {
     source: 'gpu-1',
     targets: ['gpu-2'],
     dryRun: true,
   };
   assert.equal(validate(syncConfigBodySchema, validBody).ok, true);
+  assert.equal(validate(syncConfigBodySchema, {
+    ...validBody,
+    dryRun: false,
+    previewToken: 'v1.not-validated-until-apply',
+  }).ok, true);
+  assert.match(
+    validate(syncConfigBodySchema, { ...validBody, dryRun: false }).errors.join(),
+    /previewToken.*required/,
+  );
+  assert.match(
+    validate(syncConfigBodySchema, { ...validBody, dryRun: false, previewToken: 42 }).errors.join(),
+    /previewToken.*expected string/,
+  );
 
   for (const key of ['constructor', 'toString', '__proto__']) {
     const body = { ...validBody, [key]: true };

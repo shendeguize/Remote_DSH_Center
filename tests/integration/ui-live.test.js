@@ -668,11 +668,17 @@ test('#/manage 批量同步：真 preview 不落盘，apply 经 SSE/REST/store �
     '批量同步 apply 完成',
   );
   const applyRequest = requests.filter((request) => request.path === '/api/hosts/sync-config')[1];
-  assert.deepEqual(JSON.parse(applyRequest.body), {
+  const applyBody = JSON.parse(applyRequest.body);
+  assert.deepEqual({
+    source: applyBody.source,
+    targets: applyBody.targets,
+    dryRun: applyBody.dryRun,
+  }, {
     source: 'source',
     targets: ['target-a', 'target-b'],
     dryRun: false,
   });
+  assert.match(applyBody.previewToken, /^v1\.[A-Za-z0-9_-]+$/, 'apply 必须带 preview 返回的 opaque token');
   const changedFrame = await events.wait((frame) => frame.type === 'host-changed'
     && frame.data.host.name === 'target-a'
     && frame.data.host.config.workdir === '~/source-workdir');

@@ -89,21 +89,83 @@ test('workdirPending：只在能证明分歧时才提示「重启后生效」', 
 test('仅非抽屉字段变化：无论草稿是否脏都不制造冲突', () => {
   const prev = config();
   const next = config({ autoStart: true, localPort: 17_799 });
+  const dirty = { ...draftOf(prev), env: 'A=9' };
 
-  assert.equal(reconcile(draftOf(prev), prev, next), 'none');
-  assert.equal(reconcile({ ...draftOf(prev), env: 'A=9' }, prev, next), 'none');
+  assert.deepEqual(reconcile(draftOf(prev), prev, next), {
+    draft: draftOf(prev),
+    conflicts: [],
+    remoteChanged: false,
+  });
+  assert.deepEqual(reconcile(dirty, prev, next), {
+    draft: dirty,
+    conflicts: [],
+    remoteChanged: false,
+  });
 });
 
-test('抽屉拥有的 config 变化：草稿干净则跟随，脏则冲突提示', () => {
+test('三方合并：用户未改字段吸收远端，用户改过的无关字段保留本地', () => {
   const prev = config();
   const next = config({ inject: { ...prev.inject, env: { A: '2' } } });
+  const local = { ...draftOf(prev), workdir: '~/local-project' };
 
-  assert.equal(reconcile(draftOf(prev), prev, next), 'follow');
-  assert.equal(reconcile({ ...draftOf(prev), env: 'A=9' }, prev, next), 'conflict');
+  assert.deepEqual(reconcile(local, prev, next), {
+    draft: {
+      ...draftOf(next),
+      workdir: '~/local-project',
+    },
+    conflicts: [],
+    remoteChanged: true,
+  });
+});
+
+test('三方合并：inject 子字段分别拥有，不把整个 inject 扩成同字段冲突', () => {
+  const prev = config();
+  const local = { ...draftOf(prev), env: 'A=9' };
+  const next = config({
+    inject: { ...prev.inject, extraArgs: ['--remote'] },
+  });
+
+  assert.deepEqual(reconcile(local, prev, next), {
+    draft: {
+      ...draftOf(next),
+      env: 'A=9',
+    },
+    conflicts: [],
+    remoteChanged: true,
+  });
+});
+
+test('三方合并：双方同字段改成相同值时无冲突且草稿归于最新 baseline', () => {
+  const prev = config();
+  const next = config({ inject: { ...prev.inject, env: { A: '2' } } });
+  const result = reconcile({ ...draftOf(prev), env: ' A=2 \n# 同值的本地注释' }, prev, next);
+
+  assert.deepEqual(result, {
+    draft: draftOf(next),
+    conflicts: [],
+    remoteChanged: true,
+  });
+  assert.equal(isDirty(result.draft, next), false);
+});
+
+test('三方合并：双方同字段改成不同值才报告冲突并保留本地', () => {
+  const prev = config();
+  const next = config({ inject: { ...prev.inject, env: { A: '2' } } });
+  const local = { ...draftOf(prev), env: 'A=9' };
+
+  assert.deepEqual(reconcile(local, prev, next), {
+    draft: local,
+    conflicts: ['env'],
+    remoteChanged: true,
+  });
 });
 
 test('只有运行态变化（config 不变）时不打扰用户', () => {
   const cfg = config();
   const dirty = { ...draftOf(cfg), env: 'A=9' };
-  assert.equal(reconcile(dirty, cfg, config()), 'none', 'phase 变化不该弹冲突');
+  assert.deepEqual(reconcile(dirty, cfg, config()), {
+    draft: dirty,
+    conflicts: [],
+    remoteChanged: false,
+  }, 'phase 变化不该弹冲突');
 });

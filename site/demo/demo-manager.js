@@ -53,6 +53,206 @@ const clone = (v) => structuredClone(v);
 const LOG_LIMIT = 50;
 const DEFAULT_LOCAL_NAME = 'local-host';
 const SAFE_HOST_RE = /^[A-Za-z0-9._-]+$/;
+const SYNC_TARGET_LIMIT = 200;
+const OPAQUE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const PREVIEW_TOKEN_DOMAIN = 'dsh-center-demo-preview-v1\0';
+const SHA256_INITIAL = Object.freeze([
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+]);
+const SHA256_ROUNDS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+  0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+  0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+  0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+  0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+const SYNC_BODY_FIELDS = new Set(['source', 'targets', 'dryRun', 'previewToken']);
+const SYNC_PROFILE_FIELDS = Object.freeze([
+  'remoteWebPort',
+  'workdir',
+  'inject.env',
+  'inject.extraArgs',
+  'inject.patches',
+]);
+
+function cloneInject(value) {
+  return {
+    env: { ...(value?.env ?? {}) },
+    extraArgs: [...(value?.extraArgs ?? [])],
+    patches: [...(value?.patches ?? [])],
+  };
+}
+
+function syncProfileOf(hostConfig) {
+  return {
+    remoteWebPort: hostConfig?.remoteWebPort ?? null,
+    workdir: hostConfig?.workdir ?? null,
+    inject: cloneInject(hostConfig?.inject),
+  };
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]),
+  );
+}
+
+const sameJsonValue = (left, right) => (
+  JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right))
+);
+
+const profileValueAt = (profile, path) => (
+  path.split('.').reduce((value, key) => value?.[key], profile)
+);
+
+function changedProfileFields(source, target) {
+  return SYNC_PROFILE_FIELDS.filter(
+    (path) => !sameJsonValue(profileValueAt(source, path), profileValueAt(target, path)),
+  );
+}
+
+function randomBytes(length) {
+  const bytes = new Uint8Array(length);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return bytes;
+}
+
+const rotateRight = (value, bits) => (value >>> bits) | (value << (32 - bits));
+
+function sha256(bytes) {
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+
+  const paddedView = new DataView(padded.buffer);
+  const bitLength = bytes.length * 8;
+  paddedView.setUint32(paddedLength - 8, Math.floor(bitLength / 0x1_0000_0000), false);
+  paddedView.setUint32(paddedLength - 4, bitLength >>> 0, false);
+
+  const state = [...SHA256_INITIAL];
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      words[i] = paddedView.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < words.length; i += 1) {
+      const s0 = rotateRight(words[i - 15], 7)
+        ^ rotateRight(words[i - 15], 18)
+        ^ (words[i - 15] >>> 3);
+      const s1 = rotateRight(words[i - 2], 17)
+        ^ rotateRight(words[i - 2], 19)
+        ^ (words[i - 2] >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let i = 0; i < SHA256_ROUNDS.length; i += 1) {
+      const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      const choose = (e & f) ^ (~e & g);
+      const temp1 = (h + sum1 + choose + SHA256_ROUNDS[i] + words[i]) >>> 0;
+      const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (sum0 + majority) >>> 0;
+      [a, b, c, d, e, f, g, h] = [
+        (temp1 + temp2) >>> 0,
+        a,
+        b,
+        c,
+        (d + temp1) >>> 0,
+        e,
+        f,
+        g,
+      ];
+    }
+    for (let i = 0; i < state.length; i += 1) {
+      state[i] = (state[i] + [a, b, c, d, e, f, g, h][i]) >>> 0;
+    }
+  }
+
+  const digest = new Uint8Array(32);
+  const digestView = new DataView(digest.buffer);
+  state.forEach((value, i) => digestView.setUint32(i * 4, value, false));
+  return digest;
+}
+
+function base64Url(bytes) {
+  let encoded = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const value = (bytes[i] << 16)
+      | ((bytes[i + 1] ?? 0) << 8)
+      | (bytes[i + 2] ?? 0);
+    encoded += OPAQUE_ALPHABET[(value >>> 18) & 63];
+    encoded += OPAQUE_ALPHABET[(value >>> 12) & 63];
+    if (i + 1 < bytes.length) encoded += OPAQUE_ALPHABET[(value >>> 6) & 63];
+    if (i + 2 < bytes.length) encoded += OPAQUE_ALPHABET[value & 63];
+  }
+  return encoded;
+}
+
+function previewTokenFor(fingerprint, sessionSalt) {
+  const message = new TextEncoder().encode(`${PREVIEW_TOKEN_DOMAIN}${fingerprint}`);
+  const salted = new Uint8Array(sessionSalt.length + message.length);
+  salted.set(sessionSalt);
+  salted.set(message, sessionSalt.length);
+  return `v1.${base64Url(sha256(salted))}`;
+}
+
+function validHostName(value) {
+  return typeof value === 'string'
+    && value !== ''
+    && SAFE_HOST_RE.test(value)
+    && !value.startsWith('-');
+}
+
+function assertSyncRequest(request) {
+  if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+    throw new FakeApiError(400, 'VALIDATION', '批量配置同步请求体须为对象');
+  }
+  const unknown = Object.keys(request).filter((key) => !SYNC_BODY_FIELDS.has(key));
+  if (unknown.length > 0) {
+    throw new FakeApiError(400, 'VALIDATION', `批量配置同步不接受字段：${unknown.join(', ')}`);
+  }
+  if (!validHostName(request.source)) {
+    throw new FakeApiError(400, 'VALIDATION', '请选择有效的源主机');
+  }
+  if (!Array.isArray(request.targets) || request.targets.length < 1 || request.targets.length > SYNC_TARGET_LIMIT) {
+    throw new FakeApiError(400, 'VALIDATION', `目标主机数量须为 1–${SYNC_TARGET_LIMIT}`);
+  }
+  if (request.targets.some((name) => !validHostName(name))) {
+    throw new FakeApiError(400, 'VALIDATION', '目标主机名格式无效');
+  }
+  if (typeof request.dryRun !== 'boolean') {
+    throw new FakeApiError(400, 'VALIDATION', 'dryRun 须为布尔值');
+  }
+  if (Object.hasOwn(request, 'previewToken')
+    && (typeof request.previewToken !== 'string'
+      || request.previewToken.length < 1
+      || request.previewToken.length > 200)) {
+    throw new FakeApiError(400, 'VALIDATION', 'previewToken 须为 1–200 字符的字符串');
+  }
+  if (!request.dryRun && !Object.hasOwn(request, 'previewToken')) {
+    throw new FakeApiError(400, 'VALIDATION', '应用配置同步前必须提交 previewToken');
+  }
+}
 
 /**
  * @param {{
@@ -85,6 +285,7 @@ export function createFakeManager({
   let revision = 0;
   let logs = [];
   let config = null;
+  let previewSessionSalt = new Uint8Array();
   let startedAt = now();
   let gateOpen = setupCompleted;
   let nextPid = 61_000;
@@ -145,6 +346,16 @@ export function createFakeManager({
     const host = hosts.get(name);
     if (!host) throw new FakeApiError(404, 'NOT_FOUND', `主机 ${name} 不存在`);
     return host;
+  }
+
+  function needConfigHost(name, role) {
+    if (config?.hosts === null
+      || typeof config?.hosts !== 'object'
+      || !Object.hasOwn(config.hosts, name)
+      || !config.hosts[name]) {
+      throw new FakeApiError(404, 'NOT_FOUND', `${role} ${name} 不存在`);
+    }
+    return config.hosts[name];
   }
 
   function gate() {
@@ -266,6 +477,7 @@ export function createFakeManager({
     meta.clear();
     logs = [];
     revision = 0;
+    previewSessionSalt = randomBytes(32);
     startedAt = now() - SEED_AGE_MS.manager;
     gateOpen = mode !== 'setup';
     nextPid = 61_000;
@@ -457,6 +669,93 @@ export function createFakeManager({
     pushLog({ host: name, level: 'info', msg: `已添加本机 ${name}` });
     emitHost(name);
     return { host: clone(host) };
+  }
+
+  function planConfigSync(request) {
+    assertSyncRequest(request);
+    const { source, targets } = request;
+    if (new Set(targets).size !== targets.length) {
+      throw new FakeApiError(400, 'VALIDATION', '目标主机不能重复');
+    }
+    if (targets.includes(source)) {
+      throw new FakeApiError(400, 'VALIDATION', '源主机不能同时作为目标主机');
+    }
+
+    const profile = syncProfileOf(needConfigHost(source, '源主机'));
+    const targetPlans = targets.map((name) => {
+      const fields = changedProfileFields(profile, syncProfileOf(needConfigHost(name, '目标主机')));
+      return { name, changed: fields.length > 0, changedFields: fields };
+    });
+    return { source, profile, targets: targetPlans };
+  }
+
+  function previewFingerprint(plan) {
+    return JSON.stringify(canonicalize({
+      source: {
+        name: plan.source,
+        profile: syncProfileOf(needConfigHost(plan.source, '源主机')),
+      },
+      targets: plan.targets
+        .map(({ name }) => ({
+          name,
+          profile: syncProfileOf(needConfigHost(name, '目标主机')),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    }));
+  }
+
+  function stalePreview() {
+    throw new FakeApiError(
+      409,
+      'CONFIG_STALE',
+      '配置同步预览已过期或无效，请重新预览后再应用',
+      '源主机或任一目标主机的同步 profile 可能已变化。',
+    );
+  }
+
+  function syncHostConfig(request) {
+    gate();
+    const plan = planConfigSync(request);
+    const fingerprint = previewFingerprint(plan);
+    if (request.dryRun) {
+      return {
+        source: plan.source,
+        dryRun: true,
+        targets: plan.targets,
+        applied: [],
+        hosts: [],
+        previewToken: previewTokenFor(fingerprint, previewSessionSalt),
+      };
+    }
+    if (request.previewToken !== previewTokenFor(fingerprint, previewSessionSalt)) stalePreview();
+
+    // 先验证并组装全部目标的新配置，再统一换入；中途失败时不会留下半单修改。
+    const targetHosts = new Map(plan.targets.map(({ name }) => [name, need(name)]));
+    const staged = plan.targets
+      .filter((target) => target.changed)
+      .map(({ name }) => {
+        const next = clone(needConfigHost(name, '目标主机'));
+        next.remoteWebPort = plan.profile.remoteWebPort;
+        next.workdir = plan.profile.workdir;
+        next.inject = cloneInject(plan.profile.inject);
+        return { name, next };
+      });
+
+    for (const { name, next } of staged) {
+      config.hosts[name] = clone(next);
+      const host = targetHosts.get(name);
+      host.config = clone(next);
+      host.effectiveRemotePort = host.config.remoteWebPort ?? config.defaults.remoteWebPort;
+    }
+    for (const { name } of staged) emitHost(name);
+
+    return {
+      source: plan.source,
+      dryRun: false,
+      targets: plan.targets,
+      applied: staged.map(({ name }) => name),
+      hosts: plan.targets.map(({ name }) => clone(targetHosts.get(name))),
+    };
   }
 
   function probeAll() {
@@ -728,6 +1027,7 @@ export function createFakeManager({
     reload,
     setup,
     createLocalHost,
+    syncHostConfig,
     // SSE
     subscribe,
     // demo 控制

@@ -53,6 +53,17 @@ function syncServerOptions({ setupCompleted = true } = {}) {
   };
 }
 
+async function previewSync(ctx, targets = ['target-b', 'target-a']) {
+  const res = await ctx.api('POST', '/api/hosts/sync-config', {
+    source: 'source',
+    targets,
+    dryRun: true,
+  });
+  assert.equal(res.status, 200, res.text);
+  assert.match(res.json.previewToken, /^v1\.[A-Za-z0-9_-]{43}$/);
+  return res.json.previewToken;
+}
+
 test('readJsonBody：空体 → {}，非法 JSON / 非对象 / 超限 → VALIDATION', async () => {
   assert.deepEqual(await readJsonBody(bodyOf('')), {});
   assert.deepEqual(await readJsonBody(bodyOf('{"a":1}')), { a: 1 });
@@ -162,6 +173,16 @@ test('POST sync-config preview：只返回计划，不写盘、不升 revision�
   });
 
   assertRest(res, { status: 200, schema: syncConfigResponse, label: 'POST sync-config preview' });
+  const { previewToken, ...missingPreviewToken } = res.json;
+  assert.throws(
+    () => assertRest(
+      { ...res, json: missingPreviewToken },
+      { status: 200, schema: syncConfigResponse, label: 'POST sync-config preview 缺 token' },
+    ),
+    /previewToken: required/,
+  );
+  assert.match(previewToken, /^v1\.[A-Za-z0-9_-]{43}$/);
+  assert.doesNotMatch(previewToken, /SYNCED|source\.patch|--source/);
   assert.deepEqual(res.json.targets, [
     { name: 'target-b', changed: false, changedFields: [] },
     {
@@ -193,17 +214,20 @@ test('POST sync-config apply：一次原子落盘并只复制 profile', async (t
   });
   const sse = await ctx.sse();
   await sse.wait((frame) => frame.type === 'snapshot');
+  const previewToken = await previewSync(ctx);
 
   const res = await ctx.api('POST', '/api/hosts/sync-config', {
     source: 'source',
-    targets: ['target-b', 'target-a'],
+    targets: ['target-a', 'target-b'],
     dryRun: false,
+    previewToken,
   });
   await sse.wait((frame) => frame.type === 'host-changed' && frame.data.host.name === 'target-a');
 
   assertRest(res, { status: 200, schema: syncConfigResponse, label: 'POST sync-config apply' });
+  assert.equal(Object.hasOwn(res.json, 'previewToken'), false, 'apply 响应不应回传 preview token');
   assert.deepEqual(res.json.applied, ['target-a']);
-  assert.deepEqual(res.json.hosts.map((host) => host.name), ['target-b', 'target-a']);
+  assert.deepEqual(res.json.hosts.map((host) => host.name), ['target-a', 'target-b']);
   assert.equal(configRenames, 1, '所有目标必须收敛到一次 updateConfig 原子落盘');
   assert.equal(sse.of('operation-done').length, 0, '配置同步不是 stop/restart/probe 长动作');
 
@@ -215,8 +239,8 @@ test('POST sync-config apply：一次原子落盘并只复制 profile', async (t
   assert.equal(onDisk.hosts['target-a'].autoStart, true);
   assert.equal(onDisk.hosts['target-a'].localPort, 17777);
   assert.equal(onDisk.hosts['target-a'].local, false);
-  assert.equal(res.json.hosts[1].config.remoteWebPort, null);
-  assert.equal(res.json.hosts[1].config.workdir, null);
+  assert.equal(res.json.hosts[0].config.remoteWebPort, null);
+  assert.equal(res.json.hosts[0].config.workdir, null);
 });
 
 test('POST sync-config apply：全相同时不重写文件', async (t) => {
@@ -230,11 +254,13 @@ test('POST sync-config apply：全相同时不重写文件', async (t) => {
     if (to === configFile) configRenames += 1;
     return originalRenameSync(from, to);
   });
+  const previewToken = await previewSync(ctx, ['target-b']);
 
   const res = await ctx.api('POST', '/api/hosts/sync-config', {
     source: 'source',
     targets: ['target-b'],
     dryRun: false,
+    previewToken,
   });
 
   assertRest(res, { status: 200, schema: syncConfigResponse, label: 'POST sync-config no-op' });
@@ -248,13 +274,102 @@ test('POST sync-config apply：全相同时不重写文件', async (t) => {
   assert.equal(statAfter.mtimeNs, statBefore.mtimeNs);
 });
 
+test('POST sync-config apply：缺 token 为 400，错误 token 为 409，均不落盘', async (t) => {
+  const ctx = await bootServer(t, syncServerOptions());
+  const configFile = path.join(ctx.harness.homeDir, 'config.json');
+  const before = fs.readFileSync(configFile, 'utf8');
+  const base = {
+    source: 'source',
+    targets: ['target-a'],
+    dryRun: false,
+  };
+
+  const missing = await ctx.api('POST', '/api/hosts/sync-config', base);
+  assert.equal(missing.status, 400, missing.text);
+  assert.equal(missing.json.code, 'VALIDATION');
+
+  const wrong = await ctx.api('POST', '/api/hosts/sync-config', {
+    ...base,
+    previewToken: 'wrong-preview-token',
+  });
+  assert.equal(wrong.status, 409, wrong.text);
+  assert.equal(wrong.json.code, 'CONFIG_STALE');
+  assert.match(wrong.json.error, /重新预览|预览.*过期/);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), before);
+});
+
+test('POST sync-config apply：preview 后源 profile 变化则整单 CONFIG_STALE', async (t) => {
+  const ctx = await bootServer(t, syncServerOptions());
+  const configFile = path.join(ctx.harness.homeDir, 'config.json');
+  const previewToken = await previewSync(ctx, ['target-a']);
+  const changed = await ctx.api('PUT', '/api/hosts/source/config', { workdir: '/changed-source' });
+  assert.equal(changed.status, 200, changed.text);
+  const beforeApply = fs.readFileSync(configFile, 'utf8');
+
+  const res = await ctx.api('POST', '/api/hosts/sync-config', {
+    source: 'source',
+    targets: ['target-a'],
+    dryRun: false,
+    previewToken,
+  });
+
+  assert.equal(res.status, 409, res.text);
+  assert.equal(res.json.code, 'CONFIG_STALE');
+  assert.equal(fs.readFileSync(configFile, 'utf8'), beforeApply);
+  const onDisk = JSON.parse(beforeApply);
+  assert.equal(onDisk.hosts.source.workdir, '/changed-source');
+  assert.equal(onDisk.hosts['target-a'].workdir, '/old/workdir', '不得应用未预览的新源值');
+});
+
+test('POST sync-config apply：preview 后任一目标 profile 变化则整单 CONFIG_STALE', async (t) => {
+  const ctx = await bootServer(t, syncServerOptions());
+  const configFile = path.join(ctx.harness.homeDir, 'config.json');
+  const previewToken = await previewSync(ctx, ['target-a', 'target-b']);
+  const changed = await ctx.api('PUT', '/api/hosts/target-b/config', { workdir: '/changed-target' });
+  assert.equal(changed.status, 200, changed.text);
+  const beforeApply = fs.readFileSync(configFile, 'utf8');
+
+  const res = await ctx.api('POST', '/api/hosts/sync-config', {
+    source: 'source',
+    targets: ['target-b', 'target-a'],
+    dryRun: false,
+    previewToken,
+  });
+
+  assert.equal(res.status, 409, res.text);
+  assert.equal(res.json.code, 'CONFIG_STALE');
+  assert.equal(fs.readFileSync(configFile, 'utf8'), beforeApply);
+});
+
+test('POST sync-config apply：同步范围外变化不使 token 过期', async (t) => {
+  const ctx = await bootServer(t, syncServerOptions());
+  const previewToken = await previewSync(ctx, ['target-a']);
+  const changed = await ctx.api('PUT', '/api/hosts/target-a/config', { enabled: true });
+  assert.equal(changed.status, 200, changed.text);
+
+  const res = await ctx.api('POST', '/api/hosts/sync-config', {
+    source: 'source',
+    targets: ['target-a'],
+    dryRun: false,
+    previewToken,
+  });
+
+  assertRest(res, { status: 200, schema: syncConfigResponse, label: 'POST sync-config unrelated change' });
+  assert.deepEqual(res.json.applied, ['target-a']);
+  assert.equal(res.json.hosts[0].config.enabled, true);
+});
+
 test('POST sync-config：missing/重复/source target 整单失败且文件逐字不变', async (t) => {
   const ctx = await bootServer(t, syncServerOptions());
   const configFile = path.join(ctx.harness.homeDir, 'config.json');
   const before = fs.readFileSync(configFile, 'utf8');
   const cases = [
-    [{ source: 'missing', targets: ['target-a'], dryRun: false }, 404, 'NOT_FOUND'],
-    [{ source: 'source', targets: ['target-a', 'missing'], dryRun: false }, 404, 'NOT_FOUND'],
+    [{
+      source: 'missing', targets: ['target-a'], dryRun: false, previewToken: 'wrong-preview-token',
+    }, 404, 'NOT_FOUND'],
+    [{
+      source: 'source', targets: ['target-a', 'missing'], dryRun: false, previewToken: 'wrong-preview-token',
+    }, 404, 'NOT_FOUND'],
     [{ source: 'source', targets: ['target-a', 'target-a'], dryRun: false }, 400, 'VALIDATION'],
     [{ source: 'source', targets: ['target-a', 'source'], dryRun: false }, 400, 'VALIDATION'],
   ];
@@ -291,8 +406,18 @@ test('POST sync-config：继承保留名在 dryRun/apply 都返回 404 且不改
   for (const dryRun of [true, false]) {
     for (const name of reservedNames) {
       for (const body of [
-        { source: name, targets: ['target-a'], dryRun },
-        { source: 'source', targets: ['target-a', name], dryRun },
+        {
+          source: name,
+          targets: ['target-a'],
+          dryRun,
+          ...(dryRun ? {} : { previewToken: 'wrong-preview-token' }),
+        },
+        {
+          source: 'source',
+          targets: ['target-a', name],
+          dryRun,
+          ...(dryRun ? {} : { previewToken: 'wrong-preview-token' }),
+        },
       ]) {
         // eslint-disable-next-line no-await-in-loop -- 每个恶意名称和模式都要独立验证拒绝后的磁盘与全局状态
         const res = await ctx.api('POST', '/api/hosts/sync-config', body);

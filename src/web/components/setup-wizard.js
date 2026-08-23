@@ -156,7 +156,11 @@ export function createSetupWizard({
     step: 0,
     answers: null,
     answersFrom: null,
-    touched: false,
+    serverAnswers: null,
+    /** 一旦用户编辑或聚焦字段，该字段的原始字符串就由用户草稿接管。 */
+    fieldDrafts: {},
+    ownedFields: new Set(),
+    conflicts: new Set(),
     selection: {},
     previewText: '',
     previewDirty: false,
@@ -171,6 +175,17 @@ export function createSetupWizard({
 
   // 焦点已经安放在第几步（初值等于起始步，免得首屏就把焦点从别处抢过来）
   let focusedStep = ui.step;
+  // 真实浏览器的 element.focus() 会同步触发 focus 事件；重渲染恢复焦点不等于用户接管字段。
+  let restoringFocus = false;
+
+  function restoreFocus(node) {
+    restoringFocus = true;
+    try {
+      node.focus();
+    } finally {
+      restoringFocus = false;
+    }
+  }
 
   const stepper = el('ol.stepper', { 'aria-label': '初始化步骤' });
   const panel = el('form.step-panel', { novalidate: 'novalidate' });
@@ -207,20 +222,76 @@ export function createSetupWizard({
     };
   }
 
+  const answerFields = SETUP_STEPS.flatMap((step) => step.fields ?? []);
+
+  function shownFieldValue(f, value) {
+    if (value === null || value === undefined) return '';
+    return f.format ? f.format(value) : String(value);
+  }
+
+  function parseFieldDraft(f, raw) {
+    const parsed = f.parse(raw);
+    if (!parsed.ok) return parsed;
+    const error = f.validate(parsed.value);
+    return error ? { ok: false, error } : parsed;
+  }
+
+  function draftMatchesServer(f, raw, serverValue) {
+    const local = parseFieldDraft(f, raw);
+    const remote = parseFieldDraft(f, shownFieldValue(f, serverValue));
+    return local.ok && remote.ok && JSON.stringify(local.value) === JSON.stringify(remote.value);
+  }
+
   /**
-   * 用户没动过之前，预填值跟着后端现值走：向导可能在 manager info / config 到达之前
-   * 就渲染了一拍，把那一拍的空值定死会让现值永远填不进来。
+   * 后端现值按字段合并进草稿：尚未被用户接管的字段跟随配置更新；已经编辑或聚焦的
+   * 字段保留原始字符串（包括暂时非法的空值），双方同时改同一字段时只提示不覆盖。
    */
   function ensureAnswers() {
     const current = currentConfig();
     const from = JSON.stringify(current);
-    // 只在「现值真的变了」时重建：无条件重建会在同一次渲染里换掉答案对象，
-    // 输入框回写的就成了上一份草稿。
-    if (!ui.answers || (!ui.touched && from !== ui.answersFrom)) {
-      ui.answers = defaultAnswers(current);
+    const incoming = defaultAnswers(current);
+    if (!ui.answers) {
+      ui.answers = incoming;
+      ui.serverAnswers = incoming;
+      ui.answersFrom = from;
+      return ui.answers;
+    }
+    if (from !== ui.answersFrom) {
+      for (const f of answerFields) {
+        const previous = getByPath(ui.serverAnswers, f.key);
+        const next = getByPath(incoming, f.key);
+        if (!ui.ownedFields.has(f.key)) {
+          setByPath(ui.answers, f.key, next);
+          ui.conflicts.delete(f.key);
+        } else if (JSON.stringify(previous) !== JSON.stringify(next)) {
+          const localRaw = ui.fieldDrafts[f.key] ?? shownFieldValue(f, getByPath(ui.answers, f.key));
+          if (draftMatchesServer(f, localRaw, next)) {
+            // 只有格式不同（如 07799、"18001 18099"）时收敛到 schema 的展示格式，
+            // 同时释放字段所有权；后续服务端更新便可继续正常回灌。
+            setByPath(ui.answers, f.key, next);
+            delete ui.fieldDrafts[f.key];
+            delete ui.rawErrors[f.key];
+            ui.ownedFields.delete(f.key);
+            ui.conflicts.delete(f.key);
+          } else {
+            ui.conflicts.add(f.key);
+          }
+        }
+      }
+      ui.serverAnswers = incoming;
       ui.answersFrom = from;
     }
     return ui.answers;
+  }
+
+  function renderDraftNotice() {
+    if (ui.conflicts.size === 0) {
+      notice.hidden = true;
+      notice.textContent = '';
+      return;
+    }
+    notice.hidden = false;
+    notice.textContent = '外部配置已更新；正在编辑的同字段草稿已保留，不会自动覆盖。';
   }
 
   // ── 第 3 步：候选发现与并行探测 ──────────────────────────────────────
@@ -262,19 +333,24 @@ export function createSetupWizard({
     const answers = ensureAnswers();
     const rows = [];
     for (const f of step.fields) {
-      // 输入框按答案重建，之前那次「输错了还没改回来」的记录随之作废
-      delete ui.rawErrors[f.key];
       const value = getByPath(answers, f.key);
-      const missing = value === null || value === undefined;
-      const shown = missing ? '' : (f.format ? f.format(value) : String(value));
+      const shown = ui.ownedFields.has(f.key)
+        ? (ui.fieldDrafts[f.key] ?? shownFieldValue(f, value))
+        : shownFieldValue(f, value);
       const box = field(f.label, input('text', shown, {
         inputmode: 'numeric',
         'data-key': f.key,
         on: {
+          focus: (ev) => {
+            if (restoringFocus) return;
+            ui.ownedFields.add(f.key);
+            ui.fieldDrafts[f.key] = ev.target.value;
+          },
           input: (ev) => {
-            ui.touched = true; // 用户接手之后，后端的现值不再回灌覆盖
-            const parsed = f.parse(ev.target.value);
-            const bad = parsed.ok ? f.validate(parsed.value) : parsed.error;
+            ui.ownedFields.add(f.key);
+            ui.fieldDrafts[f.key] = ev.target.value;
+            const parsed = parseFieldDraft(f, ev.target.value);
+            const bad = parsed.ok ? null : parsed.error;
             box.setError(bad);
             if (bad) {
               // 非法输入不写回答案（避免污染），但必须挡住「下一步」
@@ -284,10 +360,14 @@ export function createSetupWizard({
               setByPath(answers, f.key, parsed.value);
               ui.previewDirty = false; // 结构化改动后预览需重生成
             }
+            const serverValue = getByPath(ui.serverAnswers, f.key);
+            if (draftMatchesServer(f, ev.target.value, serverValue)) ui.conflicts.delete(f.key);
+            renderDraftNotice();
             syncFoot();
           },
         },
       }), { hint: f.hint });
+      if (ui.rawErrors[f.key]) box.setError(ui.rawErrors[f.key]);
       rows.push(box);
       panel.append(box.root);
     }
@@ -397,6 +477,7 @@ export function createSetupWizard({
 
   function renderMigration() {
     const { target, stopped } = ui.migration;
+    notice.hidden = true;
     clear(panel).append(
       el('p.wizard-progress', {
         role: 'status',
@@ -457,6 +538,8 @@ export function createSetupWizard({
     renderStepper();
     const had = panel.contains(document.activeElement) ? document.activeElement : null;
     const hadLabel = had?.getAttribute?.('aria-label') ?? null;
+    const hadKey = had?.getAttribute?.('data-key') ?? null;
+    const hadTitle = had?.classList?.contains('step-title') === true;
     clear(panel);
     const step = SETUP_STEPS[ui.step];
     const title = el('h2.step-title', { text: `${ui.step + 1}. ${step.title}`, tabindex: '-1' });
@@ -464,6 +547,7 @@ export function createSetupWizard({
     if (step.fields) renderFields(step);
     else if (step.kind === 'host-select') renderHostStep();
     else renderPreview();
+    renderDraftNotice();
     syncFoot();
 
     // 换步要把焦点带过去。整块面板是重建的，按下「下一步」的那个按钮随即被移除，
@@ -472,15 +556,21 @@ export function createSetupWizard({
     // 只在真的换步时动，别在字段校验、主机探测这些重渲染里抢焦点。
     if (focusedStep !== ui.step) {
       focusedStep = ui.step;
-      title.focus();
+      restoreFocus(title);
     } else if (had && document.activeElement !== had) {
       // 同一步里的重渲染也会吃掉焦点：进第 3 步后候选异步到达要再渲一次，
       // 每台主机探测完也各渲一次。能认出原来那个控件（勾选框都有 aria-label）
       // 就还给它，认不出就退回标题——总之别让焦点掉回文档顶端。
-      const same = hadLabel
-        ? [...panel.querySelectorAll('[aria-label]')].find((n) => n.getAttribute('aria-label') === hadLabel)
-        : null;
-      (same && !same.disabled ? same : title).focus();
+      let same = hadTitle ? title : null;
+      if (!same && hadLabel) {
+        same = [...panel.querySelectorAll('[aria-label]')]
+          .find((n) => n.getAttribute('aria-label') === hadLabel);
+      }
+      if (!same && hadKey) {
+        same = [...panel.querySelectorAll('input')]
+          .find((n) => n.getAttribute('data-key') === hadKey);
+      }
+      restoreFocus(same && !same.disabled ? same : title);
     }
   }
 
@@ -503,11 +593,16 @@ export function createSetupWizard({
         actions.reportError(new Error(res.error), 'JSON 无法解析，先修好再返回');
         return;
       }
-      ui.touched = true; // 手改过的 JSON 就是用户意图，别再被后端现值回灌
       const answers = ensureAnswers();
       setByPath(answers, 'manager.port', res.config.manager.port);
       setByPath(answers, 'defaults.remoteWebPort', res.config.defaults.remoteWebPort);
       setByPath(answers, 'defaults.localPortRange', [...res.config.defaults.localPortRange]);
+      for (const f of answerFields) {
+        ui.ownedFields.add(f.key);
+        ui.fieldDrafts[f.key] = shownFieldValue(f, getByPath(answers, f.key));
+        ui.conflicts.delete(f.key);
+        delete ui.rawErrors[f.key];
+      }
       for (const [name, hostCfg] of Object.entries(res.config.hosts ?? {})) {
         ui.selection[name] = {
           enabled: Boolean(hostCfg.enabled),
@@ -590,7 +685,7 @@ export function createSetupWizard({
       // eslint-disable-next-line no-await-in-loop -- 同上
       const info = await api.probeOrigin(target);
       if (info?.setupCompleted === true) {
-        win.location.replace(`${target}/#/`);
+        win.location.replace(`${target}/#/hub`);
         return;
       }
     }

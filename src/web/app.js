@@ -305,10 +305,10 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     // 逐台探测结果、靠 config 预填现值；主机清单等向导走到第 3 步再拉。
     sse.connect();
     if (store.state.manager.setupCompleted === false) {
+      const configRequestRevisions = store.captureConfigRevisions();
       try {
         const config = await api.config();
-        store.setDefaults(config.defaults);
-        store.setManagerConfig(config.manager);
+        store.mergeFetchedConfig(config, configRequestRevisions);
       } catch (err) {
         actions.reportError(err, '读取当前配置失败（向导将使用出厂默认）');
       }
@@ -317,11 +317,11 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     }
 
     const startedAt = performance.now(); // 单调钟：与 __receivedAt 比先后，墙钟会跳（#104）
+    const configRequestRevisions = store.captureConfigRevisions();
     try {
       const [hosts, config] = await Promise.all([api.hosts(), api.config()]);
       store.mergeFetchedHosts(hosts.hosts, hosts.revision, startedAt);
-      store.setDefaults(config.defaults);
-      store.setManagerConfig(config.manager);
+      store.mergeFetchedConfig(config, configRequestRevisions);
     } catch (err) {
       // SSE 的 snapshot 是主路径，GET 只是兜底：失败降级为提示
       actions.reportError(err, '主机列表首屏加载失败（等待实时同步）');

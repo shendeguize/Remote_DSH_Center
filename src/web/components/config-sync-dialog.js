@@ -87,6 +87,7 @@ export function createConfigSyncDialog({ store, actions }) {
   let targets = new Set();
   let previewResult = null;
   let previewSignature = null;
+  let previewToken = null;
   let applied = false;
   let generation = 0;
   let requestMode = null;
@@ -139,6 +140,7 @@ export function createConfigSyncDialog({ store, actions }) {
     generation += 1;
     previewResult = null;
     previewSignature = null;
+    previewToken = null;
     applied = false;
     removeResults();
     clearError();
@@ -237,6 +239,7 @@ export function createConfigSyncDialog({ store, actions }) {
       || applied
       || previewResult === null
       || previewSignature !== selectionSignature()
+      || previewToken === null
       || !previewResult.targets?.some((target) => target.changed);
   }
 
@@ -271,12 +274,12 @@ export function createConfigSyncDialog({ store, actions }) {
     return requestedTargets.map((name) => byName.get(name)).filter(Boolean);
   }
 
-  function renderResults(result, requestedTargets) {
+  function renderResults(result, requestedTargets, { isApplied = false } = {}) {
     removeResults();
     const list = el('ul.config-sync-result-list');
     for (const plan of orderedPlans(result, requestedTargets)) {
       const detail = plan.changed
-        ? `将变更：${plan.changedFields.map((field) => FIELD_LABEL[field]).filter(Boolean).join('、') || '受支持配置字段'}`
+        ? `${isApplied ? '已变更' : '将变更'}：${plan.changedFields.map((field) => FIELD_LABEL[field]).filter(Boolean).join('、') || '受支持配置字段'}`
         : '无需变更';
       const item = el('li.config-sync-result-item', { dataset: { host: plan.name } }, [
         el('strong', { text: plan.name }),
@@ -289,7 +292,7 @@ export function createConfigSyncDialog({ store, actions }) {
       list.append(item);
     }
     resultSlot.append(el('section.config-sync-results', { 'aria-labelledby': 'config-sync-results-title' }, [
-      el('h3', { id: 'config-sync-results-title', text: '同步预览' }),
+      el('h3', { id: 'config-sync-results-title', text: isApplied ? '同步结果' : '同步预览' }),
       list,
       el('p.config-sync-no-restart', {
         text: '本动作不会重启或停止任何主机；运行中的配置将在下次重启生效。',
@@ -305,6 +308,7 @@ export function createConfigSyncDialog({ store, actions }) {
     requestMode = 'preview';
     previewResult = null;
     previewSignature = null;
+    previewToken = null;
     applied = false;
     removeResults();
     clearError();
@@ -333,6 +337,7 @@ export function createConfigSyncDialog({ store, actions }) {
     clearError();
     previewResult = result;
     previewSignature = signature;
+    previewToken = typeof result.previewToken === 'string' ? result.previewToken : null;
     const changed = result.targets?.filter((target) => target.changed).length ?? 0;
     setStatus(changed > 0 ? `预览完成：${changed} 台主机有变更。` : '预览完成：目标配置已一致。');
     renderResults(result, requested.targets);
@@ -342,11 +347,13 @@ export function createConfigSyncDialog({ store, actions }) {
   async function apply() {
     if (applyBtn.disabled) return;
     const requested = { source, targets: [...targets] };
+    const token = previewToken;
     generation += 1;
     const requestGeneration = generation;
     requestMode = 'apply';
     previewResult = null;
     previewSignature = null;
+    previewToken = null;
     applied = false;
     removeResults();
     clearError();
@@ -356,6 +363,7 @@ export function createConfigSyncDialog({ store, actions }) {
     const result = await actions.syncConfig({
       ...requested,
       dryRun: false,
+      previewToken: token,
       onError: (error) => {
         requestError = error;
       },
@@ -366,7 +374,9 @@ export function createConfigSyncDialog({ store, actions }) {
       return;
     }
     if (!result) {
-      setStatus('应用结果未确认，请重新预览后再试。');
+      setStatus(requestError?.code === 'CONFIG_STALE'
+        ? '预览已失效，请重新预览后再应用。'
+        : '应用结果未确认，请重新预览后再试。');
       renderError(requestError, '应用配置同步失败');
       syncControls();
       return;
@@ -378,7 +388,7 @@ export function createConfigSyncDialog({ store, actions }) {
     closeBtn.textContent = '关闭';
     const count = result.applied?.length ?? 0;
     setStatus(count > 0 ? `同步完成：已更新 ${count} 台主机。` : '同步完成：目标配置已一致。');
-    renderResults(result, requested.targets);
+    renderResults(result, requested.targets, { isApplied: true });
     syncControls();
   }
 

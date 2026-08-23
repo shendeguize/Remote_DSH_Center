@@ -59,54 +59,84 @@ export const TIERS = Object.freeze([
  * }>}
  */
 export function parseLcov(text, root = process.cwd()) {
-  const out = [];
-  let file = null;
-  let found = 0;
-  let hit = 0;
-  let branchFound = null;
-  let branchHit = null;
-  let functionFound = null;
-  let functionHit = null;
+  const byFile = new Map();
+  let record = null;
+  const finishRecord = () => {
+    if (!record) return;
+    let merged = byFile.get(record.file);
+    if (!merged) {
+      merged = {
+        file: record.file,
+        lines: new Map(),
+        branchFound: null,
+        branchHit: null,
+        functionFound: null,
+        functionHit: null,
+      };
+      byFile.set(record.file, merged);
+    }
+    for (const [lineNumber, isHit] of record.lines) {
+      merged.lines.set(lineNumber, (merged.lines.get(lineNumber) ?? false) || isHit);
+    }
+    merged.branchFound = maxCount(merged.branchFound, record.branchFound);
+    merged.branchHit = maxCount(merged.branchHit, record.branchHit);
+    merged.functionFound = maxCount(merged.functionFound, record.functionFound);
+    merged.functionHit = maxCount(merged.functionHit, record.functionHit);
+    record = null;
+  };
+
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (line.startsWith('SF:')) {
-      file = line.slice(3);
-      found = 0;
-      hit = 0;
-      branchFound = null;
-      branchHit = null;
-      functionFound = null;
-      functionHit = null;
-    } else if (line.startsWith('DA:')) {
-      const [, count] = line.slice(3).split(',');
-      found += 1;
-      if (Number(count) > 0) hit += 1;
-    } else if (line.startsWith('BRF:')) {
-      branchFound = lcovCount(line.slice(4));
-    } else if (line.startsWith('BRH:')) {
-      branchHit = lcovCount(line.slice(4));
-    } else if (line.startsWith('FNF:')) {
-      functionFound = lcovCount(line.slice(4));
-    } else if (line.startsWith('FNH:')) {
-      functionHit = lcovCount(line.slice(4));
-    } else if (line === 'end_of_record' && file) {
-      out.push({
-        file: normalize(file, root),
-        found,
-        hit,
-        pct: found === 0 ? 100 : (hit / found) * 100,
-        branches: metricPair(branchFound, branchHit),
-        functions: metricPair(functionFound, functionHit),
-      });
-      file = null;
+      record = {
+        file: normalizeLcovSource(line.slice(3), root),
+        lines: new Map(),
+        branchFound: null,
+        branchHit: null,
+        functionFound: null,
+        functionHit: null,
+      };
+    } else if (line.startsWith('DA:') && record) {
+      const [lineNumber, count] = line.slice(3).split(',');
+      const numericLine = Number(lineNumber);
+      const key = Number.isInteger(numericLine) && numericLine >= 0
+        ? String(numericLine)
+        : lineNumber;
+      record.lines.set(key, (record.lines.get(key) ?? false) || Number(count) > 0);
+    } else if (line.startsWith('BRF:') && record) {
+      record.branchFound = lcovCount(line.slice(4));
+    } else if (line.startsWith('BRH:') && record) {
+      record.branchHit = lcovCount(line.slice(4));
+    } else if (line.startsWith('FNF:') && record) {
+      record.functionFound = lcovCount(line.slice(4));
+    } else if (line.startsWith('FNH:') && record) {
+      record.functionHit = lcovCount(line.slice(4));
+    } else if (line === 'end_of_record' && record) {
+      finishRecord();
     }
   }
-  return out;
+  return [...byFile.values()].map((file) => {
+    const found = file.lines.size;
+    const hit = [...file.lines.values()].filter(Boolean).length;
+    return {
+      file: file.file,
+      found,
+      hit,
+      pct: found === 0 ? 100 : (hit / found) * 100,
+      branches: metricPair(file.branchFound, file.branchHit),
+      functions: metricPair(file.functionFound, file.functionHit),
+    };
+  });
 }
 
 function lcovCount(raw) {
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function maxCount(current, next) {
+  if (next === null) return current;
+  return current === null ? next : Math.max(current, next);
 }
 
 function metricPair(found, hit) {
@@ -128,6 +158,302 @@ function normalize(file, root) {
   return path.posix.normalize(relative.replaceAll('\\', '/')).replace(/^(?:\.\/)+/, '');
 }
 
+function isKnownSourceFile(file, root) {
+  if (!file.startsWith('src/') || !file.endsWith('.js')) return false;
+  const absolute = path.resolve(root, ...file.split('/'));
+  const src = path.resolve(root, 'src');
+  const fromSrc = path.relative(src, absolute);
+  if (fromSrc === '..' || fromSrc.startsWith(`..${path.sep}`) || path.isAbsolute(fromSrc)) {
+    return false;
+  }
+  try {
+    return fs.lstatSync(absolute).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLcovSource(file, root) {
+  const full = normalize(file, root);
+  if (isKnownSourceFile(full, root)) return full;
+  const suffix = full.search(/[?#]/);
+  if (suffix === -1) return full;
+  const base = full.slice(0, suffix);
+  return isKnownSourceFile(base, root) ? base : full;
+}
+
+const COVERAGE_SUPPRESSION = /^(?:node:coverage\s+(?:disable|ignore\s+next(?:\s+\d+)?)|c8\s+ignore\s+(?:next(?:\s+\d+)?|start|stop)|istanbul\s+ignore\s+(?:file|next|if|else))$/i;
+const REGEX_PREFIX_KEYWORDS = new Set([
+  'await', 'case', 'delete', 'do', 'else', 'instanceof', 'new',
+  'return', 'throw', 'typeof', 'void', 'yield',
+]);
+const FOR_HEADER_OPERATORS = new Set(['in', 'of']);
+const IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u;
+const IDENTIFIER_CONTINUE = /^(?:[$_\u200C\u200D]|\p{ID_Continue})$/u;
+
+/**
+ * 提取真正 JS 注释 token 中的 coverage suppression。扫描器只承担这一个静态护栏：
+ * 跳过字符串、template raw（`${}` 内重新按代码扫描）与 regex literal，不冒充通用 parser。
+ * @param {string} source
+ * @returns {Array<{line:number,directive:string}>}
+ */
+export function findCoverageSuppressions(source) {
+  const text = String(source);
+  const found = [];
+  const codeFrame = (templateExpression) => ({
+    type: 'code',
+    templateExpression,
+    braces: 0,
+    canStartRegex: true,
+    afterPropertyAccess: false,
+    pendingFor: false,
+    parens: [],
+  });
+  const frames = [codeFrame(false)];
+  const top = () => frames[frames.length - 1];
+  const codePointAt = (offset) => {
+    const value = text.codePointAt(offset);
+    return value === undefined ? '' : String.fromCodePoint(value);
+  };
+  const lineOf = (offset) => {
+    let line = 1;
+    for (let index = 0; index < offset; index += 1) {
+      if (text[index] === '\n') line += 1;
+    }
+    return line;
+  };
+  const inspectComment = (start, end) => {
+    const raw = text.slice(start, end);
+    const directive = raw.trim();
+    if (!COVERAGE_SUPPRESSION.test(directive)) return;
+    const offset = start + raw.indexOf(directive);
+    found.push({ line: lineOf(offset), directive: directive.replace(/\s+/g, ' ') });
+  };
+  const skipQuoted = (start, quote) => {
+    let index = start + 1;
+    while (index < text.length) {
+      if (text[index] === '\\') {
+        index += 2;
+        if (text[index - 1] === '\r' && text[index] === '\n') index += 1;
+      } else if (text[index] === quote) {
+        return index + 1;
+      } else if (text[index] === '\n' || text[index] === '\r') {
+        return index;
+      } else {
+        index += 1;
+      }
+    }
+    return index;
+  };
+  const skipRegex = (start) => {
+    let index = start + 1;
+    let inClass = false;
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '\\') {
+        index += 2;
+      } else if (char === '[') {
+        inClass = true;
+        index += 1;
+      } else if (char === ']' && inClass) {
+        inClass = false;
+        index += 1;
+      } else if (char === '/' && !inClass) {
+        index += 1;
+        while (/[A-Za-z]/.test(text[index] ?? '')) index += 1;
+        return index;
+      } else if (char === '\n' || char === '\r') {
+        return index;
+      } else {
+        index += 1;
+      }
+    }
+    return index;
+  };
+
+  let index = 0;
+  while (index < text.length) {
+    const frame = top();
+    const char = text[index];
+    const next = text[index + 1];
+    const codePoint = codePointAt(index);
+
+    if (frame.type === 'template') {
+      if (char === '\\') {
+        index += 2;
+      } else if (char === '`') {
+        frames.pop();
+        index += 1;
+      } else if (char === '$' && next === '{') {
+        frames.push(codeFrame(true));
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      index = skipQuoted(index, char);
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      continue;
+    }
+    if (char === '`') {
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      frames.push({ type: 'template' });
+      index += 1;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      const contentStart = index + 2;
+      index = text.indexOf('\n', contentStart);
+      if (index === -1) index = text.length;
+      inspectComment(contentStart, index);
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const contentStart = index + 2;
+      const close = text.indexOf('*/', contentStart);
+      const contentEnd = close === -1 ? text.length : close;
+      inspectComment(contentStart, contentEnd);
+      index = close === -1 ? text.length : close + 2;
+      continue;
+    }
+    if (char === '/') {
+      if (frame.canStartRegex) {
+        index = skipRegex(index);
+        frame.canStartRegex = false;
+      } else {
+        index += 1;
+        frame.canStartRegex = true;
+      }
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      continue;
+    }
+    if (IDENTIFIER_START.test(codePoint)) {
+      const start = index;
+      index += codePoint.length;
+      while (IDENTIFIER_CONTINUE.test(codePointAt(index))) {
+        index += codePointAt(index).length;
+      }
+      const word = text.slice(start, index);
+      const propertyName = frame.afterPropertyAccess;
+      const inForHeader = frame.parens.includes('for');
+      const precededByExpression = !frame.canStartRegex;
+      frame.afterPropertyAccess = false;
+      if (!propertyName && word === 'for') {
+        frame.pendingFor = true;
+        frame.canStartRegex = true;
+      } else if (!propertyName && frame.pendingFor && word === 'await') {
+        frame.canStartRegex = true;
+      } else {
+        frame.pendingFor = false;
+        frame.canStartRegex = !propertyName && (
+          REGEX_PREFIX_KEYWORDS.has(word)
+          || (inForHeader && precededByExpression && FOR_HEADER_OPERATORS.has(word))
+        );
+      }
+      continue;
+    }
+    if (/[0-9]/.test(char)) {
+      index += 1;
+      while (/[A-Za-z0-9_.]/.test(text[index] ?? '')) index += 1;
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      continue;
+    }
+    if (char === '(') {
+      frame.parens.push(frame.pendingFor ? 'for' : 'normal');
+      frame.canStartRegex = true;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 1;
+      continue;
+    }
+    if (char === ')') {
+      frame.parens.pop();
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 1;
+      continue;
+    }
+    if (char === '.' && next === '.' && text[index + 2] === '.') {
+      frame.canStartRegex = true;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 3;
+      continue;
+    }
+    if (char === '.' && /[0-9]/.test(next ?? '')) {
+      index += 2;
+      while (/[0-9_]/.test(text[index] ?? '')) index += 1;
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      continue;
+    }
+    if (char === '.' || (
+      char === '?' && next === '.' && !/[0-9]/.test(text[index + 2] ?? '')
+    )) {
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = true;
+      frame.pendingFor = false;
+      index += char === '.' ? 1 : 2;
+      continue;
+    }
+    if (frame.templateExpression && char === '}') {
+      if (frame.braces === 0) {
+        frames.pop();
+      } else {
+        frame.braces -= 1;
+        frame.canStartRegex = false;
+        frame.afterPropertyAccess = false;
+        frame.pendingFor = false;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === '{') {
+      if (frame.templateExpression) frame.braces += 1;
+      frame.canStartRegex = true;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 1;
+      continue;
+    }
+    if (char === ']' || char === '}') {
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 1;
+      continue;
+    }
+    if ((char === '+' || char === '-') && next === char) {
+      frame.canStartRegex = false;
+      frame.afterPropertyAccess = false;
+      frame.pendingFor = false;
+      index += 2;
+      continue;
+    }
+    frame.canStartRegex = true;
+    frame.afterPropertyAccess = false;
+    frame.pendingFor = false;
+    index += 1;
+  }
+  return found;
+}
+
 /**
  * 扫描仓库 src/ 下全部真实 .js 文件。src 树内任何软链都 fail-closed：
  * 不解析目标，避免仓库外目标与平台差异，也不让未测源码借软链绕过总闸。
@@ -136,23 +462,42 @@ function normalize(file, root) {
  */
 export function sourceJsFiles(root = process.cwd()) {
   const out = [];
+  const rejectSymlink = (full) => {
+    const relative = normalize(full, root);
+    const error = new Error(
+      `覆盖率源码扫描拒绝软链 ${relative}：src 树内软链可能指向仓库外或让未测源码绕过覆盖率总闸`,
+    );
+    error.code = 'COVERAGE_SOURCE_SYMLINK';
+    throw error;
+  };
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) {
-        const relative = normalize(full, root);
-        const error = new Error(
-          `覆盖率源码扫描拒绝软链 ${relative}：src 树内软链可能指向仓库外或让未测源码绕过覆盖率总闸`,
-        );
-        error.code = 'COVERAGE_SOURCE_SYMLINK';
-        throw error;
-      }
+      if (entry.isSymbolicLink()) rejectSymlink(full);
       if (entry.isDirectory()) walk(full);
       else if (entry.isFile() && entry.name.endsWith('.js')) out.push(normalize(full, root));
     }
   };
-  walk(path.join(root, 'src'));
-  return out.sort();
+  const src = path.join(root, 'src');
+  if (fs.lstatSync(src).isSymbolicLink()) rejectSymlink(src);
+  walk(src);
+
+  const files = out.sort();
+  const suppressions = [];
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(root, file), 'utf8');
+    for (const match of findCoverageSuppressions(source)) {
+      suppressions.push(`${file}:${match.line} ${match.directive}`);
+    }
+  }
+  if (suppressions.length > 0) {
+    const error = new Error(
+      `src/**/*.js 不许使用 coverage suppression pragma（会缩小覆盖率分母）：\n  ${suppressions.join('\n  ')}`,
+    );
+    error.code = 'COVERAGE_SUPPRESSION_PRAGMA';
+    throw error;
+  }
+  return files;
 }
 
 /**
@@ -429,7 +774,9 @@ async function main() {
   try {
     missing = missingSourceFiles(files, ROOT);
   } catch (error) {
-    if (error?.code !== 'COVERAGE_SOURCE_SYMLINK') throw error;
+    if (!['COVERAGE_SOURCE_SYMLINK', 'COVERAGE_SUPPRESSION_PRAGMA'].includes(error?.code)) {
+      throw error;
+    }
     process.stdout.write(`\n覆盖率源码扫描失败：${error.message}\n`);
     process.exitCode = 1;
     return;

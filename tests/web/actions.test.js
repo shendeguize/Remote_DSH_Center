@@ -297,6 +297,7 @@ test('批量配置预览：按契约提交 dryRun 且不改写主机', async (t)
     targets: [{ name: 'gpu-2', changed: true, changedFields: ['inject.env'] }],
     applied: [],
     hosts: [],
+    previewToken: 'v1.preview-token',
   };
   const h = harness(t, { responder: () => res(200, preview) });
   const target = hostView({ name: 'gpu-2' });
@@ -319,7 +320,7 @@ test('批量配置预览：按契约提交 dryRun 且不改写主机', async (t)
   assert.equal(h.store.isPending('config:sync'), false);
 });
 
-test('批量配置应用：响应不覆盖 store，随后 revision SSE 才推进配置真相', async (t) => {
+test('批量配置应用：转发 preview token，无 SSE 时用成功响应更新 store 且不推进 revision', async (t) => {
   const updated = hostView({
     name: 'gpu-2',
     config: {
@@ -344,17 +345,56 @@ test('批量配置应用：响应不覆盖 store，随后 revision SSE 才推进
     source: 'gpu-1',
     targets: ['gpu-2'],
     dryRun: false,
+    previewToken: 'v1.preview-token',
   });
 
-  assert.deepEqual(h.calls[0].body, { source: 'gpu-1', targets: ['gpu-2'], dryRun: false });
-  assert.equal(h.store.getHost('gpu-2').config.workdir, original.config.workdir,
-    '无 revision 的 apply 响应不得覆盖当前 store');
+  assert.deepEqual(h.calls[0].body, {
+    source: 'gpu-1',
+    targets: ['gpu-2'],
+    dryRun: false,
+    previewToken: 'v1.preview-token',
+  });
+  assert.equal(h.store.getHost('gpu-2').config.workdir, '/srv/shared',
+    '没有后续 SSE 时，成功响应必须成为当前 store 的兜底真相');
+  assert.equal(h.store.state.revision, 1, '无 revision 的动作响应不得伪造或推进 revision');
   assert.equal(h.store.state.toasts.at(-1).level, 'success');
   assert.equal(h.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
+});
 
-  h.store.applyHostChanged({ revision: 2, host: updated });
-  assert.equal(h.store.getHost('gpu-2').config.workdir, '/srv/shared',
-    '带 revision 的 SSE 才能推进 host/config');
+test('批量配置应用迟到响应：请求后 snapshot 删除目标时不得复活幽灵主机', async (t) => {
+  let release;
+  const removed = hostView({
+    name: 'gpu-2',
+    config: { ...hostView().config, workdir: '/srv/removed-target' },
+  });
+  const gate = new Promise((resolve) => {
+    release = () => resolve(res(200, {
+      source: 'gpu-1',
+      dryRun: false,
+      targets: [{ name: 'gpu-2', changed: true, changedFields: ['workdir'] }],
+      applied: ['gpu-2'],
+      hosts: [removed],
+    }));
+  });
+  const h = harness(t, { responder: () => gate });
+  h.store.applySnapshot({
+    revision: 1,
+    hosts: [hostView(), hostView({ name: 'gpu-2' })],
+    logs: [],
+  });
+
+  const request = h.actions.syncConfig({
+    source: 'gpu-1',
+    targets: ['gpu-2'],
+    dryRun: false,
+    previewToken: 'v1.preview-token',
+  });
+  h.store.applySnapshot({ revision: 2, hosts: [hostView()], logs: [] });
+  release();
+  await request;
+
+  assert.equal(h.store.getHost('gpu-2'), null);
+  assert.equal(h.store.state.revision, 2);
 });
 
 test('批量配置应用迟到响应：较新 SSE 已到后不得回退 store', async (t) => {
@@ -383,6 +423,7 @@ test('批量配置应用迟到响应：较新 SSE 已到后不得回退 store', 
     source: 'gpu-1',
     targets: ['gpu-2'],
     dryRun: false,
+    previewToken: 'v1.preview-token',
   });
   const newest = hostView({
     name: 'gpu-2',
@@ -392,6 +433,7 @@ test('批量配置应用迟到响应：较新 SSE 已到后不得回退 store', 
   release();
   await request;
 
+  assert.equal(h.calls[0].body.previewToken, 'v1.preview-token');
   assert.equal(h.store.getHost('gpu-2').config.workdir, '/srv/newest-sse');
   assert.equal(h.store.state.revision, 2);
   assert.equal(h.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
@@ -410,7 +452,12 @@ test('批量配置应用全已一致时提示 no-op', async (t) => {
   });
   h.store.applySnapshot({ revision: 1, hosts: [hostView(), target], logs: [] });
 
-  await h.actions.syncConfig({ source: 'gpu-1', targets: ['gpu-2'], dryRun: false });
+  await h.actions.syncConfig({
+    source: 'gpu-1',
+    targets: ['gpu-2'],
+    dryRun: false,
+    previewToken: 'v1.preview-token',
+  });
 
   assert.equal(h.store.state.toasts.at(-1).summary, '目标配置已一致');
 });

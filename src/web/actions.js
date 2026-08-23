@@ -42,7 +42,12 @@ export function createActions({ store, confirm, navigate }) {
       };
     }
     const toast = store.addToast(presentation);
-    return { ...presentation, id: toast.id };
+    return {
+      ...presentation,
+      id: toast.id,
+      code: err instanceof ApiError ? err.code : null,
+      status: err instanceof ApiError ? err.status : null,
+    };
   }
 
   /**
@@ -175,7 +180,7 @@ export function createActions({ store, confirm, navigate }) {
   }
 
   async function syncConfig({
-    source, targets, dryRun, onError,
+    source, targets, dryRun, previewToken, onError,
   }) {
     if (targets.length > CONFIG_SYNC_TARGET_LIMIT) {
       store.addToast({
@@ -185,14 +190,23 @@ export function createActions({ store, confirm, navigate }) {
       });
       return null;
     }
+    let hostMergeGuard = null;
     const res = await guarded({
       action: 'config:sync',
       settleOnResolve: true,
       onError,
-      run: () => api.syncHostConfig({ source, targets, dryRun }),
+      run: () => {
+        hostMergeGuard = store.captureHostMergeGuard();
+        return api.syncHostConfig({
+          source, targets, dryRun, previewToken,
+        });
+      },
     });
     if (!res || dryRun) return res;
 
+    if (Array.isArray(res.hosts) && hostMergeGuard !== null) {
+      store.mergeActionHosts(res.hosts, hostMergeGuard);
+    }
     const count = Array.isArray(res.applied) ? res.applied.length : 0;
     store.addToast({
       level: 'success',

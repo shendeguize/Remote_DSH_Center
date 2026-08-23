@@ -26,7 +26,9 @@ import {
   isBrokenPipe, linkPlan, linkTarget, pathHint, prefixInPath, silenceBrokenPipe,
 } from '../scripts/install.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
-import { evaluateS12, findChrome } from '../scripts/ui-smoke.mjs';
+import {
+  evaluateS12, findChrome, findSecretInDomSnapshot, snapshotDomObservables,
+} from '../scripts/ui-smoke.mjs';
 import { armExitGuard } from '../scripts/lib/exit-guard.mjs';
 import { Cdp } from '../scripts/lib/browser.mjs';
 
@@ -280,6 +282,128 @@ test('S12 判据：Long Task 只诊断，事件到达 / 行数 / DOM 变更仍�
   assert.equal(evaluateS12({
     BURST: 1_500, mut: 148_631, rows: 50, frames: 1_500, worstMs: 2_278,
   }).ok, false, 'issue #106 的原始 DOM 风暴必须继续判红');
+});
+
+test('S14 secret 判据：覆盖 dialog 属性与动态表单值，但不把网络或 JS 内存算成 DOM', () => {
+  const sentinel = 'SECRET-IN-DOM';
+  const element = (tag, attributes = {}, value) => ({
+    tagName: tag.toUpperCase(),
+    attributes: Object.entries(attributes).map(([name, attributeValue]) => ({
+      name, value: attributeValue,
+    })),
+    ...(value === undefined ? {} : { value }),
+  });
+  const titled = element('div', { title: sentinel });
+  const dataMarked = element('span', { 'data-preview': `prefix-${sentinel}-suffix` });
+  const input = element('input', { value: 'stale-attribute' }, sentinel);
+  input.type = 'password';
+  const textarea = element('textarea', {}, sentinel);
+  const select = element('select', {}, sentinel);
+  const descendants = [titled, dataMarked, input, textarea, select];
+  const dialog = {
+    ...element('dialog', { 'aria-label': '批量同步' }),
+    textContent: '只含安全摘要',
+    querySelectorAll(selector) {
+      if (selector === '*') return descendants;
+      if (selector === 'input, textarea, select') return [input, textarea, select];
+      throw new Error(`unexpected selector: ${selector}`);
+    },
+  };
+
+  const snapshot = snapshotDomObservables(dialog);
+  assert.deepEqual(
+    snapshot.attributes.filter(({ value }) => value.includes(sentinel)).map(({ name }) => name),
+    ['title', 'data-preview'],
+    'title / data-* 等任意 attribute value 都必须进入快照',
+  );
+  assert.deepEqual(
+    snapshot.values.map(({ tag, value }) => [tag, value]),
+    [['input', sentinel], ['textarea', sentinel], ['select', sentinel]],
+    '动态 value property 不会出现在 textContent/outerHTML，也必须逐类采集',
+  );
+  assert.deepEqual(findSecretInDomSnapshot(snapshot, sentinel), [
+    'div[title]',
+    'span[data-preview]',
+    'input[type=password].value',
+    'textarea.value',
+    'select.value',
+  ]);
+  assert.deepEqual(findSecretInDomSnapshot({
+    text: sentinel, attributes: [], values: [],
+  }, sentinel), ['text'], '原有 textContent 判据也必须保留');
+
+  assert.deepEqual(findSecretInDomSnapshot({
+    text: '安全文本',
+    attributes: [],
+    values: [],
+    networkResponse: { secret: sentinel },
+    jsMemory: sentinel,
+  }, sentinel), [], '网络响应与页面 JS 内存不是 dialog DOM，不应误报');
+});
+
+test('S14 secret 判据：递归覆盖 open shadow root 的文本、属性和动态 value', () => {
+  const element = (tag, attributes = {}, value) => ({
+    tagName: tag.toUpperCase(),
+    attributes: Object.entries(attributes).map(([name, attributeValue]) => ({
+      name, value: attributeValue,
+    })),
+    ...(value === undefined ? {} : { value }),
+  });
+  const shadowAttributeSecret = 'SECRET-IN-SHADOW-ATTRIBUTE';
+  const shadowInputSecret = 'SECRET-IN-SHADOW-INPUT';
+  const nestedShadowTextSecret = 'SECRET-IN-NESTED-SHADOW-TEXT';
+
+  const shadowAttribute = element('div', { 'data-preview': shadowAttributeSecret });
+  const shadowInput = element('input', {}, shadowInputSecret);
+  shadowInput.type = 'password';
+  const nestedHost = element('nested-host');
+  nestedHost.shadowRoot = {
+    textContent: nestedShadowTextSecret,
+    querySelectorAll: () => [],
+  };
+  const host = element('sync-preview');
+  host.shadowRoot = {
+    textContent: '安全的第一层 shadow 文本',
+    querySelectorAll: () => [shadowAttribute, shadowInput, nestedHost],
+  };
+  const closedHost = element('closed-preview');
+  closedHost.shadowRoot = null;
+  closedHost.closedShadowForTest = {
+    textContent: 'SECRET-IN-CLOSED-SHADOW',
+    querySelectorAll: () => [],
+  };
+  const dialog = {
+    ...element('dialog'),
+    textContent: '安全的 light DOM 文本',
+    querySelectorAll: () => [host, closedHost],
+  };
+
+  const snapshot = snapshotDomObservables(dialog);
+  assert.deepEqual(
+    findSecretInDomSnapshot(snapshot, shadowAttributeSecret),
+    ['div[data-preview]'],
+    'open shadow root 内的任意 attribute value 必须被扫描',
+  );
+  assert.deepEqual(
+    findSecretInDomSnapshot(snapshot, shadowInputSecret),
+    ['input[type=password].value'],
+    'open shadow root 内只存在于 property 的动态 value 必须被扫描',
+  );
+  assert.deepEqual(
+    findSecretInDomSnapshot(snapshot, nestedShadowTextSecret),
+    ['text'],
+    '嵌套 open shadow root 的文本必须递归进入快照',
+  );
+  assert.deepEqual(
+    findSecretInDomSnapshot(snapshot, 'CLEAN-SECRET-NOT-IN-DOM'),
+    [],
+    '干净的 light/open-shadow DOM 不应误报 JS 内存里的 sentinel',
+  );
+  assert.deepEqual(
+    findSecretInDomSnapshot(snapshot, 'SECRET-IN-CLOSED-SHADOW'),
+    [],
+    'closed shadow root 不暴露给 element.shadowRoot，是浏览器不可跨越的观测边界',
+  );
 });
 
 /**

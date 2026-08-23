@@ -306,12 +306,27 @@ export const localHostCreateSchema = V.obj(
   { optional: ['name'] },
 );
 
-/** POST /api/hosts/sync-config：重复、源混入目标与存在性留给 config-sync 给人话。 */
-export const syncConfigBodySchema = V.obj({
-  source: safeHostNameSchema,
-  targets: V.arr(safeHostNameSchema, { min: 1, max: 200 }),
-  dryRun: V.bool(),
-});
+/**
+ * POST /api/hosts/sync-config：重复、源混入目标与存在性留给 config-sync 给人话。
+ * preview 负责签发 token；apply 必须交回，具体真伪由原子更新入口按最新 config 判断。
+ */
+export const syncConfigBodySchema = V.all(
+  V.obj(
+    {
+      source: safeHostNameSchema,
+      targets: V.arr(safeHostNameSchema, { min: 1, max: 200 }),
+      dryRun: V.bool(),
+      previewToken: V.str({ min: 1, max: 200 }),
+    },
+    { optional: ['previewToken'] },
+  ),
+  (value, path, errs) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return;
+    if (value.dryRun === false && !Object.hasOwn(value, 'previewToken')) {
+      fail(errs, path ? `${path}.previewToken` : 'previewToken', 'required when dryRun=false');
+    }
+  },
+);
 
 /** PUT /api/config/defaults 局部体（13 §2.6）。 */
 export const defaultsPatchSchema = V.obj(

@@ -786,6 +786,7 @@ test('批量配置预览 pending 锁住全部控件，无变更结果不能应�
           targets: [{ name: 'target', changed: false, changedFields: [] }],
           applied: [],
           hosts: [],
+          previewToken: 'v1.noop-preview',
         }),
       }))
       : null),
@@ -838,6 +839,7 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
     },
   };
   let releaseApply;
+  let previewCount = 0;
   const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
   const applyGate = new Promise((resolve) => {
     releaseApply = (body) => resolve(reply(body));
@@ -858,6 +860,7 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
           }],
           applied: [],
           hosts: [],
+          previewToken: `v1.preview-${previewCount += 1}`,
         })
         : applyGate;
     },
@@ -891,6 +894,8 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
     dryRun: true,
   });
   const results = dialog.querySelector('.config-sync-results');
+  assert.equal(results.querySelector('h3').textContent, '同步预览');
+  assert.match(results.textContent, /将变更/);
   assert.match(results.textContent, /远端 web 端口/);
   assert.match(results.textContent, /工作目录/);
   assert.match(results.textContent, /环境变量/);
@@ -928,11 +933,16 @@ test('批量配置预览与应用：不泄漏值、失效旧结果、标示重�
     source: 'source',
     targets: ['target-running'],
     dryRun: false,
+    previewToken: 'v1.preview-2',
   });
   assert.equal(app.store.getHost('target-running').config.workdir, '/srv/newest-sse',
     '迟到的无 revision apply 响应不得回退较新 SSE');
   assert.doesNotMatch(dialog.textContent, /TOP-SECRET-VALUE|SERVER-ONLY-VALUE|LATEST-SSE-VALUE|--secret-flag/);
   assert.equal(app.store.state.toasts.at(-1).summary, '已同步 1 台主机配置');
+  const appliedResults = dialog.querySelector('.config-sync-results');
+  assert.equal(appliedResults.querySelector('h3').textContent, '同步结果');
+  assert.match(appliedResults.textContent, /已变更/);
+  assert.doesNotMatch(appliedResults.textContent, /同步预览|将变更/);
   assert.equal(dialog.querySelector('.config-sync-apply').disabled, true, '应用成功后不能重复应用');
   assert.equal(dialog.open, true, '成功后允许留在结果页');
 
@@ -958,6 +968,7 @@ test('批量配置 dialog：相关 SSE/hosts reset 废弃预览、删主机修�
         targets: body.targets.map((name) => ({ name, changed: true, changedFields: ['workdir'] })),
         applied: [],
         hosts: [],
+        previewToken: 'v1.host-change-preview',
       })
       : null),
   });
@@ -1057,6 +1068,7 @@ test('批量配置预览 HTTP 失败：清空旧结果、释放 pending 并禁�
           targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
           applied: [],
           hosts: [],
+          previewToken: 'v1.first-preview',
         })
         : reply(503, {
           error: '预览服务暂不可用',
@@ -1110,7 +1122,7 @@ test('批量配置预览 HTTP 失败：清空旧结果、释放 pending 并禁�
   assert.equal(inlineError.textContent, '');
 });
 
-test('批量配置应用 HTTP 失败：结果作废、不能重复应用且可重新预览', async (t) => {
+test('批量配置 token 过期：就地要求重新预览，旧 token 不能重复应用', async (t) => {
   const reply = (status, body) => ({
     ok: status < 400,
     status,
@@ -1128,10 +1140,11 @@ test('批量配置应用 HTTP 失败：结果作废、不能重复应用且可�
           targets: [{ name: 'target', changed: true, changedFields: ['inject.env'] }],
           applied: [],
           hosts: [],
+          previewToken: 'v1.stale-preview',
         })
         : reply(409, {
-          error: '目标配置在应用前已变化',
-          code: 'CONFLICT',
+          error: '配置同步预览已过期或无效，请重新预览后再应用',
+          code: 'CONFIG_STALE',
           detail: 'target revision changed',
         });
     },
@@ -1151,7 +1164,7 @@ test('批量配置应用 HTTP 失败：结果作废、不能重复应用且可�
 
   let injected = false;
   const stopInjecting = app.store.on('toasts:changed', (toasts) => {
-    if (injected || toasts.at(-1)?.summary !== '目标配置在应用前已变化') return;
+    if (injected || toasts.at(-1)?.summary !== '配置同步预览已过期或无效，请重新预览后再应用') return;
     injected = true;
     app.store.addToast({
       level: 'error',
@@ -1167,17 +1180,18 @@ test('批量配置应用 HTTP 失败：结果作废、不能重复应用且可�
 
   const syncCalls = () => calls.filter((call) => call.path === '/api/hosts/sync-config');
   assert.deepEqual(syncCalls().map((call) => call.body.dryRun), [true, false]);
+  assert.equal(syncCalls()[1].body.previewToken, 'v1.stale-preview');
   assert.equal(app.store.isPending('config:sync'), false);
   assert.equal(dialog.querySelector('.config-sync-results'), null);
   assert.equal(apply.disabled, true);
-  assert.match(dialog.querySelector('.config-sync-status').textContent, /应用结果未确认.*重新预览/);
-  assert.ok(app.store.state.toasts.some((toast) => toast.summary === '目标配置在应用前已变化'));
+  assert.match(dialog.querySelector('.config-sync-status').textContent, /预览已失效.*重新预览/);
+  assert.ok(app.store.state.toasts.some((toast) => toast.summary === '配置同步预览已过期或无效，请重新预览后再应用'));
   assert.equal(app.store.state.toasts.at(-1).summary, '并发无关错误',
     '前提：动作错误之后确实并发新增了另一条 error toast');
-  assert.match(dom.app.querySelector('.toast-error').textContent, /目标配置在应用前已变化/);
+  assert.match(dom.app.querySelector('.toast-error').textContent, /配置同步预览已过期或无效/);
   const inlineError = dialog.querySelector('.config-sync-error');
   assert.equal(inlineError.hidden, false);
-  assert.equal(inlineError.querySelector('.config-sync-error-summary').textContent, '目标配置在应用前已变化',
+  assert.equal(inlineError.querySelector('.config-sync-error-summary').textContent, '配置同步预览已过期或无效，请重新预览后再应用',
     'dialog 必须关联本次 actions 错误，不能拿最后一条并发 toast');
   assert.equal(inlineError.querySelector('details pre').textContent, 'target revision changed');
   assert.doesNotMatch(inlineError.textContent, /并发无关错误|不能被同步 dialog 误取/);
@@ -1209,6 +1223,7 @@ test('批量配置预览在途时 SSE 改写选择：迟到响应必须丢弃', 
         targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
         applied: [],
         hosts: [],
+        previewToken: 'v1.late-preview',
       }))
       : null),
   });
@@ -1272,6 +1287,7 @@ test('批量配置应用在途时断线：关闭 dialog，迟到响应不重开�
           targets: [{ name: 'target', changed: true, changedFields: ['workdir'] }],
           applied: [],
           hosts: [],
+          previewToken: 'v1.disconnect-preview',
         })
         : applyGate;
     },
@@ -1305,8 +1321,8 @@ test('批量配置应用在途时断线：关闭 dialog，迟到响应不重开�
   await flush();
   assert.equal(dialog.open, false, '迟到成功响应不能重开已因断线关闭的 dialog');
   assert.equal(dialog.querySelector('.config-sync-results'), null);
-  assert.equal(app.store.getHost('target').config.workdir, null,
-    '迟到响应中的无 revision HostView 也不能覆盖 store');
+  assert.equal(app.store.getHost('target').config.workdir, '/srv/stale-response',
+    '没有后续 SSE 时，迟到成功响应仍应更新 store');
 });
 
 test('批量配置 dialog 无 showModal/close 时使用 open 属性并恢复焦点', async (t) => {
@@ -1886,7 +1902,63 @@ test('抽屉提交以当下 DOM 为准，正常 env 修改只 PUT inject', async
   assert.equal(app.store.state.drawer.dirty, false);
 });
 
-test('抽屉脏草稿遇到远端配置更新时显示冲突，放弃后采用新值', async (t) => {
+test('抽屉三方合并：本地只改 workdir 时吸收 SSE inject，保存不回滚远端值', async (t) => {
+  const base = hostView('gpu-1');
+  const original = hostView('gpu-1', {
+    config: {
+      ...base.config,
+      inject: { ...base.config.inject, env: { BASE: '1' } },
+    },
+  });
+  const remote = hostView('gpu-1', {
+    config: {
+      ...original.config,
+      inject: { ...original.config.inject, env: { REMOTE: '2' } },
+    },
+  });
+  const { app, dom, calls, es } = await mount(t, {
+    hosts: [original],
+    responder: ({ path, method, body }) => (path === '/api/hosts/gpu-1/config' && method === 'PUT'
+      ? {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          host: { ...remote, config: { ...remote.config, ...body } },
+        }),
+      }
+      : null),
+  });
+  dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  const form = drawer.querySelector('.drawer-form');
+  const workdir = drawer.querySelector('input[type="text"]');
+  const envInput = drawer.querySelectorAll('textarea')[0];
+  const [save] = drawer.querySelector('.drawer-actions').querySelectorAll('button');
+  const notice = drawer.querySelector('.card-notice');
+
+  workdir.value = '~/local-project';
+  form.dispatchEvent({ type: 'input' });
+  es().send('host-changed', { revision: 2, host: remote });
+  await flush();
+
+  assert.equal(workdir.value, '~/local-project', '用户改过的 workdir 必须保留');
+  assert.equal(envInput.value, 'REMOTE=2', '用户未改的 env 必须吸收 SSE 最新值');
+  assert.equal(notice.hidden, true, '不同字段各自更新不应制造冲突');
+  assert.equal(save.disabled, false);
+
+  save.click();
+  await flush();
+
+  const put = calls.find((call) => call.path === '/api/hosts/gpu-1/config' && call.method === 'PUT');
+  assert.deepEqual(put.body, { workdir: '~/local-project' },
+    'PUT 只含相对最新 baseline 的本地改动，不能带旧 inject');
+  assert.deepEqual(app.store.getHost('gpu-1').config.inject.env, { REMOTE: '2' });
+  assert.equal(app.store.state.drawer.dirty, false);
+});
+
+test('抽屉三方合并：双方同字段不同才显示冲突并暂停保存，放弃后采用新值', async (t) => {
   const original = hostView('gpu-1');
   const { app, dom, es } = await mount(t, { hosts: [original] });
   dom.app.querySelector('.host-table tbody tr[data-host="gpu-1"]').click();
@@ -1915,7 +1987,7 @@ test('抽屉脏草稿遇到远端配置更新时显示冲突，放弃后采用�
   assert.match(notice.textContent, /远端配置已变化/);
   assert.match(notice.textContent, /草稿已保留/);
   assert.equal(envInput.value, 'LOCAL_DRAFT=1', '远端更新不能静默覆盖脏草稿');
-  assert.equal(save.disabled, false, '用户仍可明确选择保存自己的草稿');
+  assert.equal(save.disabled, true, '未解决的同字段冲突不能覆盖远端值');
   assert.equal(discard.disabled, false, '用户也可明确放弃并载入远端值');
 
   discard.click();

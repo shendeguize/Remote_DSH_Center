@@ -50,6 +50,12 @@ export function createStore(preset = {}) {
   const state = { ...initialState(), ...preset };
   /** @type {Map<string, Set<Function>>} */
   const listeners = new Map();
+  // REST / SSE 跨连接会乱序：hosts/config 各自判旧；state.revision 只保留对外最大值。
+  const domainRevisions = { hosts: -1, config: -1 };
+  // 初始 config REST 还需按字段补缺，旧 snapshot 可能没有 configuredPort。
+  const configRevisions = { defaults: -1, manager: -1 };
+  const configEpochs = { defaults: 0, manager: 0 };
+  let hostsResetEpoch = 0;
   let seq = 0;
 
   const on = (type, fn) => {
@@ -72,17 +78,48 @@ export function createStore(preset = {}) {
     emit('manager:changed', info);
   };
 
-  const setManagerConfig = (manager) => {
+  const setManagerConfig = (manager, revision = null) => {
     state.manager.configuredPort = manager?.port ?? null;
+    configEpochs.manager += 1;
+    if (Number.isInteger(revision)) configRevisions.manager = revision;
     emit('manager-config:changed', state.manager.configuredPort);
   };
 
-  const setDefaults = (defaults) => {
+  const setDefaults = (defaults, revision = null) => {
     state.defaults = defaults ?? null;
+    configEpochs.defaults += 1;
+    if (Number.isInteger(revision)) configRevisions.defaults = revision;
     emit('defaults:changed', state.defaults);
   };
 
+  /**
+   * 初始 GET /api/config 的兜底路径：只合并请求发出后未变化的配置字段。
+   * revision 保留 SSE 来源真相；epoch 同时覆盖本地 REST 写入，不能拿本地写入伪造 revision。
+   */
+  const captureConfigRevisions = () => ({
+    defaults: { revision: configRevisions.defaults, epoch: configEpochs.defaults },
+    manager: { revision: configRevisions.manager, epoch: configEpochs.manager },
+  });
+
+  const mergeFetchedConfig = (config, requestRevisions) => {
+    if (config?.defaults !== undefined
+      && configRevisions.defaults <= requestRevisions.defaults.revision
+      && configEpochs.defaults === requestRevisions.defaults.epoch) {
+      setDefaults(config.defaults);
+    }
+    if (config?.manager !== undefined
+      && configRevisions.manager <= requestRevisions.manager.revision
+      && configEpochs.manager === requestRevisions.manager.epoch) {
+      setManagerConfig(config.manager);
+    }
+  };
+
   // ── hosts ─────────────────────────────────────────────────────────────
+
+  const captureHostMergeGuard = () => ({
+    startedAt: performance.now(),
+    resetEpoch: hostsResetEpoch,
+  });
 
   /**
    * GET /api/hosts 的兜底路径：不覆盖发出请求后到达的更新（10 §4.4 第 3 点）。
@@ -95,14 +132,36 @@ export function createStore(preset = {}) {
       if (known && known.__receivedAt > requestStartedAt) continue;
       state.hosts.set(host.name, stamp(host));
     }
-    if (Number.isInteger(revision) && revision > state.revision) state.revision = revision;
+    if (Number.isInteger(revision)) {
+      domainRevisions.hosts = Math.max(domainRevisions.hosts, revision);
+      state.revision = Math.max(state.revision, revision);
+    }
     state.hostsLoaded = true;
     emit('hosts:reset', [...state.hosts.keys()]);
+  };
+
+  /**
+   * 写操作响应里的 HostView 是 SSE 丢失时的兜底：请求后若到过完整 snapshot，则整批
+   * 响应作废；否则逐主机保护更晚 SSE。响应没有 revision，故绝不推进 domain revision。
+   */
+  const mergeActionHosts = (hosts, requestGuard) => {
+    const resetAfterRequest = hostsResetEpoch !== requestGuard.resetEpoch;
+    if (resetAfterRequest) return;
+    for (const host of hosts) {
+      const known = state.hosts.get(host.name);
+      if (known && known.__receivedAt > requestGuard.startedAt) continue;
+      state.hosts.set(host.name, stamp(host));
+      emit('hosts:changed', host.name);
+      settleByPhase(host);
+    }
   };
 
   /** snapshot 帧：整体替换（可安全删除已消失的主机，13 §3.1）。 */
   const applySnapshot = (frame) => {
     state.revision = frame.revision;
+    domainRevisions.hosts = frame.revision;
+    domainRevisions.config = frame.revision;
+    hostsResetEpoch += 1;
     state.hosts = new Map(frame.hosts.map((h) => [h.name, stamp(h)]));
     const hasManager = frame.manager != null;
     const hasConfiguredPort = Object.hasOwn(frame, 'configuredPort');
@@ -112,10 +171,14 @@ export function createStore(preset = {}) {
       state.manager.info = frame.manager;
       state.manager.setupCompleted = frame.manager.setupCompleted ?? null;
     }
-    if (hasConfiguredPort) state.manager.configuredPort = frame.configuredPort ?? null;
+    if (hasConfiguredPort) {
+      state.manager.configuredPort = frame.configuredPort ?? null;
+      configEpochs.manager += 1;
+      configRevisions.manager = frame.revision;
+    }
     if (hasManager) emit('manager:changed', frame.manager);
     if (hasConfiguredPort) emit('manager-config:changed', state.manager.configuredPort);
-    if (frame.defaults !== undefined) setDefaults(frame.defaults);
+    if (frame.defaults !== undefined) setDefaults(frame.defaults, frame.revision);
     if (Array.isArray(frame.logs)) {
       state.events = frame.logs.slice(-EVENT_BUFFER_LIMIT).map(toEvent);
       emit('events:changed', state.events);
@@ -139,8 +202,9 @@ export function createStore(preset = {}) {
 
   /** host-changed 帧：旧 revision 丢弃（13 §3.1 的前端规则）。 */
   const applyHostChanged = (frame) => {
-    if (frame.revision <= state.revision) return false;
-    state.revision = frame.revision;
+    if (frame.revision <= domainRevisions.hosts) return false;
+    domainRevisions.hosts = frame.revision;
+    state.revision = Math.max(state.revision, frame.revision);
     state.hosts.set(frame.host.name, stamp(frame.host));
     emit('hosts:changed', frame.host.name);
     settleByPhase(frame.host);
@@ -148,10 +212,11 @@ export function createStore(preset = {}) {
   };
 
   const applyConfigChanged = (frame) => {
-    if (frame.revision <= state.revision) return false;
-    state.revision = frame.revision;
-    if (frame.defaults !== undefined) setDefaults(frame.defaults);
-    if (frame.manager !== undefined) setManagerConfig(frame.manager);
+    if (frame.revision <= domainRevisions.config) return false;
+    domainRevisions.config = frame.revision;
+    state.revision = Math.max(state.revision, frame.revision);
+    if (frame.defaults !== undefined) setDefaults(frame.defaults, frame.revision);
+    if (frame.manager !== undefined) setManagerConfig(frame.manager, frame.revision);
     return true;
   };
 
@@ -298,7 +363,11 @@ export function createStore(preset = {}) {
     setManagerInfo,
     setManagerConfig,
     setDefaults,
+    captureConfigRevisions,
+    mergeFetchedConfig,
+    captureHostMergeGuard,
     mergeFetchedHosts,
+    mergeActionHosts,
     applySnapshot,
     upsertHost,
     applyHostChanged,

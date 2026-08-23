@@ -81,6 +81,74 @@ test('mergeFetchedHosts 不覆盖请求发出后到达的 SSE 版本（10 §4.4 
   assert.equal(store.getHost('b').phase, 'unknown', '未知主机照常补入');
 });
 
+test('mergeActionHosts：请求后全量 snapshot 删除的主机不得被迟到响应复活', () => {
+  const store = createStore();
+  store.applySnapshot({ revision: 1, hosts: [hostView('source'), hostView('target')], logs: [] });
+  const guard = store.captureHostMergeGuard();
+
+  store.applySnapshot({ revision: 2, hosts: [hostView('source')], logs: [] });
+  store.mergeActionHosts([hostView('target', { phase: 'running' })], guard);
+
+  assert.equal(store.getHost('target'), null, '全量快照确认删除后，旧响应不能重新插入幽灵主机');
+  assert.equal(store.state.revision, 2);
+});
+
+test('mergeActionHosts：同一 performance 时刻也以请求后的 snapshot epoch 为权威', (t) => {
+  t.mock.method(performance, 'now', () => 42);
+  const store = createStore();
+  store.applySnapshot({
+    revision: 1,
+    hosts: [hostView('target', {
+      config: { ...hostView('target').config, workdir: '/old' },
+    })],
+    logs: [],
+  });
+  const guard = store.captureHostMergeGuard();
+
+  store.applySnapshot({
+    revision: 2,
+    hosts: [hostView('target', {
+      config: { ...hostView('target').config, workdir: '/new' },
+    })],
+    logs: [],
+  });
+  store.mergeActionHosts([hostView('target', {
+    config: { ...hostView('target').config, workdir: '/stale' },
+  })], guard);
+
+  assert.equal(store.getHost('target').config.workdir, '/new',
+    '请求后完整 snapshot 是整批更晚真相，时钟同值也不能被 REST 响应回滚');
+  assert.equal(store.state.revision, 2);
+});
+
+test('mergeActionHosts：请求前 snapshot 不阻止响应更新，无后续 reset 时也可补入缺席主机', () => {
+  const store = createStore();
+  store.applySnapshot({ revision: 1, hosts: [hostView('source'), hostView('target')], logs: [] });
+  const guard = store.captureHostMergeGuard();
+
+  store.mergeActionHosts([
+    hostView('target', { phase: 'running' }),
+    hostView('response-only', { phase: 'ready' }),
+  ], guard);
+
+  assert.equal(store.getHost('target').phase, 'running');
+  assert.equal(store.getHost('response-only').phase, 'ready',
+    '没有请求后全量 reset 时，成功响应仍可补齐当前缺席的合法 HostView');
+  assert.equal(store.state.revision, 1, '动作响应不得推进 revision');
+});
+
+test('mergeActionHosts：请求后到达的单主机 SSE 仍优先于迟到响应', () => {
+  const store = createStore();
+  store.applySnapshot({ revision: 1, hosts: [hostView('target')], logs: [] });
+  const guard = store.captureHostMergeGuard();
+
+  store.applyHostChanged({ revision: 2, host: hostView('target', { phase: 'running' }) });
+  store.mergeActionHosts([hostView('target', { phase: 'ready' })], guard);
+
+  assert.equal(store.getHost('target').phase, 'running');
+  assert.equal(store.state.revision, 2);
+});
+
 test('接收时刻跨墙钟跳变仍可比先后（issue #104）', (t) => {
   // mergeFetchedHosts 靠 __receivedAt 与请求发出时刻比大小来决定「谁更新」。这把尺
   // 一旦是墙钟，请求在途期间的一次校时（休眠唤醒后的 NTP 步进）就能把先后判反，
@@ -231,6 +299,118 @@ test('config-changed 只更新配置端口，旧 revision 不得回退配置', (
   assert.equal(stale, false);
   assert.equal(store.state.manager.configuredPort, 7799);
   assert.equal(store.state.defaults.remoteWebPort, 9000);
+});
+
+test('迟到的初始 config REST 不覆盖请求后到达的 SSE 配置', async () => {
+  const store = createStore();
+  store.setManagerInfo({ setupCompleted: true, port: 7788, pid: 42, version: '0.1.0' });
+  const requestRevisions = store.captureConfigRevisions();
+  let releaseRest;
+  const delayedRest = new Promise((resolve) => {
+    releaseRest = resolve;
+  }).then((config) => store.mergeFetchedConfig(config, requestRevisions));
+
+  store.applyConfigChanged({
+    revision: 9,
+    defaults: { remoteWebPort: 9000, localPortRange: [18_001, 18_099] },
+    manager: { port: 7799 },
+    changed: ['defaults.remoteWebPort', 'defaults.localPortRange', 'manager.port'],
+  });
+  releaseRest({
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    manager: { port: 7788 },
+  });
+  await delayedRest;
+
+  assert.equal(store.state.defaults.remoteWebPort, 9000);
+  assert.deepEqual(store.state.defaults.localPortRange, [18_001, 18_099]);
+  assert.equal(store.state.manager.configuredPort, 7799);
+  assert.equal(store.state.manager.info.port, 7788, '配置初始化不能改写 manager runtime info');
+  assert.equal(store.state.manager.info.pid, 42);
+
+  const snapshotFirst = createStore();
+  const snapshotRequestRevisions = snapshotFirst.captureConfigRevisions();
+  snapshotFirst.applySnapshot({
+    revision: 7,
+    configuredPort: 7800,
+    defaults: { remoteWebPort: 9100, localPortRange: [19_001, 19_099] },
+    hosts: [],
+    logs: [],
+  });
+  snapshotFirst.mergeFetchedConfig({
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    manager: { port: 7788 },
+  }, snapshotRequestRevisions);
+  assert.equal(snapshotFirst.state.defaults.remoteWebPort, 9100, 'snapshot 配置也不能被迟到 REST 回滚');
+  assert.equal(snapshotFirst.state.manager.configuredPort, 7800);
+
+  const noSse = createStore();
+  const noSseRequestRevisions = noSse.captureConfigRevisions();
+  noSse.applyHostChanged({ revision: 1, host: hostView('a') });
+  noSse.mergeFetchedConfig({
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    manager: { port: 7788 },
+  }, noSseRequestRevisions);
+  assert.equal(noSse.state.defaults.remoteWebPort, 8899, '没有配置 SSE 时 REST 仍须完成初始化');
+  assert.equal(noSse.state.manager.configuredPort, 7788);
+});
+
+test('hosts GET 先推进全局 revision 时仍接受同 revision 的 config-changed', async () => {
+  const store = createStore();
+  const configRequestRevisions = store.captureConfigRevisions();
+  let releaseOldConfig;
+  const delayedConfig = new Promise((resolve) => {
+    releaseOldConfig = resolve;
+  }).then((config) => store.mergeFetchedConfig(config, configRequestRevisions));
+
+  // 配置保存已在服务端完成并取到 revision 9，但两个端点跨连接乱序：
+  // /api/hosts 先把 revision 9 带回来，config-changed 随后才抵达。
+  store.mergeFetchedHosts([hostView('a', { phase: 'ready' })], 9, performance.now() - 1_000);
+  assert.equal(store.state.revision, 9);
+  assert.equal(store.applyConfigChanged({
+    revision: 9,
+    defaults: { remoteWebPort: 9000, localPortRange: [18_001, 18_099] },
+    manager: { port: 7799 },
+    changed: ['defaults.remoteWebPort', 'defaults.localPortRange', 'manager.port'],
+  }), true, 'hosts 域水位不能吞掉同 revision 的配置帧');
+
+  releaseOldConfig({
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    manager: { port: 7788 },
+  });
+  await delayedConfig;
+
+  assert.equal(store.state.defaults.remoteWebPort, 9000);
+  assert.deepEqual(store.state.defaults.localPortRange, [18_001, 18_099]);
+  assert.equal(store.state.manager.configuredPort, 7799);
+  assert.equal(store.applyHostChanged({
+    revision: 9,
+    host: hostView('a', { phase: 'running' }),
+  }), false, 'host 域同 revision 旧帧仍须丢弃');
+  assert.equal(store.getHost('a').phase, 'ready');
+  assert.equal(store.state.revision, 9, '对外 revision 保持各域最大值');
+});
+
+test('本地配置写入成功后不被迟到的初始 config REST 覆盖', async () => {
+  const store = createStore();
+  const configRequestRevisions = store.captureConfigRevisions();
+  let releaseOldConfig;
+  const delayedConfig = new Promise((resolve) => {
+    releaseOldConfig = resolve;
+  }).then((config) => store.mergeFetchedConfig(config, configRequestRevisions));
+
+  store.setDefaults({ remoteWebPort: 9000, localPortRange: [18_001, 18_099] });
+  store.setManagerConfig({ port: 7799 });
+  releaseOldConfig({
+    defaults: { remoteWebPort: 8899, localPortRange: [17_701, 17_799] },
+    manager: { port: 7788 },
+  });
+  await delayedConfig;
+
+  assert.equal(store.state.defaults.remoteWebPort, 9000);
+  assert.deepEqual(store.state.defaults.localPortRange, [18_001, 18_099]);
+  assert.equal(store.state.manager.configuredPort, 7799);
+  assert.equal(store.state.revision, -1, '本地 REST 成功不得伪造 SSE revision');
 });
 
 test('snapshot 原子更新实际监听端口与配置目标端口，并以 revision 挡住旧配置帧', () => {

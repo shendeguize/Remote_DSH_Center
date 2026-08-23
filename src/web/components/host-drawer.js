@@ -6,23 +6,32 @@
  */
 
 import { DASH, button, clear, el, fmtAgo, phaseBadge, text } from '../utils.js';
-import { buildHostPatch, deepEqual, diffPatch, field, formatEnvLines, formatLines, input } from '../form.js';
+import {
+  buildHostPatch,
+  deepEqual,
+  diffPatch,
+  field,
+  formatEnvLines,
+  formatLines,
+  input,
+  parseEnvLines,
+  parseLines,
+  parsePort,
+  parseWorkdir,
+  validatePatches,
+} from '../form.js';
 import { hostMappingSummary, hostPhaseMeta } from '../host-presentation.js';
 
 const LOG_LINES = 200;
-
-function drawerConfigOf(config) {
-  return {
-    enabled: Boolean(config?.enabled),
-    remoteWebPort: config?.remoteWebPort ?? null,
-    workdir: config?.workdir ?? null,
-    inject: {
-      env: config?.inject?.env ?? {},
-      extraArgs: config?.inject?.extraArgs ?? [],
-      patches: config?.inject?.patches ?? [],
-    },
-  };
-}
+const DRAFT_FIELDS = ['enabled', 'remoteWebPort', 'workdir', 'env', 'extraArgs', 'patches'];
+const DRAFT_FIELD_LABELS = {
+  enabled: '纳管状态',
+  remoteWebPort: 'web 端口',
+  workdir: '启动目录',
+  env: '环境变量',
+  extraArgs: '追加参数',
+  patches: 'Patch 文件',
+};
 
 /**
  * config → 表单草稿（纯函数，便于单测草稿/冲突逻辑）。
@@ -45,7 +54,6 @@ export function isDirty(draft, config) {
   return !deepEqual(draft, draftOf(config));
 }
 
-
 const LIVE_PHASES = ['running', 'degraded'];
 
 /**
@@ -59,13 +67,59 @@ export function workdirPending(host) {
   return (host.web.workdir ?? null) !== (host.config?.workdir ?? null);
 }
 
+function comparableField(draft, key) {
+  if (key === 'enabled') return Boolean(draft.enabled);
+  if (key === 'remoteWebPort') {
+    const parsed = parsePort(draft.remoteWebPort, { allowEmpty: true });
+    return parsed.ok ? parsed.value : draft.remoteWebPort;
+  }
+  if (key === 'workdir') {
+    const parsed = parseWorkdir(draft.workdir);
+    return parsed.ok ? parsed.value : draft.workdir;
+  }
+  if (key === 'env') {
+    const parsed = parseEnvLines(draft.env);
+    return parsed.ok ? parsed.value : draft.env;
+  }
+  if (key === 'extraArgs') return parseLines(draft.extraArgs);
+  const parsed = validatePatches(parseLines(draft.patches));
+  return parsed.ok ? parsed.value : draft.patches;
+}
+
+function fieldEqual(left, right, key) {
+  return deepEqual(comparableField(left, key), comparableField(right, key));
+}
+
 /**
- * 远端 config 变了该怎么办（UI-26）：草稿干净就直接跟随，脏就保留并提示。
- * @returns {'follow'|'conflict'|'none'}
+ * 抽屉字段级三方合并（base = prevConfig，local = draft，remote = nextConfig）。
+ *
+ * inject 在 API 上是一个原子 patch，但在抽屉里 env / extraArgs / patches 各自拥有字段：
+ * 未改字段跟随 remote，本地独改字段保留；双方同字段改成不同有效值才算冲突。
  */
-export function reconcile(draft, prevConfig, nextConfig) {
-  if (deepEqual(drawerConfigOf(prevConfig), drawerConfigOf(nextConfig))) return 'none';
-  return isDirty(draft, prevConfig) ? 'conflict' : 'follow';
+export function reconcile(draft, prevConfig, nextConfig, priorConflicts = []) {
+  const base = draftOf(prevConfig);
+  const remote = draftOf(nextConfig);
+  const merged = { ...draft };
+  const unresolved = new Set(priorConflicts);
+  const conflicts = [];
+  let remoteChanged = false;
+
+  for (const key of DRAFT_FIELDS) {
+    const localChanged = !fieldEqual(draft, base, key);
+    const fieldRemoteChanged = !fieldEqual(remote, base, key);
+    const sameResult = fieldEqual(draft, remote, key);
+    remoteChanged ||= fieldRemoteChanged;
+
+    if (unresolved.has(key) && !sameResult) {
+      conflicts.push(key);
+    } else if (!localChanged || sameResult) {
+      merged[key] = remote[key];
+    } else if (fieldRemoteChanged) {
+      conflicts.push(key);
+    }
+  }
+
+  return { draft: merged, conflicts, remoteChanged };
 }
 
 /** 详情抽屉里随运输类型变化的标题与只读字段名。 */
@@ -192,7 +246,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   const scrim = el('div.drawer-scrim', { hidden: true, on: { click: () => requestClose() } });
 
-  let current = null; // { name, draft, config }
+  let current = null; // { name, draft, config, conflicts }
   let restoreFocus = null;
   let closing = false;
   const touched = new Set(); // 碰过的字段才实时报错，见 revalidate
@@ -241,21 +295,35 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     return built;
   }
 
+  function refreshConflict() {
+    if (!current) return;
+    const latest = draftOf(current.config);
+    current.conflicts = current.conflicts.filter((key) => !fieldEqual(current.draft, latest, key));
+    conflict.hidden = current.conflicts.length === 0;
+    if (!conflict.hidden) {
+      const host = store.getHost(current.name);
+      const labels = current.conflicts.map((key) => DRAFT_FIELD_LABELS[key]).join('、');
+      conflict.textContent = `${drawerCopy(host).configChanged}（可能来自另一个标签页）；同一字段（${labels}）也被修改。你的草稿已保留，保存已暂停；「放弃修改」可载入最新值。`;
+    }
+  }
+
   function syncDirty() {
     if (!current) return;
     current.draft = readForm();
+    refreshConflict();
     revalidate();
     const dirty = isDirty(current.draft, current.config);
     store.setDrawer({ dirty });
-    saveBtn.disabled = !dirty || !store.canWrite() || store.isPending('config:save', current.name);
+    saveBtn.disabled = !dirty || current.conflicts.length > 0
+      || !store.canWrite() || store.isPending('config:save', current.name);
     cancelBtn.disabled = !dirty;
   }
 
   function resetDraft() {
     if (!current) return;
     current.draft = draftOf(current.config);
+    current.conflicts = [];
     writeForm(current.draft);
-    conflict.hidden = true;
     syncDirty();
   }
 
@@ -268,9 +336,10 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       return;
     }
     restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    current = { name, config: host.config, draft: draftOf(host.config) };
+    current = {
+      name, config: host.config, draft: draftOf(host.config), conflicts: [],
+    };
     writeForm(current.draft);
-    conflict.hidden = true;
     logPre.textContent = '（未加载）';
     renderReadonly(host);
     root.hidden = false;
@@ -385,6 +454,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     if (!current) return;
     // submit 以此刻 DOM 为准；input/change 事件与点击之间可能还有尚未同步进 draft 的值。
     current.draft = readForm();
+    refreshConflict();
+    if (current.conflicts.length > 0) return;
     // 保存是最终权威：该说的全说，之后这些字段也就都算碰过了
     for (const key of Object.keys(validated)) touched.add(key);
     const built = revalidate();
@@ -403,8 +474,8 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     if (res?.host) {
       current.config = res.host.config;
       current.draft = draftOf(current.config);
+      current.conflicts = [];
       writeForm(current.draft);
-      conflict.hidden = true;
       syncDirty();
     }
   }
@@ -424,18 +495,14 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
         return;
       }
       renderReadonly(host);
-      const verdict = reconcile(current.draft, current.config, host.config);
-      if (verdict === 'follow') {
-        current.config = host.config;
-        current.draft = draftOf(host.config);
-        writeForm(current.draft);
-      } else if (verdict === 'conflict') {
-        conflict.hidden = false;
-        conflict.textContent = `${drawerCopy(host).configChanged}（可能来自另一个标签页）；你的草稿已保留，「放弃修改」可载入最新值。`;
-        current.config = host.config; // 冲突基准跟进，保存时按最新值 diff
-      } else {
-        current.config = host.config; // 非抽屉字段也跟进基准，但不动草稿
-      }
+      const merged = reconcile(
+        current.draft, current.config, host.config, current.conflicts,
+      );
+      const draftChanged = !deepEqual(current.draft, merged.draft);
+      current.config = host.config;
+      current.draft = merged.draft;
+      current.conflicts = merged.conflicts;
+      if (draftChanged) writeForm(current.draft);
       syncDirty();
     }),
     store.on('pending:changed', syncDirty),

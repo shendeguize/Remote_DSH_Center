@@ -81,8 +81,15 @@ export const api = {
   stopHost: (name) => call('POST', `/api/hosts/${enc(name)}/stop`),
   restartHost: (name) => call('POST', `/api/hosts/${enc(name)}/restart`),
   reconnectHost: (name) => call('POST', `/api/hosts/${enc(name)}/reconnect`),
-  syncHostConfig: ({ source, targets, dryRun }) => call('POST', '/api/hosts/sync-config', {
-    body: { source, targets, dryRun },
+  syncHostConfig: ({
+    source, targets, dryRun, previewToken,
+  }) => call('POST', '/api/hosts/sync-config', {
+    body: {
+      source,
+      targets,
+      dryRun,
+      ...(previewToken === undefined ? {} : { previewToken }),
+    },
   }),
 
   hostLog: (name, lines = 200) => call('GET', `/api/hosts/${enc(name)}/log?lines=${lines}`, { as: 'text', timeoutMs: 30_000 }),

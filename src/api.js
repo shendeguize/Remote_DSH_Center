@@ -11,7 +11,11 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 
-import { applyConfigSync, planConfigSync } from './config-sync.js';
+import {
+  applyConfigSync,
+  createConfigSyncPreview,
+  requireConfigSyncPreview,
+} from './config-sync.js';
 import { DshError, asDshError } from './lib/errors.js';
 import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import {
@@ -35,6 +39,7 @@ const MAX_BODY_BYTES = 1_048_576;
  */
 const MAX_DRAIN_BYTES = 4 * MAX_BODY_BYTES;
 const SSE_HEARTBEAT_MS = 25_000;
+const SKIP_CONFIG_SYNC_WRITE = Symbol('skip-config-sync-write');
 
 /**
  * 一条 SSE 连接的积压上限。客户端不读的时候（标签被系统冻结、笔记本合盖、网络黑洞），
@@ -381,21 +386,38 @@ export function createHandler({ managerCtl }) {
     ['POST', /^\/api\/hosts\/sync-config$/, async (req, res) => {
       const body = await readJsonBody(req);
       assertValid(syncConfigBodySchema, body, '批量配置同步请求校验失败');
-      const plan = planConfigSync(store.getConfig(), body);
-      let applied = [];
-
-      if (!body.dryRun && plan.targets.some((target) => target.changed)) {
-        store.updateConfig((draft) => {
-          applied = applyConfigSync(draft, plan);
+      if (body.dryRun) {
+        const { plan, previewToken } = createConfigSyncPreview(store.getConfig(), body);
+        sendJson(res, 200, {
+          source: plan.source,
+          dryRun: true,
+          targets: plan.targets,
+          applied: [],
+          hosts: [],
+          previewToken,
         });
+        return;
       }
 
+      let plan;
+      let applied = [];
+      try {
+        store.updateConfig((draft) => {
+          // 重算、验 token、复制都在 updateConfig 的同一个同步 mutator 内；
+          // 任一配置请求只能看见上一笔完整提交，不能夹在校验与落盘之间。
+          plan = requireConfigSyncPreview(draft, body, body.previewToken);
+          applied = applyConfigSync(draft, plan);
+          if (applied.length === 0) throw SKIP_CONFIG_SYNC_WRITE;
+        });
+      } catch (err) {
+        if (err !== SKIP_CONFIG_SYNC_WRITE) throw err;
+      }
       sendJson(res, 200, {
         source: plan.source,
-        dryRun: body.dryRun,
+        dryRun: false,
         targets: plan.targets,
         applied,
-        hosts: body.dryRun ? [] : body.targets.map((name) => store.getHostView(name)),
+        hosts: body.targets.map((name) => store.getHostView(name)),
       });
     }],
 

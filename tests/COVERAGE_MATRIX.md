@@ -138,7 +138,8 @@
 | SSE snapshot 首帧 / 心跳 / 断开摘除 / debounce 合并 | `tests/api.test.js`、`tests/integration/sse.test.js` |
 | SSE revision 单调 + 帧类型白名单 | `tests/integration/sse.test.js`、`tests/contract/schemas.test.js` |
 | `POST /api/hosts/sync-config` 请求契约：固定五个 profile 路径，排除身份/启用/自启/localPort/运行态；空/重复/源混入/缺失/超过 200 目标整单拒绝，主机查找只认 own property | `tests/config-sync.test.js`、`tests/api.test.js`、`tests/lib/validate.test.js`、`tests/contract/schemas.test.js` |
-| 批量同步 preview 只读（文件/revision/SSE 全不动）；apply 只对 changed 目标做一次原子落盘并广播 HostView，全一致时不重写 | `tests/config-sync.test.js`、`tests/api.test.js`、`tests/integration/ui-live.test.js` |
+| 批量同步响应的条件契约：`dryRun:true` 必须带 opaque `previewToken` 且 applied/hosts 为空；`dryRun:false` 不回 token 并返回应用结果，判别字段缺失或非法不能误入任一分支 | `tests/api.test.js`、`tests/demo-contract.test.js`（共用 `tests/contract/schemas.js`） |
+| preview token 绑定源、目标集合与五类同步字段：对象/目标顺序稳定且不泄漏 secret；源或任一目标的 profile 变化、会话重置（manager 重启边界）都会 `CONFIG_STALE`，范围外字段变化不误判；apply 在提交点重新核对后只做一次原子落盘，全一致时不重写 | `tests/config-sync.test.js`、`tests/api.test.js`、`tests/demo-contract.test.js`、`tests/integration/ui-live.test.js` |
 | 主机配置与全局默认经真 PUT 持久化并由 SSE/REST/页面 store 收敛；`CONFIG_STALE` 返回 409 且磁盘逐字不变 | `tests/integration/flows.test.js`、`tests/integration/ui-live.test.js` |
 | 请求体解析边界（空体 / 非法 JSON / 超限 → VALIDATION） | `tests/api.test.js` |
 | 错误码族与 HTTP 状态映射（VALIDATION/PHASE_CONFLICT/KILL_REFUSED/NOT_FOUND/SETUP_REQUIRED…） | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
@@ -190,6 +191,7 @@
 | 18 setup JSON 手工删字段 | `tests/web/setup-wizard.test.js`、`tests/web/setup-mount.test.js` |
 | 19 新端口迁移超时 | `tests/web/setup-mount.test.js`、`tests/web/setup-wizard.test.js` |
 | 20 GET 首屏与 SSE 全量交错 | `tests/web/store.test.js`（mergeFetchedHosts） |
+| REST/SSE 跨域乱序：hosts 与 config 各自维护 revision 水位；操作响应受请求 guard、单主机 revision 与全量 snapshot epoch 共同约束，迟到响应不得回滚新值或复活已被 reset 删除的主机 | `tests/web/store.test.js`、`tests/web/actions.test.js`、`tests/integration/ui-live.test.js` |
 | 首屏即 host 路由（书签 / 刷新 / `dshc open <host>`）：主机集合迟到也不改写地址；到齐后建 iframe | `tests/web/mount.test.js`（用 responder 把 `/api/hosts` 卡住造出迟到）、`scripts/ui-smoke.mjs` S10 |
 | 主机真从状态里消失（≠ 尚未同步）→ 回 Hub | `tests/web/mount.test.js`（snapshot 整体替换掉该主机） |
 | 切主机时激活标签滚进可视区；同一路由重渲染不再滚（否则用户自己拖的位置会被拽回去） | `tests/web/mount.test.js`（垫片记 `scrollIntoView` 的账）、`scripts/ui-smoke.mjs` S11（真滚了多少像素） |
@@ -203,9 +205,9 @@
 | 单一展示源：本机/远端状态、诊断提示、dsh 摘要与确认映射在表格、Hub、overflow、抽屉、向导、深链占位一致 | `tests/web/host-presentation.test.js`、`tests/web/mount.test.js`、`tests/web/setup-mount.test.js` |
 | `+N` overflow：ArrowDown 打开、上下/Home/End 遍历、Escape 关闭并还焦；按 data-host 只探测选中主机 | `tests/web/mount.test.js` |
 | 运行期 autoStart 只有主机表一个编辑入口；抽屉保存其他字段不携带/回滚 autoStart | `tests/web/form.test.js`、`tests/web/drawer.test.js`、`tests/web/mount.test.js` |
-| 批量同步原生 dialog：源/目标互斥、最多 200 目标；预览只显字段名、不把 secret 值放进 DOM；变更后旧预览失效，preview/apply 竞态与迟到响应都以 revision SSE 为真相，运行实例标明下次重启生效 | `tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js`、`scripts/ui-smoke.mjs` S14 |
+| 批量同步原生 dialog：源/目标互斥、最多 200 目标；预览只显字段名、不把 secret 值放进 DOM；apply 原样转发 preview token，源/任一目标变化后的 `CONFIG_STALE` 会就地要求重预览；preview/apply 竞态与迟到响应都以 revision/SSE 为真相，运行实例标明下次重启生效 | `tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js`、`scripts/ui-smoke.mjs` S14 |
 | 批量同步失败：pending 释放、旧结果作废、禁止重复应用；本次错误在原生 dialog 内可访问展示且按文本渲染，不会误取并发 toast | `tests/web/actions.test.js`、`tests/web/mount.test.js` |
-| 主机抽屉/全局默认保存：dirty 三方合并保留本地同字段草稿、跟随未编辑字段，保存只发最新 baseline 的 diff；`CONFIG_STALE` 保草稿，映射区间下限 1024 | `tests/web/drawer.test.js`、`tests/web/form.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
+| 主机抽屉/全局默认保存：字段级三方合并分别认领 workdir 与 inject 子字段，吸收未编辑字段、保留本地已编辑字段，双方等价改动不假冲突；保存只发相对最新 baseline 的用户 diff；`CONFIG_STALE` 保草稿，映射区间下限 1024 | `tests/web/drawer.test.js`、`tests/web/form.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
 | manager 当前监听端口与 configured port 分离；保存、跨标签更新、重连 snapshot 后「重启生效」提示均按两者真实差异派生 | `tests/web/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
 | 抽屉模态期间 toast 留在 aria-live 中但控件退出 Tab 环，确认框仍可操作；抽屉关闭恢复交互，toast 自动/手动关闭与 destroy 都清理定时器 | `tests/web/a11y.test.js`、`tests/web/toast-region.test.js` |
 | iframe 首载：本机/远端 loading 在 `load` 后隐藏，切页 keep-alive 不重置；recreate/reload 重现 loading，后端 phase 遮罩优先且 starting 无 URL 时有可访问占位 | `tests/web/panes.test.js`、`tests/web/a11y.test.js`、`tests/web/ui-live.test.js`、`scripts/ui-smoke.mjs` S4h/S7b |
@@ -213,6 +215,7 @@
 | 抽屉的 Esc 挂在 document 上（焦点在外也能关）、开着时后景 `inert`、关掉即放开 | `tests/web/a11y.test.js` |
 | 重渲染保焦：同控件还在→留在它上面；控件消失或被禁用→退到那一行；更新别人不掀我的焦点 | `tests/web/a11y.test.js`（垫片已如实建模「移除含焦点子树→焦点回 body」） |
 | 错误提示随输入更新（碰过的字段才实时报）、离开字段即校验、保存时全量校验 | `tests/web/mount.test.js` |
+| setup 收敛：完成与端口迁移精确进入 `#/hub`；异步配置与主机发现重渲染保留用户 raw 草稿、校验 error 与稳定身份焦点，程序化焦点恢复不重新夺取字段 ownership；端口/区间格式不同但语义等价时规范显示且不报冲突 | `tests/web/setup-wizard.test.js`、`tests/web/setup-mount.test.js`、`tests/web/router.test.js` |
 
 `tests/web/*` 喂的是手写 fixture，抓不到「后端改了字段名 / 少一层对象」这类漂移。
 `tests/integration/ui-live.test.js` 把 DOM 垫片接到真 manager（真 HTTP + 真 SSE 分帧，
@@ -247,7 +250,7 @@
 | 重连的快照结算在飞写操作：已 running 的快照解锁按钮，`starting` 的快照不解锁；恢复本身（横幅消失、写操作解禁、快照回灌）另有真浏览器场景 | `tests/web/store.test.js`、S9b |
 | 跨站防线：环回名判定、同源放行（含不带 Origin 的 CLI）、跨站各形态（换协议/换端口/`null`/非 URL/子域名障眼法）、Host 先判、不回显攻击者域名；集成侧验「跨站 start 被拒且主机确实没被拉起」与「非环回 Host 连 `/`、`/app.js` 一起拒」 | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
 | 按住期间不重建：鼠标与 Space 的原生激活都在抬起那一刻且要求同一个节点，按住期间表格必须一个节点都不动，松手后又必须追上（松手当场刷也不行——click 在 pointerup 之后才派发，当场重建会把这一次点击掐掉） | S4f、`tests/web/mount.test.js` |
-| 批量同步真键盘链路：打开后聚焦源选择，preview/apply 真请求，secret 不进 DOM；420px 对话框与主要操作不越界，Escape 关闭并还焦 | S14、`tests/integration/ui-live.test.js`、`tests/web/mount.test.js` |
+| 批量同步真键盘链路：打开后聚焦源选择，preview/apply 真请求，secret 不进 dialog 的文本、任意 attribute、动态表单 value 或递归可见的 open shadow root（closed shadow 保持浏览器边界）；360px 对话框与主要操作不越界，Escape 关闭并还焦 | S14、`tests/tooling.test.js`（S14 DOM 观测器）、`tests/integration/ui-live.test.js`、`tests/web/mount.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |
@@ -261,7 +264,7 @@
 
 | 交付面 | 覆盖 |
 |---|---|
-| 浏览器内假 manager 对齐产品路由、HostView.local、`POST /api/hosts/local`、单例约束、setup 身份保持与 SSE；状态机仍复用产品真身 | `tests/demo-contract.test.js`、`site/demo/demo-manager.js`、`site/demo/demo-routes.js` |
+| 浏览器内假 manager 对齐产品路由、HostView.local、`POST /api/hosts/local`、单例约束、setup 身份保持与 SSE；批量同步也真实 preview/apply、校验源/目标变化与 reset 后 token 过期，超过 64 个无关 preview 不驱逐有效 token；状态机仍复用产品真身 | `tests/demo-contract.test.js`、`site/demo/demo-manager.js`、`site/demo/demo-routes.js` |
 | mock dsh web 提供独立侧栏/工作区轮廓、query 标识与输入保活钩子，供 iframe 的真实加载与 keep-alive 判据使用 | `tests/demo-contract.test.js`、`site/mock-dsh-web/index.html` |
 | `site:check` 真浏览器走 Hub 首屏 → ready 一步拉起 → iframe → manage → 返回保活 → 断联/恢复 → setup，并检查资源 2xx 与控制台 | `scripts/site-check.mjs`；纯等待语义由 `tests/site-tooling.test.js` 覆盖 |
 | `site:shots` 固定生成 Hub dashboard、manage drawer、真实 mock iframe、远端 degraded 与带本机候选的 setup；图片路径由双语 README 链接检查兜住 | `scripts/site-shots.mjs`、`scripts/site-check.mjs` |
@@ -278,6 +281,8 @@
 | `setup-schema.js` 零 import（双侧共用） | 同上 |
 | 覆盖总闸与分档：`src/**` 行覆盖 ≥95%；`src/lib/**` ≥90%、`src/*.js` ≥75%、`src/web/` 非 components ≥80%；components 计入 overall、单独只报告 | 同上（parseLcov / DA 加权 / 94.9% 红与 95% 绿），执行入口 `npm run coverage:gate` |
 | lcov 必须包含磁盘上每个 `src/**/*.js`，缺任一文件或整份空报告即红；branch/function 只聚合诊断，不扩大行覆盖门槛 | 同上（sourceJsFiles / missingSourceFiles / coverageVerdict / BRH-BRF / FNH-FNF） |
+| lcov 重复 `SF` 与重复 `DA` 按「同一行任一命中即命中」合并；仅在磁盘不存在同名真实文件时剥离运行器附加的 `?query` / `#fragment`，磁盘上真实含 `?` / `#` 的 JS 必须分别计入分母 | `tests/architecture.test.js`（parseLcov 别名合并与真实文件反例） |
+| 覆盖率源码扫描 fail-closed：`src` 根、目录或文件为 symlink 都拒绝；轻量 lexer 能区分除法与 regex、字符串/template 与真实注释，按 ECMAScript Unicode 标识符边界识别 inline/trailing/template-expression 中的 Node/c8/istanbul suppression pragma | `tests/architecture.test.js`（sourceJsFiles / findCoverageSuppressions） |
 
 ## 8.1 工程化工具链（ENG-24 的交付面）
 
@@ -358,18 +363,19 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 
 ## 9. 门槛核对结果（最近一次 `npm run coverage:gate`）
 
-最近一次完整闸门为 **897/897** 通过，53 个 `src/**/*.js` 均有 lcov 记录；
+最近一次完整闸门为 **935/935** 通过，53 个 `src/**/*.js` 均有 lcov 记录；
 真浏览器 Chrome 检查 **26/26** 通过。
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---:|---:|---|
-| `src/**`（overall） | 13433/13994（95.99%） | ≥ 95% | 达标 |
-| `src/lib/**` | 97.65% | ≥ 90% | 达标 |
-| `src/*.js` | 92.96% | ≥ 75% | 达标 |
-| `src/web/`（不含 components） | 99.57% | ≥ 80% | 达标 |
-| `src/web/components/**` | 98.32% | 仅报告 | 不单独设卡，仍计入 overall |
+| `src/**`（overall） | 13794/14353（96.11%） | ≥ 95% | 达标 |
+| `src/lib/**` | 2011/2059（97.67%） | ≥ 90% | 达标 |
+| `src/*.js` | 5961/6406（93.05%） | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 2192/2201（99.59%） | ≥ 80% | 达标 |
+| `src/web/components/**` | 3630/3687（98.45%） | 仅报告 | 不单独设卡，仍计入 overall |
 
-全仓 branch 为 88.74%，function 为 93.34%；两者仅诊断，不参与门槛。
+全仓 branch 为 3776/4248（88.89%），function 为 1161/1241（93.55%）；
+两者仅诊断，不参与门槛。
 
 ## 10. 功能矩阵口径与豁免
 

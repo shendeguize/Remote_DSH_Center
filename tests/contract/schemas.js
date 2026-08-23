@@ -137,17 +137,40 @@ export const managerInfo = V.obj({
 export const hostConfigPutResponse = V.obj({ host: hostView });
 export const localHostCreateResponse = V.obj({ host: hostView });
 
-export const syncConfigResponse = V.obj({
+const syncConfigTarget = V.obj({
+  name: V.str({ min: 1 }),
+  changed: V.bool(),
+  changedFields: V.arr(V.enum_(SYNC_PROFILE_FIELDS)),
+});
+
+const syncConfigPreviewResponse = V.obj({
   source: V.str({ min: 1 }),
-  dryRun: V.bool(),
-  targets: V.arr(V.obj({
-    name: V.str({ min: 1 }),
-    changed: V.bool(),
-    changedFields: V.arr(V.enum_(SYNC_PROFILE_FIELDS)),
-  }), { min: 1, max: 200 }),
+  dryRun: V.custom((value) => value === true, 'expected true'),
+  previewToken: V.str({ min: 1 }),
+  targets: V.arr(syncConfigTarget, { min: 1, max: 200 }),
+  applied: V.arr(V.str({ min: 1 }), { max: 0 }),
+  hosts: V.arr(hostView, { max: 0 }),
+});
+
+const syncConfigApplyResponse = V.obj({
+  source: V.str({ min: 1 }),
+  dryRun: V.custom((value) => value === false, 'expected false'),
+  targets: V.arr(syncConfigTarget, { min: 1, max: 200 }),
   applied: V.arr(V.str({ min: 1 })),
   hosts: V.arr(hostView),
 });
+
+/**
+ * `dryRun` 是响应判别字段：preview 签发 token 且不应用任何主机，apply 则不回传 token。
+ * 非法/缺失判别字段先走最小对象校验，避免错误值被误分到任一合法分支。
+ */
+export const syncConfigResponse = (value, path, errs) => {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (value.dryRun === true) return syncConfigPreviewResponse(value, path, errs);
+    if (value.dryRun === false) return syncConfigApplyResponse(value, path, errs);
+  }
+  return V.obj({ dryRun: V.bool() }, { extra: true })(value, path, errs);
+};
 
 export const defaultsPutResponse = V.obj({
   defaults: defaultsView,

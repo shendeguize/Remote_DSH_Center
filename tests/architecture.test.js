@@ -13,8 +13,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  aggregateDiagnostics, coverageVerdict, evaluateTiers, formatReport, missingSourceFiles,
-  parseLcov, sourceJsFiles, TIERS,
+  aggregateDiagnostics, coverageVerdict, evaluateTiers, findCoverageSuppressions, formatReport,
+  missingSourceFiles, parseLcov, sourceJsFiles, TIERS,
 } from '../scripts/coverage-gate.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -111,6 +111,10 @@ test('前端代码不碰 node 内置模块（浏览器要能直接跑）', () =>
       assert.ok(!spec.startsWith('node:'), `${rel(file)} 引了 ${spec}`);
     }
   }
+});
+
+test('src/**/*.js 不使用 coverage suppression pragma（防止静态缩小覆盖率分母）', () => {
+  sourceJsFiles(ROOT);
 });
 
 test('零 npm 依赖：不引任何裸包名', () => {
@@ -249,6 +253,63 @@ test('parseLcov 逐文件算行覆盖', () => {
   assert.equal(parsed[1].functions, null, '缺 FNH/FNF 的旧记录仍可解析');
 });
 
+test('parseLcov 合并 query/fragment 路径别名与重复 DA：同一行任一命中即命中', (t) => {
+  const root = temporarySources(t, {
+    'src/alias.js': 'export const alias = true;\n',
+  });
+  const absolute = path.join(root, 'src', 'alias.js');
+  const duplicated = [
+    'SF:src/alias.js?worker=one',
+    'DA:1,0', 'DA:2,1', 'DA:2,0',
+    'end_of_record',
+    `SF:${absolute}?worker=two`,
+    'DA:1,1', 'DA:3,0',
+    'end_of_record',
+    'SF:src/alias.js#worker=three',
+    'DA:3,1',
+    'end_of_record',
+    '',
+  ].join('\n');
+
+  const parsed = parseLcov(duplicated, root);
+  assert.deepEqual(parsed.map((file) => file.file), ['src/alias.js']);
+  assert.deepEqual(
+    { found: parsed[0].found, hit: parsed[0].hit, pct: parsed[0].pct },
+    { found: 3, hit: 3, pct: 100 },
+  );
+});
+
+test('parseLcov 保留磁盘上真实含 ?/# 的 JS 文件，不与无后缀文件合并', (t) => {
+  const root = temporarySources(t, {
+    'src/same.js': 'export const base = 1;\n',
+    'src/same.js?variant.js': 'export const queryName = 1;\n',
+    'src/same.js#fragment.js': 'export const fragmentName = 1;\n',
+  });
+  const report = [
+    'SF:src/same.js', 'DA:1,1', 'DA:2,1', 'DA:3,1', 'end_of_record',
+    'SF:src/same.js?variant.js', 'DA:1,1', 'DA:2,0', 'DA:3,0', 'end_of_record',
+    'SF:src/same.js#fragment.js', 'DA:1,1', 'DA:2,1', 'DA:3,0', 'end_of_record',
+  ].join('\n');
+
+  const parsed = parseLcov(report, root);
+  assert.deepEqual(
+    parsed.map(({ file, found, hit }) => ({ file, found, hit })),
+    [
+      { file: 'src/same.js', found: 3, hit: 3 },
+      { file: 'src/same.js?variant.js', found: 3, hit: 1 },
+      { file: 'src/same.js#fragment.js', found: 3, hit: 2 },
+    ],
+  );
+  assert.deepEqual(
+    parsed.slice(0, 2).reduce(
+      (total, file) => ({ found: total.found + file.found, hit: total.hit + file.hit }),
+      { found: 0, hit: 0 },
+    ),
+    { found: 6, hit: 4 },
+    'same.js 与 same.js?variant.js 的真实 4/6 不能被错误合并成 3/3',
+  );
+});
+
 test('总闸与分档各判各的，components 计入 overall 但不计 web-logic', () => {
   const tiers = evaluateTiers(parseLcov(LCOV));
   const byId = Object.fromEntries(tiers.map((t) => [t.id, t]));
@@ -340,6 +401,25 @@ test('sourceJsFiles 扫全普通 src/**/*.js：含嵌套、忽略非 JS、结果
   assert.deepEqual(sourceJsFiles(root), ['src/nested/a.js', 'src/z.js']);
 });
 
+test('sourceJsFiles 在递归前拒绝 src 根目录软链', (t) => {
+  const root = temporarySources(t, {
+    'outside/untested.js': 'throw new Error("未覆盖");\n',
+  });
+  fs.symlinkSync(
+    path.join(root, 'outside'),
+    path.join(root, 'src'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+
+  assert.throws(
+    () => sourceJsFiles(root),
+    (error) => error.code === 'COVERAGE_SOURCE_SYMLINK'
+      && error.message.includes('src')
+      && error.message.includes('软链'),
+    'src 根目录本身是软链时，也必须在 readdir 解析目标前 fail-closed',
+  );
+});
+
 test('sourceJsFiles 对 src 树内文件与目录软链 fail-closed，并点名路径和原因', (t) => {
   const root = temporarySources(t, {
     'src/regular.js': 'export const regular = true;\n',
@@ -369,6 +449,130 @@ test('sourceJsFiles 对 src 树内文件与目录软链 fail-closed，并点名�
       && error.message.includes('src/linked-outside')
       && error.message.includes('软链'),
     '目录软链也必须在解析目标前 fail-closed',
+  );
+});
+
+test('sourceJsFiles 不把 strings/templates/regex 中的 pragma 字样当作 suppression 注释', (t) => {
+  const literals = [
+    "export const single = 'escaped \\' /* node:coverage disable */';",
+    'export const double = "escaped \\" // c8 ignore next";',
+    'export const template = `',
+    '/* c8 ignore next */',
+    '${`nested ${"// node:coverage disable"}`}',
+    '`;',
+    'export const blockRegex = /\\/\\* istanbul ignore file \\*\\//;',
+    'export const lineRegex = /\\/\\/ node:coverage disable/;',
+    '',
+  ].join('\n');
+  const root = temporarySources(t, {
+    'src/literals.js': literals,
+  });
+
+  assert.deepEqual(findCoverageSuppressions(literals), []);
+  assert.deepEqual(sourceJsFiles(root), ['src/literals.js']);
+});
+
+test('findCoverageSuppressions 按上下文区分关键字、属性名与除法/regex', () => {
+  const evasions = [
+    'of / /* node:coverage disable */ divisor;',
+    'obj.return / /* c8 ignore next */ divisor;',
+    'obj?.return / /* istanbul ignore next */ divisor;',
+    'for (of / /* istanbul ignore file */ divisor; ; ) consume(of);',
+  ].join('\n');
+  assert.deepEqual(findCoverageSuppressions(evasions), [
+    { line: 1, directive: 'node:coverage disable' },
+    { line: 2, directive: 'c8 ignore next' },
+    { line: 3, directive: 'istanbul ignore next' },
+    { line: 4, directive: 'istanbul ignore file' },
+  ]);
+
+  const realRegex = [
+    'function pattern() { return /\\/\\* node:coverage disable \\*\\//; }',
+    'for (const item of /\\/\\* c8 ignore next \\*\\//g) consume(item);',
+    'for (const key in /\\/\\/ istanbul ignore next/) consume(key);',
+    'for await (const item of /\\/\\/ c8 ignore next/) consume(item);',
+  ].join('\n');
+  assert.deepEqual(
+    findCoverageSuppressions(realRegex),
+    [],
+    'return 与 for-header 的 of/in 后可合法起 regex，regex 内伪 pragma 不是注释',
+  );
+});
+
+test('findCoverageSuppressions 按 ECMAScript Unicode 标识符边界区分除法与 regex', () => {
+  const evasions = [
+    'π / /* node:coverage disable */ divisor;',
+    'café / /* c8 ignore next */ divisor;',
+    '𐐀value / /* istanbul ignore next */ divisor;',
+    'a\u200Cb / /* node:coverage ignore next */ divisor;',
+    'a\u200Db / /* c8 ignore start */ divisor;',
+  ].join('\n');
+  assert.deepEqual(findCoverageSuppressions(evasions), [
+    { line: 1, directive: 'node:coverage disable' },
+    { line: 2, directive: 'c8 ignore next' },
+    { line: 3, directive: 'istanbul ignore next' },
+    { line: 4, directive: 'node:coverage ignore next' },
+    { line: 5, directive: 'c8 ignore start' },
+  ]);
+
+  const realRegex = [
+    'function unicodePattern() { return /π \\/\\* node:coverage disable \\*\\//u; }',
+    'for (const café of /𐐀 \\/\\* c8 ignore next \\*\\//u) consume(café);',
+    'for (const 𐐀value in /π \\/\\/ istanbul ignore next/u) consume(𐐀value);',
+  ].join('\n');
+  assert.deepEqual(
+    findCoverageSuppressions(realRegex),
+    [],
+    'Unicode 标识符前后真正的 regex 仍须完整跳过，regex 内伪 pragma 不是注释',
+  );
+});
+
+test('sourceJsFiles 拒绝 inline/trailing 及 template 表达式里的真实 suppression 注释', (t) => {
+  const entries = {
+    'src/inline.js': 'export const inline = 1; /* c8 ignore next */\n',
+    'src/trailing.js': 'export const trailing = 1; // node:coverage disable\n',
+    'src/nested.js': [
+      'export const nested = `${',
+      '  1 + (/* istanbul ignore next */ 2)',
+      '}`;',
+      '',
+    ].join('\n'),
+  };
+  const root = temporarySources(t, entries);
+
+  assert.deepEqual(findCoverageSuppressions(entries['src/inline.js']), [
+    { line: 1, directive: 'c8 ignore next' },
+  ]);
+  assert.deepEqual(findCoverageSuppressions(entries['src/trailing.js']), [
+    { line: 1, directive: 'node:coverage disable' },
+  ]);
+  assert.deepEqual(findCoverageSuppressions(entries['src/nested.js']), [
+    { line: 2, directive: 'istanbul ignore next' },
+  ]);
+  assert.throws(
+    () => sourceJsFiles(root),
+    (error) => error.code === 'COVERAGE_SUPPRESSION_PRAGMA'
+      && error.message.includes('src/inline.js:1 c8 ignore next')
+      && error.message.includes('src/trailing.js:1 node:coverage disable')
+      && error.message.includes('src/nested.js:2 istanbul ignore next'),
+    'pragma 在同行代码后或 template 表达式中仍是真注释，不能绕过静态闸门',
+  );
+});
+
+test('sourceJsFiles 静态拒绝 Node/c8/istanbul coverage suppression pragma 并列出文件与指令', (t) => {
+  const root = temporarySources(t, {
+    'src/node.js': '/* node:coverage disable */\nexport const node = true;\n',
+    'src/nested/c8.js': '/* c8 ignore next */\nexport const c8 = true;\n',
+    'src/nested/istanbul.js': '/* istanbul ignore file */\nexport const istanbul = true;\n',
+  });
+
+  assert.throws(
+    () => sourceJsFiles(root),
+    (error) => error.code === 'COVERAGE_SUPPRESSION_PRAGMA'
+      && error.message.includes('src/node.js:1 node:coverage disable')
+      && error.message.includes('src/nested/c8.js:1 c8 ignore next')
+      && error.message.includes('src/nested/istanbul.js:1 istanbul ignore file'),
+    'coverage suppression 会直接缩小 DA 分母，必须静态 fail-closed 并点名文件与指令',
   );
 });
 

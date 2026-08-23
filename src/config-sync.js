@@ -4,6 +4,7 @@
  * 只复制「下一次拉起」使用的 profile；身份、纳管、自启、本机映射和运行态一律不碰。
  */
 
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { DshError } from './lib/errors.js';
@@ -15,6 +16,9 @@ export const SYNC_PROFILE_FIELDS = Object.freeze([
   'inject.extraArgs',
   'inject.patches',
 ]);
+
+const PREVIEW_TOKEN_VERSION = 'v1';
+const PREVIEW_TOKEN_KEY = randomBytes(32);
 
 function cloneInject(value) {
   return {
@@ -52,6 +56,42 @@ function requireHost(config, name, role) {
   return host;
 }
 
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]),
+  );
+}
+
+function previewTokenForPlan(config, plan) {
+  const payload = {
+    source: {
+      name: plan.source,
+      profile: syncProfileOf(requireHost(config, plan.source, '源主机')),
+    },
+    targets: plan.targets
+      .map(({ name }) => ({
+        name,
+        profile: syncProfileOf(requireHost(config, name, '目标主机')),
+      }))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+  };
+  const digest = createHmac('sha256', PREVIEW_TOKEN_KEY)
+    .update('dsh-center/config-sync-preview/v1\0')
+    .update(JSON.stringify(canonicalize(payload)))
+    .digest('base64url');
+  return `${PREVIEW_TOKEN_VERSION}.${digest}`;
+}
+
+function tokensEqual(actual, expected) {
+  if (typeof actual !== 'string') return false;
+  const actualBytes = Buffer.from(actual, 'utf8');
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  return actualBytes.length === expectedBytes.length
+    && timingSafeEqual(actualBytes, expectedBytes);
+}
+
 export function planConfigSync(config, { source, targets } = {}) {
   if (typeof source !== 'string' || source === '') {
     throw new DshError('VALIDATION', '请选择源主机');
@@ -77,6 +117,26 @@ export function planConfigSync(config, { source, targets } = {}) {
     profile,
     targets: targetPlans,
   };
+}
+
+export function createConfigSyncPreview(config, request) {
+  const plan = planConfigSync(config, request);
+  return {
+    plan,
+    previewToken: previewTokenForPlan(config, plan),
+  };
+}
+
+export function requireConfigSyncPreview(config, request, previewToken) {
+  const preview = createConfigSyncPreview(config, request);
+  if (!tokensEqual(previewToken, preview.previewToken)) {
+    throw new DshError(
+      'CONFIG_STALE',
+      '配置同步预览已过期或无效，请重新预览后再应用',
+      { detail: '源主机或任一目标主机的同步 profile 可能已变化。' },
+    );
+  }
+  return preview.plan;
 }
 
 export function applyConfigSync(draft, plan) {

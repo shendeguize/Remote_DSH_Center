@@ -26,7 +26,7 @@ import { DEGRADED_ROUTES, ROUTE_IDS, dispatch, matchRoute } from '../site/demo/d
 import {
   accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
   managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
-  localHostCreateResponse,
+  localHostCreateResponse, syncConfigResponse,
 } from './contract/schemas.js';
 
 /** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
@@ -80,6 +80,15 @@ function normalize(host) {
   return { ...host, mappedUrl: `http://127.0.0.1:${host.tunnel.localPort}/` };
 }
 
+function assertSyncContract(body, label) {
+  assertShape(
+    syncConfigResponse,
+    { ...body, hosts: body.hosts.map(normalize) },
+    label,
+  );
+  return body.previewToken;
+}
+
 const req = (manager, method, pathname, { body, query } = {}) => dispatch(manager, {
   method, pathname, body, query: new URLSearchParams(query ?? ''),
 });
@@ -117,8 +126,8 @@ test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () =>
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 15 个真实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 15, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 16 个真实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 16, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -130,6 +139,7 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['POST', '/api/setup', 'setup'],
     ['POST', '/api/hosts/probe', 'probe-all'],
     ['POST', '/api/hosts/local', 'local-create'],
+    ['POST', '/api/hosts/sync-config', 'sync-config'],
     ['POST', '/api/hosts/gpu-a100/probe', 'probe'],
     ['POST', '/api/hosts/gpu-a100/start', 'start'],
     ['POST', '/api/hosts/gpu-a100/stop', 'stop'],
@@ -342,6 +352,296 @@ test('demo 添加本机后重跑 setup，HostView 与 config 始终保留 local 
   assert.equal(host.config.local, true, 'HostView.config.local 应与顶层 identity 一致');
   assert.equal(saved.local, true, 'setup 落下的新 config 也应保留本机 identity');
   assert.equal(host.local, host.config.local);
+});
+
+test('POST sync-config preview：返回五字段差异与 opaque token，且不改配置、revision 或 SSE', () => {
+  const r = rig();
+  const secret = 'DEMO-PREVIEW-MUST-NOT-LEAK';
+  req(r.manager, 'PUT', '/api/hosts/gpu-a100/config', {
+    body: {
+      inject: {
+        env: { HF_HOME: '/data/hf', API_TOKEN: secret },
+        extraArgs: ['--verbose'],
+        patches: ['/private/source.patch'],
+      },
+    },
+  });
+  const before = r.manager.config();
+  const revisionBefore = r.manager.revision;
+  const frameCountBefore = r.frames.length;
+
+  const preview = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: 'gpu-a100',
+      targets: ['gpu-4090-daily', 'legacy-box'],
+      dryRun: true,
+    },
+  });
+
+  assert.equal(preview.status, 200);
+  const token = assertSyncContract(preview.json, 'POST sync-config preview');
+  assert.match(token, /^v1\.[A-Za-z0-9_-]{43}$/);
+  assert.doesNotMatch(token, new RegExp(secret));
+  assert.doesNotMatch(JSON.stringify(preview.json), new RegExp(secret));
+  assert.deepEqual(preview.json.targets, [
+    {
+      name: 'gpu-4090-daily',
+      changed: true,
+      changedFields: ['workdir', 'inject.env', 'inject.extraArgs', 'inject.patches'],
+    },
+    {
+      name: 'legacy-box',
+      changed: true,
+      changedFields: ['remoteWebPort', 'workdir', 'inject.env', 'inject.extraArgs', 'inject.patches'],
+    },
+  ]);
+  assert.deepEqual(preview.json.applied, []);
+  assert.deepEqual(preview.json.hosts, []);
+  assert.deepEqual(r.manager.config(), before);
+  assert.equal(r.manager.revision, revisionBefore);
+  assert.equal(r.frames.length, frameCountBefore, 'preview 不发 SSE');
+
+  const reordered = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: 'gpu-a100',
+      targets: ['legacy-box', 'gpu-4090-daily'],
+      dryRun: true,
+    },
+  });
+  assert.equal(reordered.json.previewToken, token, '目标顺序不改变选择集合，token 应保持稳定');
+  assert.deepEqual(reordered.json.targets.map(({ name }) => name), ['legacy-box', 'gpu-4090-daily']);
+});
+
+test('POST sync-config apply：整单复制 profile，保留身份/启停/端口/运行态并广播目标 HostView', async () => {
+  const r = rig();
+  const source = r.manager.getHost('legacy-box');
+  const before = new Map(
+    ['gpu-a100', 'cpu-build'].map((name) => [name, r.manager.getHost(name)]),
+  );
+  const preview = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: source.name,
+      targets: ['gpu-a100', 'cpu-build'],
+      dryRun: true,
+    },
+  });
+  const frameStart = r.frames.length;
+
+  const applied = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: source.name,
+      targets: ['gpu-a100', 'cpu-build'],
+      dryRun: false,
+      previewToken: preview.json.previewToken,
+    },
+  });
+
+  assert.equal(applied.status, 200);
+  assert.equal(assertSyncContract(applied.json, 'POST sync-config apply'), undefined);
+  assert.deepEqual(applied.json.applied, ['gpu-a100', 'cpu-build']);
+  assert.deepEqual(applied.json.hosts.map(({ name }) => name), ['gpu-a100', 'cpu-build']);
+
+  const sourceProfile = {
+    remoteWebPort: source.config.remoteWebPort,
+    workdir: source.config.workdir,
+    inject: source.config.inject,
+  };
+  for (const name of ['gpu-a100', 'cpu-build']) {
+    const oldHost = before.get(name);
+    const host = r.manager.getHost(name);
+    assert.deepEqual({
+      remoteWebPort: host.config.remoteWebPort,
+      workdir: host.config.workdir,
+      inject: host.config.inject,
+    }, sourceProfile, `${name} 应复制完整 profile`);
+    for (const field of ['local', 'enabled', 'autoStart', 'localPort']) {
+      assert.deepEqual(host.config[field], oldHost.config[field], `${name}.${field} 不得被同步`);
+    }
+    assert.deepEqual(host.sshInfo, oldHost.sshInfo, `${name} 身份不得变化`);
+    assert.equal(host.phase, oldHost.phase, `${name} 运行 phase 不得变化`);
+  }
+
+  const runningBefore = before.get('gpu-a100');
+  const runningAfter = r.manager.getHost('gpu-a100');
+  assert.deepEqual(runningAfter.web, runningBefore.web, '运行中进程继续使用旧启动参数');
+  assert.deepEqual(runningAfter.tunnel, runningBefore.tunnel, '运行中隧道不得重建');
+  assert.equal(runningAfter.mappedUrl, runningBefore.mappedUrl);
+  assert.equal(runningAfter.web.port, 8899);
+  assert.equal(runningAfter.effectiveRemotePort, 18899, '新 profile 已供下次拉起使用');
+
+  const syncFrames = r.frames.slice(frameStart);
+  assert.deepEqual(
+    syncFrames.map((frame) => [frame.type, frame.data.host?.name]),
+    [['host-changed', 'gpu-a100'], ['host-changed', 'cpu-build']],
+    '与产品 updateConfig 一致：host-only 配置变更只广播受影响 HostView',
+  );
+  assert.equal(syncFrames.some((frame) => frame.type === 'config-changed'), false);
+  assert.equal(syncFrames.some((frame) => frame.type === 'operation-done'), false);
+
+  req(r.manager, 'POST', '/api/hosts/gpu-a100/restart');
+  await r.settle();
+  assert.equal(r.manager.getHost('gpu-a100').web.port, 18899, '运行中目标应在下次重启使用同步后的端口');
+});
+
+test('POST sync-config apply：超过 64 个无关 preview 不得驱逐仍有效 token', () => {
+  const r = rig();
+  const request = {
+    source: 'gpu-a100',
+    targets: ['gpu-4090-daily'],
+    dryRun: true,
+  };
+  const previewToken = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: request,
+  }).json.previewToken;
+
+  for (let i = 0; i < 65; i += 1) {
+    req(r.manager, 'PUT', '/api/hosts/legacy-box/config', {
+      body: { workdir: `/unrelated-preview-${i}` },
+    });
+    req(r.manager, 'POST', '/api/hosts/sync-config', {
+      body: {
+        source: 'legacy-box',
+        targets: ['cpu-build'],
+        dryRun: true,
+      },
+    });
+  }
+
+  const applied = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: { ...request, dryRun: false, previewToken },
+  });
+  assert.equal(applied.status, 200);
+  assert.deepEqual(applied.json.applied, ['gpu-4090-daily']);
+});
+
+test('POST sync-config apply：源/目标 profile 或目标选择变化均整单 CONFIG_STALE', () => {
+  const request = {
+    source: 'gpu-a100',
+    targets: ['gpu-4090-daily'],
+    dryRun: true,
+  };
+
+  const sourceChanged = rig();
+  const sourceToken = req(sourceChanged.manager, 'POST', '/api/hosts/sync-config', { body: request }).json.previewToken;
+  req(sourceChanged.manager, 'PUT', '/api/hosts/gpu-a100/config', { body: { workdir: '/changed-source' } });
+  const sourceTargetBefore = sourceChanged.manager.getHost('gpu-4090-daily');
+  const sourceFrameCount = sourceChanged.frames.length;
+  const sourceErr = grab(() => req(sourceChanged.manager, 'POST', '/api/hosts/sync-config', {
+    body: { ...request, dryRun: false, previewToken: sourceToken },
+  }));
+  assert.equal(sourceErr.status, 409);
+  assert.equal(sourceErr.code, 'CONFIG_STALE');
+  assert.match(sourceErr.message, /重新预览|预览.*过期/);
+  assert.ok(sourceErr.detail);
+  assert.deepEqual(sourceChanged.manager.getHost('gpu-4090-daily'), sourceTargetBefore);
+  assert.equal(sourceChanged.frames.length, sourceFrameCount, 'stale 整单不得发出目标更新');
+
+  const targetChanged = rig();
+  const targetToken = req(targetChanged.manager, 'POST', '/api/hosts/sync-config', { body: request }).json.previewToken;
+  req(targetChanged.manager, 'PUT', '/api/hosts/gpu-4090-daily/config', { body: { workdir: '/changed-target' } });
+  const changedTargetBefore = targetChanged.manager.getHost('gpu-4090-daily');
+  const targetErr = grab(() => req(targetChanged.manager, 'POST', '/api/hosts/sync-config', {
+    body: { ...request, dryRun: false, previewToken: targetToken },
+  }));
+  assert.equal(targetErr.status, 409);
+  assert.equal(targetErr.code, 'CONFIG_STALE');
+  assert.deepEqual(targetChanged.manager.getHost('gpu-4090-daily'), changedTargetBefore);
+
+  const selectionChanged = rig();
+  const selectionToken = req(selectionChanged.manager, 'POST', '/api/hosts/sync-config', { body: request }).json.previewToken;
+  const selectionBefore = selectionChanged.manager.config();
+  const selectionErr = grab(() => req(selectionChanged.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: 'gpu-a100',
+      targets: ['cpu-build'],
+      dryRun: false,
+      previewToken: selectionToken,
+    },
+  }));
+  assert.equal(selectionErr.status, 409);
+  assert.equal(selectionErr.code, 'CONFIG_STALE');
+  assert.deepEqual(selectionChanged.manager.config(), selectionBefore);
+
+  const unrelated = rig();
+  const unrelatedToken = req(unrelated.manager, 'POST', '/api/hosts/sync-config', { body: request }).json.previewToken;
+  req(unrelated.manager, 'PUT', '/api/hosts/gpu-4090-daily/config', { body: { enabled: false } });
+  const unrelatedApply = req(unrelated.manager, 'POST', '/api/hosts/sync-config', {
+    body: { ...request, dryRun: false, previewToken: unrelatedToken },
+  });
+  assert.equal(unrelatedApply.status, 200, '同步范围外字段不应让 preview 过期');
+  assert.equal(unrelated.manager.getHost('gpu-4090-daily').config.enabled, false);
+
+  const reset = rig();
+  const resetToken = req(reset.manager, 'POST', '/api/hosts/sync-config', { body: request }).json.previewToken;
+  reset.manager.reset();
+  const resetErr = grab(() => req(reset.manager, 'POST', '/api/hosts/sync-config', {
+    body: { ...request, dryRun: false, previewToken: resetToken },
+  }));
+  assert.equal(resetErr.status, 409, 'demo reset 应更换 session salt，使旧 preview token 失效');
+  assert.equal(resetErr.code, 'CONFIG_STALE');
+});
+
+test('POST sync-config 边界：schema/语义错误不改状态，no-op 不发事件', () => {
+  const r = rig();
+  const before = r.manager.config();
+  const revisionBefore = r.manager.revision;
+  const frameCountBefore = r.frames.length;
+  const invalid = [
+    [undefined, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: [], dryRun: true }, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: ['gpu-4090-daily'], dryRun: 'true' }, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: ['gpu-4090-daily'], dryRun: true, extra: true }, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: Array(201).fill('cpu-build'), dryRun: true }, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: ['cpu-build', 'cpu-build'], dryRun: true }, 400, 'VALIDATION'],
+    [{ source: 'gpu-a100', targets: ['gpu-a100'], dryRun: true }, 400, 'VALIDATION'],
+    [{ source: 'missing', targets: ['cpu-build'], dryRun: true }, 404, 'NOT_FOUND'],
+    [{ source: 'gpu-a100', targets: ['missing'], dryRun: true }, 404, 'NOT_FOUND'],
+    [{ source: 'gpu-a100', targets: ['cpu-build'], dryRun: false }, 400, 'VALIDATION'],
+    [{
+      source: 'gpu-a100',
+      targets: ['cpu-build'],
+      dryRun: false,
+      previewToken: 'wrong-preview-token',
+    }, 409, 'CONFIG_STALE'],
+  ];
+  for (const [body, status, code] of invalid) {
+    const err = grab(() => req(r.manager, 'POST', '/api/hosts/sync-config', { body }));
+    assert.equal(err.status, status, JSON.stringify(body));
+    assert.equal(err.code, code, JSON.stringify(body));
+  }
+  assert.deepEqual(r.manager.config(), before);
+  assert.equal(r.manager.revision, revisionBefore);
+  assert.equal(r.frames.length, frameCountBefore);
+
+  const noOpPreview = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: { source: 'cpu-build', targets: ['gpu-4090-daily'], dryRun: true },
+  });
+  const noOp = req(r.manager, 'POST', '/api/hosts/sync-config', {
+    body: {
+      source: 'cpu-build',
+      targets: ['gpu-4090-daily'],
+      dryRun: false,
+      previewToken: noOpPreview.json.previewToken,
+    },
+  });
+  assert.equal(noOp.status, 200);
+  assertSyncContract(noOp.json, 'POST sync-config no-op');
+  assert.deepEqual(noOp.json.targets, [{
+    name: 'gpu-4090-daily',
+    changed: false,
+    changedFields: [],
+  }]);
+  assert.deepEqual(noOp.json.applied, []);
+  assert.deepEqual(noOp.json.hosts.map(({ name }) => name), ['gpu-4090-daily']);
+  assert.equal(r.manager.revision, revisionBefore);
+  assert.equal(r.frames.length, frameCountBefore, 'preview 与 no-op apply 都不发事件');
+
+  const setup = rig({ setupCompleted: false });
+  const gated = grab(() => req(setup.manager, 'POST', '/api/hosts/sync-config', {
+    body: { source: 'gpu-a100', targets: ['cpu-build'], dryRun: true },
+  }));
+  assert.equal(gated.status, 409);
+  assert.equal(gated.code, 'SETUP_REQUIRED');
 });
 
 test('PUT /api/hosts/:name/config：回传 HostView，且拒收 localPort 与未知键', () => {

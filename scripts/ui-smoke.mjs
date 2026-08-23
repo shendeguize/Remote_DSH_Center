@@ -129,6 +129,72 @@ export function evaluateS12({
   };
 }
 
+/**
+ * 只采集某个 DOM 子树本身可观察到的字符串。
+ *
+ * textContent 看不到动态表单值，也不会穿过 shadow boundary；outerHTML 又看不到通过
+ * property 改过但没同步回 attribute 的 value。这里逐层进入可访问的 open shadowRoot，
+ * 并故意不读页面全局、网络响应或业务 JS 对象。closed shadow root 按浏览器标准不会从
+ * `element.shadowRoot` 暴露，属于自动化无法观察的浏览器边界。
+ */
+export function snapshotDomObservables(root) {
+  if (!root) return { text: '', attributes: [], values: [] };
+  const texts = [];
+  const attributes = [];
+  const values = [];
+  const formTags = new Set(['input', 'textarea', 'select']);
+
+  const visit = (scope) => {
+    texts.push(String(scope.textContent ?? ''));
+    const elements = [
+      ...(scope.tagName ? [scope] : []),
+      ...(scope.querySelectorAll?.('*') ?? []),
+    ];
+    for (const element of elements) {
+      const tag = String(element.tagName ?? '').toLowerCase();
+      for (const attribute of element.attributes ?? []) {
+        attributes.push({
+          tag,
+          name: String(attribute.name ?? ''),
+          value: String(attribute.value ?? ''),
+        });
+      }
+      if (formTags.has(tag)) {
+        values.push({
+          tag,
+          type: String(element.type ?? ''),
+          value: String(element.value ?? ''),
+        });
+      }
+      // 浏览器只会为 open mode 返回 ShadowRoot；closed mode 在这里是 null，无法越界读取。
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+
+  visit(root);
+  return { text: texts.join('\n'), attributes, values };
+}
+
+/** 回报 secret 出现在 DOM 哪一类可观察面；不扫描快照上的任何额外诊断字段。 */
+export function findSecretInDomSnapshot(snapshot, secret) {
+  const needle = String(secret ?? '');
+  if (!needle) return [];
+  const leaks = [];
+  if (String(snapshot?.text ?? '').includes(needle)) leaks.push('text');
+  for (const attribute of snapshot?.attributes ?? []) {
+    if (String(attribute.value ?? '').includes(needle)) {
+      leaks.push(`${attribute.tag || 'element'}[${attribute.name || 'attribute'}]`);
+    }
+  }
+  for (const control of snapshot?.values ?? []) {
+    if (String(control.value ?? '').includes(needle)) {
+      const type = control.type ? `[type=${control.type}]` : '';
+      leaks.push(`${control.tag || 'control'}${type}.value`);
+    }
+  }
+  return leaks;
+}
+
 async function fixtureTabNames(rig) {
   const res = await rig.api('GET', '/api/hosts');
   return primaryHosts(res.json?.hosts ?? []).map((host) => host.name);
@@ -468,14 +534,16 @@ async function main() {
         );
         const preview = await cdp.eval(`
           const dialog = document.querySelector('.config-sync-dialog');
+          const snapshot = (${snapshotDomObservables.toString()})(dialog);
           return {
-            text: dialog.textContent,
+            snapshot,
             active: document.activeElement?.className ?? '',
             summary: dialog.querySelector('.config-sync-change-summary')?.textContent ?? '',
           };
         `);
         assert(/环境变量/.test(preview.summary), `预览未列出环境变量差异：${preview.summary}`);
-        assert(!preview.text.includes(sentinel), 'secret 值泄漏到批量同步 DOM');
+        const secretLeaks = findSecretInDomSnapshot(preview.snapshot, sentinel);
+        assert(secretLeaks.length === 0, `secret 值泄漏到批量同步 DOM：${secretLeaks.join('、')}`);
 
         await cdp.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 720, deviceScaleFactor: 1, mobile: false });
         const narrow = await cdp.eval(`

@@ -9,8 +9,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  DEFAULTS, MANAGER_INFO, findButton, flush, hostView, mount,
+  DEFAULTS, MANAGER_INFO, findButton, flush, hostView, mount, running,
 } from './app-harness.js';
+import { LAST_HOST_KEY, rootRouteTarget } from '../../src/web/router.js';
 
 const SETUP_INFO = { ...MANAGER_INFO, setupCompleted: false, setupGateActive: true };
 
@@ -29,6 +30,32 @@ const cancelLink = (wizard) => wizard.querySelector('.wizard-foot a.link');
 function typeInto(node, value) {
   node.value = value;
   node.dispatchEvent({ type: 'input', target: node });
+}
+
+/** 垫片的 focus() 默认只改 activeElement；这里补齐真实浏览器会同步派发的 focus 事件。 */
+function installBrowserFocusEvents(t, node) {
+  const proto = Object.getPrototypeOf(node);
+  const original = proto.focus;
+  proto.focus = function focusWithEvent() {
+    original.call(this);
+    this.dispatchEvent({ type: 'focus', target: this });
+  };
+  t.after(() => { proto.focus = original; });
+}
+
+function installLastHost(t, name) {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const storage = {
+    getItem(key) {
+      return key === LAST_HOST_KEY ? name : null;
+    },
+    setItem() {},
+  };
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, 'localStorage', previous);
+    else delete globalThis.localStorage;
+  });
 }
 
 function localPresentationHost(name, phase, probePatch) {
@@ -199,6 +226,33 @@ test('同一本机 fixture 在管理表、overflow、setup 表共享状态与提
   }
 });
 
+test('探测异步重渲染按稳定身份恢复标题与复选框焦点', async (t) => {
+  const { dom, es, wizard: w } = await mountSetup(t, { hosts: [hostView('gpu-1')] });
+  const wizard = w();
+
+  next(wizard).click();
+  next(wizard).click();
+  await flush();
+  es().open();
+
+  const title = wizard.querySelector('.step-title');
+  title.focus();
+  es().send('host-changed', { revision: 5, host: hostView('gpu-1', { phase: 'no_dsh' }) });
+  await flush();
+  assert.equal(
+    dom.document.activeElement,
+    wizard.querySelector('.step-title'),
+    '标题没有字段 key，重渲染后必须仍回标题，不能误配首个无 key 复选框',
+  );
+
+  const enabled = wizard.querySelector('.setup-hosts tbody tr').querySelectorAll('input')[0];
+  enabled.focus();
+  es().send('host-changed', { revision: 6, host: hostView('gpu-1', { phase: 'ready' }) });
+  await flush();
+  const currentEnabled = wizard.querySelector('.setup-hosts tbody tr').querySelectorAll('input')[0];
+  assert.equal(dom.document.activeElement, currentEnabled, '复选框继续按稳定 aria-label 恢复焦点');
+});
+
 test('换步把焦点带到新步骤的标题上（前进、后退都算）', async (t) => {
   const { dom, wizard: w } = await mountSetup(t, { hosts: [hostView('gpu-1')] });
   const wizard = w();
@@ -226,6 +280,84 @@ test('换步把焦点带到新步骤的标题上（前进、后退都算）', as
   typeInto(port, '70000');
   await flush();
   assert.equal(dom.document.activeElement, port, '还在填这个字段，焦点不许被标题夺走');
+});
+
+test('配置异步更新保留用户正在输入的非法端口草稿、错误与焦点', async (t) => {
+  const { app, dom, wizard: w } = await mountSetup(t);
+  const wizard = w();
+  const port = fields(wizard)[0];
+
+  port.focus();
+  typeInto(port, '');
+  assert.equal(next(wizard).disabled, true);
+  assert.match(wizard.querySelectorAll('.field-error')[0].textContent, /请输入整数/);
+
+  app.store.setDefaults({ ...DEFAULTS, localPortRange: [18_001, 18_099] });
+  app.store.setManagerConfig({ port: 7799 });
+
+  const [currentPort, currentRange] = fields(wizard);
+  assert.equal(currentPort.value, '', '外部配置变化不能用合法值覆盖用户的临时空值');
+  assert.equal(currentRange.value, '18001-18099', '同一轮更新仍须刷新未被用户接管的字段');
+  assert.match(wizard.querySelectorAll('.field-error')[0].textContent, /请输入整数/);
+  assert.equal(next(wizard).disabled, true, '原始输入错误仍须阻止前进');
+  assert.equal(dom.document.activeElement, currentPort, '重渲染后焦点仍在用户接管的字段');
+  assert.match(wizard.querySelector('.wizard-notice').textContent, /外部配置已更新.*草稿已保留/);
+});
+
+test('等价收敛后的程序化焦点恢复不重夺 ownership，用户重新 focus 才接管', async (t) => {
+  const { app, dom, wizard: w } = await mountSetup(t);
+  const wizard = w();
+  const port = fields(wizard)[0];
+  installBrowserFocusEvents(t, port);
+
+  port.focus();
+  typeInto(port, '07799');
+  app.store.setManagerConfig({ port: 7799 });
+
+  let currentPort = fields(wizard)[0];
+  assert.equal(currentPort.value, '7799', '语义相等后统一显示 schema 的规范格式');
+  assert.equal(wizard.querySelector('.wizard-notice').hidden, true, '格式差异不能冒充配置冲突');
+  assert.equal(next(wizard).disabled, false);
+  assert.equal(dom.document.activeElement, currentPort, '规范化重渲染仍须保持字段焦点');
+
+  app.store.setManagerConfig({ port: 7800 });
+  currentPort = fields(wizard)[0];
+  assert.equal(currentPort.value, '7800', '程序化恢复 focus 不能重新 claim，后续外部值仍应吸收');
+  assert.equal(wizard.querySelector('.wizard-notice').hidden, true);
+
+  wizard.querySelector('.step-title').focus();
+  currentPort.focus();
+  app.store.setManagerConfig({ port: 7801 });
+  const userOwnedPort = fields(wizard)[0];
+  assert.equal(userOwnedPort.value, '7800', '用户重新聚焦后才重新接管并保留本地显示');
+  assert.match(wizard.querySelector('.wizard-notice').textContent, /外部配置已更新.*草稿已保留/);
+  assert.equal(dom.document.activeElement, userOwnedPort);
+});
+
+test('端口区间等价格式与外部规范值语义相等：不报冲突并收敛显示', async (t) => {
+  const { app, dom, wizard: w } = await mountSetup(t);
+  const wizard = w();
+  const range = fields(wizard)[1];
+
+  range.focus();
+  typeInto(range, '18001 18099');
+  app.store.setDefaults({ ...DEFAULTS, localPortRange: [18_001, 18_099] });
+  app.store.setManagerConfig({ port: SETUP_INFO.port });
+
+  const currentRange = fields(wizard)[1];
+  assert.equal(currentRange.value, '18001-18099', '等价区间统一显示 schema format');
+  assert.equal(wizard.querySelector('.wizard-notice').hidden, true);
+  assert.equal(next(wizard).disabled, false);
+  assert.equal(dom.document.activeElement, currentRange);
+});
+
+test('配置异步更新仍回灌尚未被用户接管的 manager 端口', async (t) => {
+  const { app, wizard: w } = await mountSetup(t);
+  const wizard = w();
+
+  assert.equal(fields(wizard)[0].value, String(SETUP_INFO.port));
+  app.store.setManagerConfig({ port: 7799 });
+  assert.equal(fields(wizard)[0].value, '7799', '未编辑初始预填必须吸收 configuredPort');
 });
 
 test('提交：POST /api/setup 用预览内容，端口未变则精确进入 #/hub', async (t) => {
@@ -368,9 +500,16 @@ test('提交后迟到的探测结果不改已冻结的快照', async (t) => {
 
 test('端口改变：进迁移页，只探新 origin，成功后跳转', async (t) => {
   const target = 'http://127.0.0.1:6001';
+  const targetHosts = [running('gpu-1')];
   const probes = [];
+  installLastHost(t, 'gpu-1');
+  assert.equal(
+    rootRouteTarget(targetHosts),
+    '#/host/gpu-1',
+    '前提：目标 origin 的根路由会按 lastHost 恢复主机页',
+  );
   const { calls, dom, wizard: w } = await mountSetup(t, {
-    hosts: [],
+    hosts: targetHosts,
     responder: ({ path, method }) => {
       if (path === '/api/setup' && method === 'POST') {
         return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, port: 6001, portChanged: true, restartRequired: false, restarting: true }) };
@@ -405,7 +544,7 @@ test('端口改变：进迁移页，只探新 origin，成功后跳转', async (
     await new Promise((r) => { setTimeout(r, 20); });
   }
 
-  assert.equal(dom.window.location.href, `${target}/#/`, '只在新 origin 确认就绪后跳转');
+  assert.equal(dom.window.location.href, `${target}/#/hub`, '必须绕过会恢复 lastHost 的目标根路由');
   assert.equal(calls.filter((c) => c.path === '/api/setup').length, 1, '迁移期间绝不重复 POST setup');
   assert.ok(probes.length >= 2, '失败的一轮不算完');
 });
