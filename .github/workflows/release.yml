@@ -27,11 +27,11 @@ jobs:
 
     steps:
       # 守卫三要判「tag 提交是否包含于 main」，得有完整历史
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
@@ -74,7 +74,7 @@ jobs:
           cat dist/SHA256SUMS
 
       - name: 上传产物给下游 job
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bundles
           path: dist/
@@ -83,7 +83,7 @@ jobs:
 
       # Release 正文来自 CHANGELOG，由守卫截好；release job 不重新 checkout 也能拿到
       - name: 上传 Release 正文
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-notes
           path: ${{ runner.temp }}/release-body.md
@@ -92,7 +92,7 @@ jobs:
 
       - name: 失败时留下浏览器截图
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-browser-shots
           path: |
@@ -120,11 +120,11 @@ jobs:
 
     steps:
       # 只用来跑下面那段断言脚本；被验的产物一律用它自带的 node 跑
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: bundles
           path: dist
@@ -200,17 +200,26 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: bundles
           path: dist
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-notes
           path: notes
+
+      - name: 为发布产物生成构建溯源证明
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
 
       - name: 建 GitHub Release
         env:

@@ -44,6 +44,137 @@ import { Cdp } from '../scripts/lib/browser.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'src', 'cli.js');
+const WORKFLOW_DIR = path.join(ROOT, '.github', 'workflows');
+
+function workflowYamlFiles(dir = WORKFLOW_DIR) {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...workflowYamlFiles(full));
+    else if (entry.isFile() && /\.ya?ml$/.test(entry.name)) files.push(full);
+  }
+  return files.sort();
+}
+
+function workflowRecords() {
+  return workflowYamlFiles().map((file) => ({
+    file,
+    name: path.relative(ROOT, file),
+    text: fs.readFileSync(file, 'utf8'),
+  }));
+}
+
+function parseWorkflowUsesLine(line, location) {
+  const body = line.trimStart();
+  if (body === '' || body.startsWith('#') || /^-\s+#/.test(body)) return null;
+
+  const hasUsesKey = /(?:["']uses["']|(?<![A-Za-z0-9_-])uses)\s*:/.test(body)
+    || /^-uses\s*:/.test(body);
+  if (!hasUsesKey) return null;
+
+  const canonical = /^(?:-\s+)?uses:(.*)$/.exec(body);
+  if (!canonical) {
+    throw new Error(
+      `${location} 的 active uses key 不符合规范 block form（- uses: …）：${line.trim()}`,
+    );
+  }
+  return { value: canonical[1].trim() };
+}
+
+function activeWorkflowUses({ name, text }) {
+  const uses = [];
+  for (const [index, line] of text.split('\n').entries()) {
+    const parsed = parseWorkflowUsesLine(line, `${name}:${index + 1}`);
+    if (!parsed) continue;
+    const commentAt = parsed.value.indexOf(' #');
+    let reference = (commentAt === -1 ? parsed.value : parsed.value.slice(0, commentAt)).trim();
+    const quote = reference[0];
+    if ((quote === "'" || quote === '"') && reference.at(-1) === quote) {
+      reference = reference.slice(1, -1);
+    }
+    uses.push({
+      name,
+      line: index + 1,
+      reference,
+      comment: commentAt === -1 ? '' : parsed.value.slice(commentAt + 2).trim(),
+    });
+  }
+  return uses;
+}
+
+function actionPinProblems(uses) {
+  const problems = [];
+  for (const { name, line, reference, comment } of uses) {
+    if (!reference.startsWith('actions/')) {
+      problems.push(`${name}:${line} 不是 actions/*，无法验证 40 位 SHA pin：${reference}`);
+      continue;
+    }
+    if (!/^actions\/[^@\s]+@[0-9a-f]{40}$/.test(reference)) {
+      problems.push(`${name}:${line} 没有钉死 40 位 SHA：${reference}`);
+    }
+    if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\s+\S.*)?$/.test(comment)) {
+      problems.push(`${name}:${line} 缺少可读版本注释：${reference}`);
+    }
+  }
+  return problems;
+}
+
+function workflowJobChunks(text) {
+  const jobsAt = text.indexOf('\njobs:');
+  if (jobsAt === -1) return [];
+  const body = text.slice(jobsAt);
+  const heads = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)];
+  return heads.map((head, index) => ({
+    id: head[1],
+    text: body.slice(head.index, heads[index + 1]?.index ?? body.length),
+  }));
+}
+
+function workflowStepChunks(jobText) {
+  const lines = jobText.split('\n');
+  const stepsAt = lines.findIndex((line) => line === '    steps:');
+  if (stepsAt === -1) return [];
+  const heads = [];
+  for (let index = stepsAt + 1; index < lines.length; index += 1) {
+    if (/^ {6}-\s/.test(lines[index])) heads.push(index);
+  }
+  return heads.map((from, index) => (
+    lines.slice(from, heads[index + 1] ?? lines.length).join('\n')
+  ));
+}
+
+function workflowStepRun(stepText) {
+  const lines = stepText.split('\n');
+  const runAt = lines.findIndex((line) => /^ {8}run:/.test(line));
+  if (runAt === -1) return '';
+  const inline = lines[runAt].slice('        run:'.length).trim();
+  if (inline !== '|' && inline !== '>') return inline;
+  let end = runAt + 1;
+  while (end < lines.length && (/^\s*$/.test(lines[end]) || /^ {10}/.test(lines[end]))) end += 1;
+  return lines.slice(runAt + 1, end).map((line) => line.slice(10)).join('\n');
+}
+
+function indentedYamlBlock(text, key, indent = 0) {
+  const lines = text.split('\n');
+  const prefix = ' '.repeat(indent);
+  const start = lines.findIndex((line) => line.startsWith(`${prefix}${key}:`));
+  if (start === -1) return '';
+  let end = start + 1;
+  while (end < lines.length) {
+    if (/^\s*$/.test(lines[end]) || /^\s*#/.test(lines[end])) {
+      end += 1;
+      continue;
+    }
+    const leading = /^\s*/.exec(lines[end])[0].length;
+    if (leading <= indent) break;
+    end += 1;
+  }
+  return lines.slice(start, end).join('\n');
+}
+
+function topLevelYamlBlock(text, key) {
+  return indentedYamlBlock(text, key);
+}
 
 function tmpdir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-tooling-'));
@@ -942,6 +1073,254 @@ export function prMatrixOsList(chunk) {
   return m ? JSON.parse(m[1]) : null;
 }
 
+test('workflow 发现递归覆盖根目录与子目录中的 .yml / .yaml', (t) => {
+  const dir = tmpdir(t);
+  fs.mkdirSync(path.join(dir, 'nested'));
+  for (const file of ['root.yml', 'root.yaml', 'nested/deep.yml', 'nested/deep.yaml']) {
+    fs.writeFileSync(path.join(dir, file), 'name: fixture\n');
+  }
+  fs.writeFileSync(path.join(dir, 'nested', 'ignored.txt'), 'not a workflow\n');
+
+  assert.deepEqual(
+    workflowYamlFiles(dir).map((file) => path.relative(dir, file)),
+    ['nested/deep.yaml', 'nested/deep.yml', 'root.yaml', 'root.yml'],
+  );
+});
+
+test('uses key 扫描只接受规范 block form，其余位置、引号与 flow 形态 fail closed', () => {
+  const sha = 'a'.repeat(40);
+  const records = activeWorkflowUses({
+    name: 'fixture.yml',
+    text: [
+      `uses: actions/checkout@${sha} # v4.4.0`,
+      `      - uses: actions/setup-node@${sha} # v4.4.0`,
+      '  - uses: *checkout',
+      '# uses: actions/checkout@v4',
+      '    # - { uses: actions/setup-node@v4 }',
+      '  - # { "uses": actions/setup-node@v4 }',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(
+    records.map(({ line, reference }) => ({ line, reference })),
+    [
+      { line: 1, reference: `actions/checkout@${sha}` },
+      { line: 2, reference: `actions/setup-node@${sha}` },
+      { line: 3, reference: '*checkout' },
+    ],
+    '规范 block form 必须保留；完整注释与 sequence comment 必须忽略',
+  );
+  assert.match(
+    actionPinProblems(records).join('\n'),
+    /fixture\.yml:3 不是 actions\/\*，无法验证 40 位 SHA pin：\*checkout/,
+    '规范 key 下的 alias 也不能绕过 action 白名单与 pin 校验',
+  );
+  for (const [ambiguous, expected] of [
+    ['uses : actions/checkout@v4', /不符合规范 block form/],
+    ['"uses": actions/checkout@v4', /不符合规范 block form/],
+    ["- 'uses' : actions/checkout@v4", /不符合规范 block form/],
+    ['uses\t: actions/checkout@v4', /不符合规范 block form/],
+    ['-uses: actions/checkout@v4', /不符合规范 block form/],
+    ['- { uses: actions/checkout@v4 }', /不符合规范 block form/],
+    ['- { "uses": actions/checkout@v4 }', /不符合规范 block form/],
+    ["- &checkout { uses: actions/checkout@v4 }", /不符合规范 block form/],
+    ["- !guard { other: value, 'uses' : actions/checkout@v4 }", /不符合规范 block form/],
+    ['prefix: [!tag value, { uses : actions/checkout@v4 }]', /不符合规范 block form/],
+  ]) {
+    assert.throws(
+      () => activeWorkflowUses({ name: 'ambiguous.yml', text: ambiguous }),
+      expected,
+      `不得静默略过：${ambiguous}`,
+    );
+  }
+});
+
+test('workflow 只使用 GitHub 官方 actions，不引入第三方或本地 action', () => {
+  const workflows = workflowRecords();
+  const uses = workflows.flatMap(activeWorkflowUses);
+  assert.ok(workflows.length >= 4, `只找到 ${workflows.length} 个 workflow，判据恐怕在空转`);
+  assert.ok(uses.length > 0, 'workflow 中一个 active uses 都没找到，判据恐怕在空转');
+  assert.deepEqual(
+    uses.filter(({ reference }) => !reference.startsWith('actions/'))
+      .map(({ name, line, reference }) => `${name}:${line} ${reference}`),
+    [],
+    '仓库设置只允许 actions/*；第三方、Docker 与本地 action 都不在供应链白名单内',
+  );
+});
+
+test('workflow 的 actions/* 全部钉死 40 位 SHA，并紧跟可读版本注释', () => {
+  const uses = workflowRecords().flatMap(activeWorkflowUses);
+  assert.ok(
+    uses.some(({ reference }) => reference.startsWith('actions/')),
+    '没有找到 actions/*，判据恐怕在空转',
+  );
+  assert.deepEqual(actionPinProblems(uses), []);
+});
+
+test('actionlint 下载固定版本与官方摘要，核验后才检查全部 workflow', () => {
+  const candidates = workflowRecords().flatMap(({ name, text }) => (
+    workflowJobChunks(text)
+      .filter(({ text: chunk }) => /actionlint_[0-9.]+_linux_amd64\.tar\.gz/.test(chunk))
+      .map(({ text: chunk }) => ({ name, chunk }))
+  ));
+  assert.equal(candidates.length, 1, `应有且只有一个 actionlint 安装 job，实际 ${candidates.length} 个`);
+  const { name, chunk } = candidates[0];
+  const message = `${name} 的 actionlint 供应链契约被改动`;
+  const steps = workflowStepChunks(chunk);
+  const installAt = steps.findIndex((step) => /actionlint_[0-9.]+_linux_amd64\.tar\.gz/.test(step));
+  const checkAt = steps.findIndex((step) => /actionlint\s+"\$\{workflow_files\[@\]\}"/.test(step));
+  assert.ok(installAt >= 0, `${message}：找不到安装步骤`);
+  assert.ok(checkAt > installAt, `${message}：必须先安装并核验，再执行 workflow 检查`);
+  const installStep = steps[installAt];
+  const checkStep = steps[checkAt];
+  assert.match(installStep, /actionlint_1\.7\.12_linux_amd64\.tar\.gz/, message);
+  assert.match(
+    installStep,
+    /expected_sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'/,
+    message,
+  );
+  assert.match(installStep, /rhysd\/actionlint\/releases\/download\/v1\.7\.12\/\$archive/, message);
+  const checksumAt = installStep.indexOf('sha256sum --check -');
+  const extractionAt = installStep.search(
+    /^\s*tar\s+-xzf\s+"\$archive_path"\s+-C\s+"\$tool_dir"\s+--\s+actionlint\s*$/m,
+  );
+  const executionAt = installStep.indexOf('"$tool_dir/actionlint" -version');
+  assert.ok(checksumAt >= 0, `${message}：下载后必须真正核对摘要`);
+  assert.ok(extractionAt > checksumAt, `${message}：必须先核对摘要，再解包`);
+  assert.ok(executionAt > extractionAt, `${message}：必须先核对摘要并只解出 actionlint，再执行`);
+  assert.match(checkStep, /workflow_files=\([^)]*\.github\/workflows\/\*\.yml[^)]*\)/, message);
+  assert.match(checkStep, /workflow_files=\([^)]*\.github\/workflows\/\*\.yaml[^)]*\)/, message);
+  assert.match(checkStep, /shopt\s+-s\s+nullglob/, `${message}：两种扩展名都不存在时不得传字面 glob`);
+  assert.match(
+    checkStep,
+    /actionlint\s+"\$\{workflow_files\[@\]\}"/,
+    `${message}：必须检查仓库里的 workflow`,
+  );
+});
+
+test('PR 标题闸门只在 pull_request 上执行，并落实约定式标题契约', () => {
+  const workflows = workflowRecords();
+  const candidates = workflows.flatMap(({ name, text }) => (
+    workflowJobChunks(text).flatMap(({ text: chunk }) => (
+      workflowStepChunks(chunk)
+        .filter((step) => step.includes('github.event.pull_request.title'))
+        .map((step) => ({ name, text, chunk, step }))
+    ))
+  ));
+  assert.equal(candidates.length, 1, `应有且只有一个 PR 标题闸门，实际 ${candidates.length} 个`);
+  const { name, text, chunk, step } = candidates[0];
+  assert.match(topLevelYamlBlock(text, 'on'), /^ {2}pull_request:\s*$/m, `${name} 必须监听 PR`);
+  assert.match(
+    chunk,
+    /^\s+if:\s*github\.event_name\s*==\s*'pull_request'\s*$/m,
+    `${name} 的标题闸门不得在非 PR 事件读取空标题`,
+  );
+
+  const env = indentedYamlBlock(step, 'env', 8);
+  const titleEnv = /^ {10}([A-Za-z_][A-Za-z0-9_]*):\s*\$\{\{\s*github\.event\.pull_request\.title\s*\}\}\s*$/m.exec(env);
+  assert.ok(titleEnv, `${name} 必须只经 env 把 PR 标题交给 shell`);
+  const script = workflowStepRun(step);
+  assert.doesNotMatch(
+    script,
+    /\$\{\{\s*github\.event\.pull_request\.title\s*\}\}/,
+    'run 脚本不得直接插值不受信任的 PR 标题',
+  );
+  assert.match(
+    script,
+    new RegExp(`(["'])\\$${titleEnv[1]}\\1`),
+    'shell 读取 PR 标题变量时必须加引号',
+  );
+  const assignment = /^\s*([A-Za-z_][A-Za-z0-9_]*)=(['"])(\^.*)\2\s*$/m.exec(script);
+  assert.ok(assignment, `${name} 没找到 PR 标题正则`);
+  assert.equal(
+    assignment[3],
+    '^(feat|fix|docs|test|chore|refactor|ci)(\\([a-z0-9-]+\\))?: .+',
+    'PR 标题正则的 type、可选小写 scope 与冒号空格契约必须逐项保留',
+  );
+  assert.match(script, new RegExp(`=~\\s*\\$${assignment[1]}\\b`), '标题正则必须真正用于失败判定');
+  const titlePattern = new RegExp(assignment[3]);
+  for (const type of ['feat', 'fix', 'docs', 'test', 'chore', 'refactor', 'ci']) {
+    assert.match(`${type}: 有效标题`, titlePattern, `应接受 ${type} 类型`);
+  }
+  assert.match('fix(api-v2): 有效标题', titlePattern, '应接受小写 scope');
+  for (const invalid of ['feature: 无效类型', 'Fix: 大写类型', 'fix(API): 大写 scope', 'fix 无冒号']) {
+    assert.doesNotMatch(invalid, titlePattern, `不应接受：${invalid}`);
+  }
+});
+
+test('每周双平台完整闸门保留固定错峰日程与最小只读权限', () => {
+  const candidates = workflowRecords().filter(({ text }) => (
+    /cron:\s*['"]17 3 \* \* 1['"]/.test(topLevelYamlBlock(text, 'on'))
+  ));
+  assert.equal(candidates.length, 1, `应有且只有一个每周检查 workflow，实际 ${candidates.length} 个`);
+  const { name, text } = candidates[0];
+  const on = topLevelYamlBlock(text, 'on');
+  const permissions = topLevelYamlBlock(text, 'permissions');
+  const concurrency = topLevelYamlBlock(text, 'concurrency');
+  assert.match(on, /^ {2}schedule:\s*$/m, `${name} 必须由 schedule 触发`);
+  assert.match(on, /^ {2}workflow_dispatch:\s*$/m, `${name} 必须保留手动补跑入口`);
+  assert.match(permissions, /^ {2}contents:\s*read\s*$/m, `${name} 只需读取仓库内容`);
+  assert.doesNotMatch(permissions, /:\s*write\s*$/m, `${name} 不应获得写权限`);
+  assert.match(concurrency, /^ {2}group:\s*\S+\s*$/m, `${name} 必须有顶层并发组`);
+  assert.match(
+    concurrency,
+    /^ {2}cancel-in-progress:\s*true\s*$/m,
+    `${name} 必须取消同组旧周检，避免定时与手动补跑叠加`,
+  );
+  assert.match(text, /os:\s*\[[^\]]*ubuntu-latest[^\]]*\]/, `${name} 必须覆盖 Ubuntu`);
+  assert.match(text, /os:\s*\[[^\]]*macos-latest[^\]]*\]/, `${name} 必须覆盖 macOS`);
+  const checkJob = workflowJobChunks(text).find(({ text: chunk }) => (
+    /os:\s*\[[^\]]*ubuntu-latest[^\]]*macos-latest/.test(chunk)
+  ));
+  const checkStep = workflowStepChunks(checkJob?.text ?? '')
+    .find((step) => workflowStepRun(step).includes('npm run check'));
+  assert.ok(checkStep, `${name} 必须执行完整质量闸门`);
+  assert.match(
+    workflowStepRun(checkStep),
+    /\$\{\{\s*matrix\.os\s*==\s*'ubuntu-latest'\s*&&\s*'-- --require-browser'\s*\|\|\s*''\s*\}\}/,
+    `${name} 必须要求 Ubuntu 真跑浏览器，macOS 可按环境省略`,
+  );
+});
+
+test('Release 在发布 tar.gz 前生成 GitHub 构建溯源证明', () => {
+  const candidates = workflowRecords().flatMap(({ name, text }) => (
+    workflowJobChunks(text)
+      .filter(({ text: chunk }) => chunk.includes('actions/attest-build-provenance@'))
+      .map(({ text: chunk }) => ({ name, chunk }))
+  ));
+  assert.equal(candidates.length, 1, `应有且只有一个 Release 溯源 job，实际 ${candidates.length} 个`);
+  const { name, chunk } = candidates[0];
+  const message = `${name} 的 Release 溯源契约被移除`;
+  const steps = workflowStepChunks(chunk);
+  const bundleDownloadAt = steps.findIndex((step) => (
+    /^ {6}-\s+uses:\s*actions\/download-artifact@[0-9a-f]{40}\s+#\s*v\d+\.\d+\.\d+\s*$/m.test(step)
+      && /^ {10}name:\s*bundles\s*$/m.test(indentedYamlBlock(step, 'with', 8))
+  ));
+  const attestationAt = steps.findIndex((step) => (
+    /^ {8}uses:\s*actions\/attest-build-provenance@[0-9a-f]{40}\s+#\s*v\d+\.\d+\.\d+\s*$/m.test(step)
+  ));
+  const releaseAt = steps.findIndex((step) => workflowStepRun(step).includes('gh release create'));
+  assert.ok(bundleDownloadAt >= 0, `${message}：找不到 bundles 下载步骤`);
+  assert.ok(attestationAt > bundleDownloadAt, `${message}：必须先下载 bundles，再生成证明`);
+  assert.ok(releaseAt > attestationAt, `${message}：必须先生成证明，再创建 Release`);
+
+  const attestationStep = steps[attestationAt];
+  const subjects = indentedYamlBlock(
+    indentedYamlBlock(attestationStep, 'with', 8),
+    'subject-path',
+    10,
+  ).split('\n').slice(1).map((line) => line.trim()).filter(Boolean);
+  assert.deepEqual(
+    subjects,
+    ['dist/*.tar.gz', 'dist/SHA256SUMS'],
+    `${message}：subject-path 必须绑定发布包与校验和清单`,
+  );
+  assert.match(chunk, /^ {4}permissions:\s*$/m, message);
+  assert.match(chunk, /^ {6}contents:\s*write\s*$/m, message);
+  assert.match(chunk, /^ {6}id-token:\s*write\s*$/m, message);
+  assert.match(chunk, /^ {6}attestations:\s*write\s*$/m, message);
+});
+
 test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边就红）', () => {
   const ruleset = JSON.parse(fs.readFileSync(path.join(ROOT, '.github', 'rulesets', 'main.json'), 'utf8'));
   const checks = ruleset.rules.find((r) => r.type === 'required_status_checks');
@@ -961,26 +1340,15 @@ test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边�
 });
 
 test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO', () => {
-  const dir = path.join(ROOT, '.github', 'workflows');
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml'));
-  assert.ok(files.length >= 2, `只找到 ${files.length} 个 workflow，判据恐怕在空转`);
+  const workflows = workflowRecords();
+  assert.ok(workflows.length >= 2, `只找到 ${workflows.length} 个 workflow，判据恐怕在空转`);
 
   const problems = [];
-  for (const file of files) {
-    const text = fs.readFileSync(path.join(dir, file), 'utf8');
-    const jobsAt = text.indexOf('\njobs:');
-    if (jobsAt === -1) continue;
-
-    // 段头 = 两空格缩进的键（jobs 下的 job 名）
-    const body = text.slice(jobsAt);
-    const heads = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)];
-    for (const [i, head] of heads.entries()) {
-      const from = head.index;
-      const to = i + 1 < heads.length ? heads[i + 1].index : body.length;
-      const chunk = body.slice(from, to);
+  for (const { name, text } of workflows) {
+    for (const { id, text: chunk } of workflowJobChunks(text)) {
       if (!/(^|\s)gh\s+\w/.test(chunk)) continue;
       if (/actions\/checkout@/.test(chunk) || /GH_REPO:/.test(chunk)) continue;
-      problems.push(`${file} 的 job「${head[1]}」跑了 gh 却既没 checkout 也没给 GH_REPO`);
+      problems.push(`${name} 的 job「${id}」跑了 gh 却既没 checkout 也没给 GH_REPO`);
     }
   }
   assert.deepEqual(problems, []);

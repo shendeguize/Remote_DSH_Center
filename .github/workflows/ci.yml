@@ -16,6 +16,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 校验 PR 标题
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          pattern='^(feat|fix|docs|test|chore|refactor|ci)(\([a-z0-9-]+\))?: .+'
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error::PR 标题必须匹配：$pattern"
+            exit 1
+          fi
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 下载并核验 actionlint 1.7.12
+        run: |
+          set -euo pipefail
+          archive='actionlint_1.7.12_linux_amd64.tar.gz'
+          archive_path="$RUNNER_TEMP/$archive"
+          tool_dir="$RUNNER_TEMP/actionlint-1.7.12"
+          expected_sha256='8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive_path" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$archive"
+          if ! printf '%s  %s\n' "$expected_sha256" "$archive_path" | sha256sum --check -; then
+            echo "::error::actionlint 1.7.12 压缩包 SHA-256 与官方发布值不符"
+            exit 1
+          fi
+
+          # 摘要核验成功后才创建目录、解包和执行；只从归档中提取 actionlint 这一项。
+          mkdir "$tool_dir"
+          tar -xzf "$archive_path" -C "$tool_dir" -- actionlint
+          test -x "$tool_dir/actionlint"
+          "$tool_dir/actionlint" -version
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: 检查工作流语法与表达式
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          workflow_files=(.github/workflows/*.yml .github/workflows/*.yaml)
+          if (( ${#workflow_files[@]} == 0 )); then
+            echo "::error::没有找到 .github/workflows 下的 .yml 或 .yaml 工作流"
+            exit 1
+          fi
+          actionlint "${workflow_files[@]}"
+
   check:
     # 平台分工（成本管控）：同一套闸门跑两个平台再乘以「PR 一次 + 合入 main 又一次」，
     # 等于每个 PR 跑四遍，其中最贵的 macOS 跑两遍（私有仓计费时 mac 是 10 倍单价）。
@@ -34,9 +90,9 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           # 零 npm 依赖，没有 lockfile 可缓存，也不需要 npm ci
@@ -53,7 +109,7 @@ jobs:
 
       - name: 失败时留下浏览器截图
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: browser-shots-${{ matrix.os }}
           path: |

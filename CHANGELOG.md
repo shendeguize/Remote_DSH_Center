@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+### 新增
+
+- GitHub Release 的 `.tar.gz` 发布包现在带有 GitHub 构建溯源证明；下载后可用
+  `gh attestation verify ./dsh-center-v0.2.0-darwin-arm64.tar.gz --repo shendeguize/Remote_DSH_Center`
+  验证。
+
 ## [0.2.0-rc.11] - 2026-08-24
 
 ### 新增

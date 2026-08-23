@@ -82,6 +82,13 @@ The standalone channel **never touches the node on your machine** — it carries
 copy and uses it only inside the bundle. There are no Linux bundles (on Linux, install
 Node ≥ 22 first and re-run).
 
+If you download a `.tar.gz` manually from a GitHub Release, check `SHA256SUMS`, then use
+GitHub CLI to verify the bundle's build-provenance attestation:
+
+```bash
+gh attestation verify ./dsh-center-v0.2.0-darwin-arm64.tar.gz --repo shendeguize/Remote_DSH_Center
+```
+
 Choosing a channel and a version:
 
 ```bash

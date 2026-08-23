@@ -68,6 +68,13 @@ curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/
 standalone 通道**不会碰你机器上的 node**：它自带一份官方 Node，只在包内使用。
 Linux 上没有发布包（Linux 用户请自行装 Node ≥ 22 再重跑）。
 
+若手动从 GitHub Release 下载 `.tar.gz`，核对 `SHA256SUMS` 后还可用 GitHub CLI 验证
+该包的构建溯源证明：
+
+```bash
+gh attestation verify ./dsh-center-v0.2.0-darwin-arm64.tar.gz --repo shendeguize/Remote_DSH_Center
+```
+
 选通道与选版本：
 
 ```bash

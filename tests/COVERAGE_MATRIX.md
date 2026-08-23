@@ -323,6 +323,9 @@
 | oxlint 告警完整显示并以当前 107 条基线为上限，新增告警即红 | `tests/tooling.test.js`（`OXLINT_MAX_WARNINGS` / `oxlintArgs`） |
 | 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check -- --only pack` |
 | Chrome 查找跨平台（显式指定优先，缺了可跳过） | 同上（`findChrome`） |
+| 递归扫描 `.github/workflows/**` 根目录与子目录的 `.yml` / `.yaml` active `uses` key：只允许 `actions/*`，且引用必须是 40 位 SHA + 可读版本注释；忽略完整注释与 sequence comment 后，在行内任意位置识别 plain/quoted `uses` mapping key，只有规范 block form 放行；冒号空格/tab、flow mapping、anchor/tag 前缀与通用 prefixed-flow 形态全部 fail closed，规范 key 下的 alias 也无法绕过白名单/pin | `tests/tooling.test.js`（目录/扩展名 fixture + `parseWorkflowUsesLine` block/flow/anchor/tag/quoted/alias fixture + `activeWorkflowUses`） |
+| actionlint 固定 1.7.12 与官方 SHA-256；摘要核验早于只提取 `actionlint` 单一成员和执行，检查入口显式收齐顶层 `*.yml` / `*.yaml`；PR 标题只经 `env` 进入 shell，`run` 不直插表达式、变量加引号且 title regex 契约固定 | `tests/tooling.test.js`（actionlint 顺序/成员与 PR 输入边界） |
+| 每周一 UTC 03:17 的双平台完整闸门保留手动入口、`contents: read`、顶层并发取消策略，Ubuntu 强制 `--require-browser`；Release 的 bundles 下载 → pinned provenance step → 创建 Release 顺序固定，`with.subject-path` 绑定 `.tar.gz` / `SHA256SUMS` 且 job 具备所需细粒度权限 | `tests/tooling.test.js`（周检与 Release provenance 契约） |
 
 ## 8.2 版本自证与自更新（补丁集 0.1.0）
 
@@ -393,16 +396,24 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 
 ## 9. 门槛核对结果（最近一次完整 `npm run check`）
 
-最近一次完整闸门为 **1145/1145** 通过，每个 `src/**/*.js` 均有 lcov 记录；
-真浏览器 Chrome 检查通过。
+最近一次完整通过的 `npm run check -- --require-browser`（2026-08-24，本轮 scanner
+补丁前）为 **1153/1153**，每个 `src/**/*.js` 均有 lcov 记录；真浏览器 Chrome
+**26/26** 项通过。
+
+本轮 scanner 补丁定向核对（2026-08-24）：`node --test tests/tooling.test.js`
+**55/55** 通过；核对官方摘要后运行 pinned actionlint **1.7.12**，全部 workflow 通过。
+按要求未重跑完整闸门。此前完整闸门初跑与一次 bounded retry 均为 **1151/1153**：
+`tests/lib/ssh.test.js` 两条 TERM→KILL 信号时序断言失败；覆盖报告观测到 overall
+**96.26%（15901/16518）**，但闸门按规则不把测试未全绿时的覆盖率作为通过结论，后续真浏览器、
+站点/文档、打包与 CLI 关卡未执行。`git diff --check` 通过。
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---:|---:|---|
-| `src/**`（overall） | 96.26% | ≥ 95% | 达标 |
-| `src/lib/**` | 最近一次完整闸门通过 | ≥ 90% | 达标 |
-| `src/*.js` | 最近一次完整闸门通过 | ≥ 75% | 达标 |
-| `src/web/`（不含 components） | 最近一次完整闸门通过 | ≥ 80% | 达标 |
-| `src/web/components/**` | 仅报告 | 仅报告 | 不单独设卡，仍计入 overall |
+| `src/**`（overall） | 96.26%（15901/16518） | ≥ 95% | 达标 |
+| `src/lib/**` | 97.95%（2291/2339） | ≥ 90% | 达标 |
+| `src/*.js` | 93.64%（7063/7543） | ≥ 75% | 达标 |
+| `src/web/`（不含 components） | 99.30%（2424/2441） | ≥ 80% | 达标 |
+| `src/web/components/**` | 98.28%（4123/4195） | 仅报告 | 不单独设卡，仍计入 overall |
 
 全仓 branch 与 function 仅诊断，不参与门槛。
 
