@@ -27,14 +27,23 @@ import { isMainEntry } from '../src/lib/entry.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** GitHub Pages 的公开根地址；canonical、robots 与 sitemap 共用这一口径。 */
+export const PAGES_BASE_URL = 'https://shendeguize.github.io/Remote_DSH_Center/';
+
+/** sitemap 只发布真实生成 HTML 的公开路由，路径均相对 PAGES_BASE_URL。 */
+export const SITEMAP_ROUTES = Object.freeze(['', 'demo/']);
+
 /** 从 src/lib 借到 demo 的模块：必须是浏览器安全的纯模块（machine 只依赖 errors）。 */
 export const BORROWED_LIB = Object.freeze(['machine.js', 'errors.js']);
 
 /** 构建产物里必须存在的文件（相对 outDir）。少一个就说明拷漏了。 */
 export const REQUIRED_OUTPUTS = Object.freeze([
   'index.html',
+  'robots.txt',
+  'sitemap.xml',
   'landing.css',
   'landing.js',
+  'assets/shots/dashboard.png',
   '.nojekyll',
   'demo/index.html',
   'demo/app.js',
@@ -95,6 +104,38 @@ export function rewriteDemoHtml(html) {
   return out;
 }
 
+export function robotsText({ baseUrl = PAGES_BASE_URL } = {}) {
+  const projectPath = new URL(baseUrl).pathname;
+  return [
+    'User-agent: *',
+    `Allow: ${projectPath}`,
+    `Sitemap: ${new URL('sitemap.xml', baseUrl).href}`,
+    '',
+  ].join('\n');
+}
+
+function escapeXml(text) {
+  return text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+export function sitemapXml({
+  baseUrl = PAGES_BASE_URL,
+  routes = SITEMAP_ROUTES,
+} = {}) {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...routes.map((route) => `  <url><loc>${escapeXml(new URL(route, baseUrl).href)}</loc></url>`),
+    '</urlset>',
+    '',
+  ].join('\n');
+}
+
 function copyDir(from, to, { filter = () => true } = {}) {
   fs.mkdirSync(to, { recursive: true });
   for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
@@ -139,6 +180,10 @@ export function buildSite({ outDir = path.join(REPO, '_site'), repo = REPO } = {
   const indexPath = path.join(demoOut, 'index.html');
   fs.writeFileSync(indexPath, rewriteDemoHtml(fs.readFileSync(indexPath, 'utf8')));
 
+  // 6. 爬虫入口固定生成，不带构建时钟，重复构建逐字一致
+  fs.writeFileSync(path.join(outDir, 'robots.txt'), robotsText());
+  fs.writeFileSync(path.join(outDir, 'sitemap.xml'), sitemapXml());
+
   // Pages 不跑 Jekyll，但下划线目录的历史坑太深，留个护栏
   fs.writeFileSync(path.join(outDir, '.nojekyll'), '');
 
@@ -169,6 +214,8 @@ const MIME = Object.freeze({
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
   '.woff2': 'font/woff2',
 });
 

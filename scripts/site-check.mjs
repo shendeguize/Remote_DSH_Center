@@ -56,6 +56,128 @@ export async function waitUntil(ok, label, { timeoutMs = 5_000, stepMs = 100 } =
 
 // ── docs：链接与命令核对（纯函数，便于单测） ──────────────────────────────
 
+/** README 顶层结构的逐节双语契约；顺序也是契约的一部分。 */
+export const README_SECTION_MAP = Object.freeze([
+  Object.freeze({ zh: '它解决什么问题', en: 'The problem' }),
+  Object.freeze({ zh: '前提', en: 'Requirements' }),
+  Object.freeze({ zh: '支持矩阵', en: 'Support matrix' }),
+  Object.freeze({ zh: '安装', en: 'Install' }),
+  Object.freeze({ zh: '界面速览', en: 'A look around' }),
+  Object.freeze({ zh: '架构与数据流', en: 'Architecture and data flow' }),
+  Object.freeze({ zh: '日常入口', en: 'Everyday entry points' }),
+  Object.freeze({ zh: '状态与自愈', en: 'States and self-healing' }),
+  Object.freeze({ zh: '配置与数据', en: 'Configuration and data' }),
+  Object.freeze({ zh: '命令一览', en: 'Commands' }),
+  Object.freeze({ zh: '安全边界', en: 'Security boundary' }),
+  Object.freeze({ zh: 'FAQ', en: 'FAQ' }),
+  Object.freeze({ zh: '彻底卸载', en: 'Full uninstall' }),
+  Object.freeze({ zh: '开发', en: 'Development' }),
+  Object.freeze({ zh: 'License', en: 'License' }),
+]);
+
+/**
+ * 抽取 Markdown ATX 二级标题。只认顶格或最多三空格缩进的 `##`，
+ * 去掉可选 closing markers，并忽略反引号/波浪号围栏代码块。
+ */
+export function extractLevel2Headings(text) {
+  const headings = [];
+  let fence = null;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (fence) {
+      const close = new RegExp(`^ {0,3}${fence.marker}{${fence.length},}[\\t ]*$`);
+      if (close.test(line)) fence = null;
+      continue;
+    }
+
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (opening) {
+      const marker = opening[1][0];
+      // CommonMark：反引号围栏的 info string 里不能再含反引号；这种行不是 opener。
+      if (marker !== '`' || !opening[2].includes('`')) {
+        fence = { marker, length: opening[1].length };
+      }
+      continue;
+    }
+
+    const heading = /^ {0,3}##(?!#)(?:[\t ]+|$)(.*)$/.exec(line);
+    if (!heading) continue;
+    const raw = heading[1].trim();
+    headings.push(/^#+$/.test(raw) ? '' : raw.replace(/[\t ]+#+[\t ]*$/, '').trim());
+  }
+
+  return headings;
+}
+
+function compareHeadingList(actual, expected, file) {
+  const problems = [];
+  const expectedSet = new Set(expected);
+  const counts = new Map();
+  for (const heading of actual) counts.set(heading, (counts.get(heading) ?? 0) + 1);
+
+  const emptyCount = counts.get('') ?? 0;
+  if (emptyCount > 0) {
+    problems.push(`${file} 有空的二级章节标题${emptyCount > 1 ? `（出现 ${emptyCount} 次）` : ''}`);
+  }
+
+  const duplicates = [...counts].filter(([, count]) => count > 1);
+  for (const [heading, count] of duplicates) {
+    problems.push(`${file} 的二级章节重复：## ${heading}（出现 ${count} 次）`);
+  }
+
+  const missing = expected.filter((heading) => !counts.has(heading));
+  const extras = [...counts.keys()].filter((heading) => !expectedSet.has(heading));
+  let renamed = false;
+
+  if (
+    duplicates.length === 0
+    && !extras.includes('')
+    && actual.length === expected.length
+    && missing.length === extras.length
+    && missing.length > 0
+  ) {
+    const missingSet = new Set(missing);
+    const renamePairs = [];
+    for (let i = 0; i < actual.length; i += 1) {
+      if (!expectedSet.has(actual[i]) && missingSet.has(expected[i])) {
+        renamePairs.push([expected[i], actual[i], i + 1]);
+      }
+    }
+    if (renamePairs.length === missing.length) {
+      renamed = true;
+      for (const [wanted, got, position] of renamePairs) {
+        problems.push(`${file} 的二级章节疑似改名：第 ${position} 节应为 ## ${wanted}，实际为 ## ${got}`);
+      }
+    }
+  }
+
+  if (!renamed) {
+    for (const heading of missing) problems.push(`${file} 缺少二级章节：## ${heading}`);
+    for (const heading of extras) {
+      if (heading !== '') problems.push(`${file} 有额外二级章节：## ${heading}（请登记映射或删除）`);
+    }
+  }
+
+  if (duplicates.length === 0 && missing.length === 0 && extras.length === 0) {
+    const firstMismatch = actual.findIndex((heading, i) => heading !== expected[i]);
+    if (firstMismatch !== -1) {
+      problems.push(
+        `${file} 的二级章节顺序不一致：第 ${firstMismatch + 1} 节应为 ## ${expected[firstMismatch]}，实际为 ## ${actual[firstMismatch]}`,
+      );
+    }
+  }
+
+  return problems;
+}
+
+/** 按显式映射核对中英 README 的完整二级章节与顺序。 */
+export function compareBilingualStructure(zhHeadings, enHeadings, mapping = README_SECTION_MAP) {
+  return [
+    ...compareHeadingList(zhHeadings, mapping.map((pair) => pair.zh), 'README.md'),
+    ...compareHeadingList(enHeadings, mapping.map((pair) => pair.en), 'README.en.md'),
+  ];
+}
+
 /** `service install` 这类二级子命令：README 会写全，命令表里只有一级。 */
 const SUBCOMMANDS = Object.freeze({
   service: ['install', 'uninstall', 'status'],
@@ -157,24 +279,38 @@ export function localHtmlTargets(html) {
   return out;
 }
 
-function checkDocs(outDir) {
+export function checkDocs(outDir, {
+  repo = REPO,
+  readReadme = (name) => {
+    const file = path.join(repo, name);
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+  },
+} = {}) {
   const problems = [];
+  const readmes = new Map();
 
   // 1. README（中英）的本地链接与图片
   for (const name of ['README.md', 'README.en.md']) {
-    const file = path.join(REPO, name);
-    if (!fs.existsSync(file)) {
+    const text = readReadme(name);
+    if (text === null || text === undefined) {
       problems.push(`${name} 不存在`);
       continue;
     }
-    const text = fs.readFileSync(file, 'utf8');
+    readmes.set(name, text);
     for (const target of localMarkdownTargets(text)) {
       const clean = target.split('#')[0];
       if (clean === '') continue;
-      if (!fs.existsSync(path.resolve(REPO, clean))) problems.push(`${name} 指向不存在的路径：${target}`);
+      if (!fs.existsSync(path.resolve(repo, clean))) problems.push(`${name} 指向不存在的路径：${target}`);
     }
     const unknown = unknownCommands(mentionedCommands(text));
     if (unknown.length > 0) problems.push(`${name} 提到了不存在的命令：${unknown.map((c) => `dshc ${c}`).join(', ')}`);
+  }
+
+  if (readmes.size === 2) {
+    problems.push(...compareBilingualStructure(
+      extractLevel2Headings(readmes.get('README.md')),
+      extractLevel2Headings(readmes.get('README.en.md')),
+    ));
   }
 
   // 2. 站点产物里的站内链接
@@ -382,7 +518,7 @@ async function main() {
     if (problems.length > 0) {
       results.push(['docs', 'fail', `\n    - ${problems.join('\n    - ')}`]);
     } else {
-      results.push(['docs', 'pass', `${htmlFiles} 个页面 + 双语 README 链接与命令一致`]);
+      results.push(['docs', 'pass', `${htmlFiles} 个页面 + 双语 README 结构、链接与命令一致`]);
     }
   }
 

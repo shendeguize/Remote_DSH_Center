@@ -296,7 +296,9 @@
 | mock dsh web 提供独立侧栏/工作区轮廓、query 标识与输入保活钩子，供 iframe 的真实加载与 keep-alive 判据使用 | `tests/demo-contract.test.js`、`site/mock-dsh-web/index.html` |
 | `site:check` 真浏览器走 Hub 首屏 → ready 一步拉起 → iframe → manage → 返回保活 → 断联/恢复 → setup，并检查资源 2xx 与控制台 | `scripts/site-check.mjs`；纯等待语义由 `tests/site-tooling.test.js` 覆盖 |
 | `site:shots` 固定生成 Hub dashboard、manage drawer、真实 mock iframe、远端 degraded 与带本机候选的 setup；图片路径由双语 README 链接检查兜住 | `scripts/site-shots.mjs`、`scripts/site-check.mjs` |
-| 双语 README 的本地链接、图片与 `dshc` 命令表同步 | `npm run site:check` 的 docs 子检查、`tests/site-tooling.test.js` |
+| 双语 README 的本地链接、图片与 `dshc` 命令表同步；二级章节按显式中英映射逐节同序（含支持矩阵），缺失/额外/乱序/重复/改名均 fail closed。ATX H2 抽取忽略合法反引号/波浪号围栏，反引号 info 含反引号不成围栏，关闭符必须同类且不短于开启符，纯 closing markers 归一为空标题；畸形双语内容经导出的真实 `checkDocs` 路径也会返回结构问题 | `npm run site:check` 的 docs 子检查、`scripts/site-check.mjs`、`tests/site-tooling.test.js` |
+| landing 页保留 description/favicon，并提供 `index,follow`、canonical、Open Graph 与 Twitter 的完整绝对元数据；分享图是随站点复制的 dashboard 截图 | `site/index.html`、`scripts/build-site.mjs`、`tests/site-tooling.test.js` |
+| GitHub Pages 项目子路径固定生成无时间戳的 `robots.txt` / `sitemap.xml`；robots 指向绝对项目 sitemap，sitemap 只列 canonical Pages 根与 `/demo/` 且每条 URL 都有 HTML 产物，不宣称 origin 根自动发现 | `scripts/build-site.mjs`、`tests/site-tooling.test.js` |
 
 ## 8. 架构约束（ENG-24）
 
@@ -396,22 +398,20 @@ IO，靠**真跑一次**代证：`npm run build:bundle` 出双架构产物，解
 
 ## 9. 门槛核对结果（最近一次完整 `npm run check`）
 
-最近一次完整通过的 `npm run check -- --require-browser`（2026-08-24，本轮 scanner
-补丁前）为 **1153/1153**，每个 `src/**/*.js` 均有 lcov 记录；真浏览器 Chrome
-**26/26** 项通过。
+最近一次完整通过的 `npm run check -- --require-browser`（2026-08-24，DOC-3 + WEB-5）
+为 **1161/1161**，每个 `src/**/*.js` 均有 lcov 记录；真浏览器 Chrome **26/26**
+项通过。六关全部通过：lint、测试/覆盖率、真浏览器、站点/文档、打包与 CLI。
 
-本轮 scanner 补丁定向核对（2026-08-24）：`node --test tests/tooling.test.js`
-**55/55** 通过；核对官方摘要后运行 pinned actionlint **1.7.12**，全部 workflow 通过。
-按要求未重跑完整闸门。此前完整闸门初跑与一次 bounded retry 均为 **1151/1153**：
-`tests/lib/ssh.test.js` 两条 TERM→KILL 信号时序断言失败；覆盖报告观测到 overall
-**96.26%（15901/16518）**，但闸门按规则不把测试未全绿时的覆盖率作为通过结论，后续真浏览器、
-站点/文档、打包与 CLI 关卡未执行。`git diff --check` 通过。
+本轮定向核对（2026-08-24）：`node --test tests/site-tooling.test.js` **22/22** 通过；
+`npm run site:check -- --require-browser` 构建 **46** 个文件，docs 核对 **3** 个 HTML
+页面，demo 的 **68** 个请求全为 2xx；独立 lint 关通过。完整闸门首轮通过，未触发预留的
+SSH timing flake bounded retry；`git diff --check` 通过。
 
 | 档位 | 行覆盖 | 门槛 | 结果 |
 |---|---:|---:|---|
-| `src/**`（overall） | 96.26%（15901/16518） | ≥ 95% | 达标 |
+| `src/**`（overall） | 96.27%（15902/16518） | ≥ 95% | 达标 |
 | `src/lib/**` | 97.95%（2291/2339） | ≥ 90% | 达标 |
-| `src/*.js` | 93.64%（7063/7543） | ≥ 75% | 达标 |
+| `src/*.js` | 93.65%（7064/7543） | ≥ 75% | 达标 |
 | `src/web/`（不含 components） | 99.30%（2424/2441） | ≥ 80% | 达标 |
 | `src/web/components/**` | 98.28%（4123/4195） | 仅报告 | 不单独设卡，仍计入 overall |
 

@@ -14,15 +14,18 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
-  BORROWED_LIB, REQUIRED_OUTPUTS, contentType, resolveStatic, rewriteDemoHtml,
+  BORROWED_LIB, REQUIRED_OUTPUTS, SITEMAP_ROUTES, buildSite,
+  contentType, resolveStatic, rewriteDemoHtml, robotsText, sitemapXml,
 } from '../scripts/build-site.mjs';
 import {
-  codeChunks, localHtmlTargets, localMarkdownTargets, mentionedCommands, unknownCommands,
-  waitUntil,
+  README_SECTION_MAP, checkDocs, codeChunks, compareBilingualStructure,
+  extractLevel2Headings, localHtmlTargets, localMarkdownTargets, mentionedCommands,
+  unknownCommands, waitUntil,
 } from '../scripts/site-check.mjs';
 import { COMMANDS } from '../src/cli.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EXPECTED_PAGES_BASE_URL = 'https://shendeguize.github.io/Remote_DSH_Center/';
 
 // ── build-site：唯一的内容改写 ────────────────────────────────────────────
 
@@ -68,9 +71,87 @@ test('借用进 demo 的内核模块必须是浏览器安全的：只许 import 
 });
 
 test('REQUIRED_OUTPUTS 覆盖三类关键产物，缺一个就说明拷漏了', () => {
-  for (const must of ['index.html', 'demo/index.html', 'demo/demo-shim.js', 'mock-dsh-web/index.html', '.nojekyll']) {
+  for (const must of [
+    'index.html', 'demo/index.html', 'demo/demo-shim.js', 'mock-dsh-web/index.html',
+    'assets/shots/dashboard.png', 'robots.txt', 'sitemap.xml', '.nojekyll',
+  ]) {
     assert.ok(REQUIRED_OUTPUTS.includes(must), `产物清单漏了 ${must}`);
   }
+});
+
+test('robots 与 sitemap 内容固定、无时间戳，并只列构建出的 HTML 路由', (t) => {
+  const expectedRobots = [
+    'User-agent: *',
+    'Allow: /Remote_DSH_Center/',
+    'Sitemap: https://shendeguize.github.io/Remote_DSH_Center/sitemap.xml',
+    '',
+  ].join('\n');
+  const expectedSitemap = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    '  <url><loc>https://shendeguize.github.io/Remote_DSH_Center/</loc></url>',
+    '  <url><loc>https://shendeguize.github.io/Remote_DSH_Center/demo/</loc></url>',
+    '</urlset>',
+    '',
+  ].join('\n');
+
+  assert.equal(robotsText(), expectedRobots);
+  assert.equal(robotsText(), expectedRobots, '同一输入每次必须逐字一致');
+  assert.equal(sitemapXml(), expectedSitemap);
+  assert.equal(sitemapXml(), expectedSitemap, '同一输入每次必须逐字一致');
+  assert.doesNotMatch(expectedSitemap, /lastmod|<changefreq>|<priority>/);
+  assert.match(
+    sitemapXml({ baseUrl: 'https://example.test/root/', routes: ['?a=1&b=2'] }),
+    /<loc>https:\/\/example\.test\/root\/\?a=1&amp;b=2<\/loc>/,
+    'URL 进入 XML 前必须转义',
+  );
+
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-site-build-'));
+  t.after(() => fs.rmSync(outDir, { recursive: true, force: true }));
+  const { files } = buildSite({ outDir });
+
+  assert.ok(files.includes('robots.txt'));
+  assert.ok(files.includes('sitemap.xml'));
+  assert.equal(fs.readFileSync(path.join(outDir, 'robots.txt'), 'utf8'), expectedRobots);
+  assert.equal(fs.readFileSync(path.join(outDir, 'sitemap.xml'), 'utf8'), expectedSitemap);
+
+  const basePath = new URL(EXPECTED_PAGES_BASE_URL).pathname;
+  const sitemapUrls = [...expectedSitemap.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1]);
+  assert.equal(sitemapUrls.length, SITEMAP_ROUTES.length);
+  for (const urlText of sitemapUrls) {
+    const pathname = new URL(urlText).pathname;
+    assert.ok(pathname.startsWith(basePath), `${urlText} 不在 canonical Pages 根下`);
+    const route = pathname.slice(basePath.length);
+    const output = route === '' || route.endsWith('/') ? `${route}index.html` : route;
+    assert.ok(files.includes(output), `${urlText} 没有对应的 HTML 产物 ${output}`);
+  }
+});
+
+test('landing head 提供 canonical、Open Graph 与 Twitter 的完整绝对元数据', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'site', 'index.html'), 'utf8');
+  const title = 'DSH Center —— 把散在各台远端的 dsh web 收进一个页面';
+  const description = '本机一个小服务 + 一个 CLI：经 ssh -L 隧道把远端 dsh web 映射到本机，用 iframe 标签页单入口打开，拉起/关停/重连/日志都在一处。零 npm 依赖、远端零常驻。';
+  const image = 'https://shendeguize.github.io/Remote_DSH_Center/assets/shots/dashboard.png';
+
+  for (const tag of [
+    '<link rel="canonical" href="https://shendeguize.github.io/Remote_DSH_Center/">',
+    '<meta name="robots" content="index,follow">',
+    '<meta property="og:type" content="website">',
+    `<meta property="og:title" content="${title}">`,
+    `<meta property="og:description" content="${description}">`,
+    '<meta property="og:url" content="https://shendeguize.github.io/Remote_DSH_Center/">',
+    `<meta property="og:image" content="${image}">`,
+    '<meta name="twitter:card" content="summary_large_image">',
+    `<meta name="twitter:title" content="${title}">`,
+    `<meta name="twitter:description" content="${description}">`,
+    `<meta name="twitter:image" content="${image}">`,
+  ]) {
+    assert.ok(html.includes(tag), `landing head 缺少：${tag}`);
+  }
+  assert.ok(
+    fs.existsSync(path.join(ROOT, 'site', 'assets', 'shots', 'dashboard.png')),
+    '分享图必须是会随 site/ 一起复制的既有截图',
+  );
 });
 
 test('resolveStatic：目录补 index.html，越界路径一律拒掉', (t) => {
@@ -99,6 +180,117 @@ test('contentType：ESM 与 CSS 必须给对 MIME，否则浏览器拒绝执行�
 });
 
 // ── site-check：命令核对 ─────────────────────────────────────────────────
+
+test('extractLevel2Headings：认 ATX 二级标题与 closing markers，忽略两类围栏里的假标题', () => {
+  const headings = extractLevel2Headings([
+    '## 可见一 ##',
+    '```markdown',
+    '## 反引号围栏里的假标题',
+    '```',
+    '~~~ md',
+    '## 波浪号围栏里的假标题 ##',
+    '~~~~',
+    '  ## 可见二 ####  ',
+    '### 三级不算',
+  ].join('\n'));
+  assert.deepEqual(headings, ['可见一', '可见二']);
+});
+
+test('extractLevel2Headings：反引号 info 含反引号不成围栏，关闭符须同类且不短于开启符', () => {
+  assert.deepEqual(
+    extractLevel2Headings([
+      '```markdown`bad',
+      '## 非法开启符不能藏掉我',
+    ].join('\n')),
+    ['非法开启符不能藏掉我'],
+  );
+
+  assert.deepEqual(
+    extractLevel2Headings([
+      '````markdown',
+      '## 四反引号内',
+      '```',
+      '## 短反引号不能关闭',
+      '~~~~',
+      '## 波浪号不能关闭',
+      '`````',
+      '## 同类且足够长才关闭',
+      '~~~~ markdown',
+      '## 四波浪号内',
+      '```',
+      '## 反引号不能关闭波浪号',
+      '~~~',
+      '## 短波浪号不能关闭',
+      '~~~~~',
+      '## 波浪号关闭后可见',
+    ].join('\n')),
+    ['同类且足够长才关闭', '波浪号关闭后可见'],
+  );
+});
+
+test('extractLevel2Headings：只有 closing markers 的 H2 归一为空标题', () => {
+  const headings = extractLevel2Headings('## ###');
+  assert.deepEqual(headings, ['']);
+
+  const zh = README_SECTION_MAP.map((pair) => pair.zh);
+  const en = README_SECTION_MAP.map((pair) => pair.en);
+  zh[2] = headings[0];
+  const message = compareBilingualStructure(zh, en).join('\n');
+  assert.match(message, /README\.md.*空.*标题/);
+  assert.match(message, /README\.md.*缺少.*支持矩阵/);
+  assert.doesNotMatch(message, /## ###/);
+});
+
+test('双语 README 当前二级结构与显式映射逐节一致', () => {
+  const zh = extractLevel2Headings(fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8'));
+  const en = extractLevel2Headings(fs.readFileSync(path.join(ROOT, 'README.en.md'), 'utf8'));
+  assert.equal(zh.length, README_SECTION_MAP.length, '中文章节数应由映射表约束');
+  assert.equal(en.length, README_SECTION_MAP.length, '英文章节数应由映射表约束');
+  assert.deepEqual(compareBilingualStructure(zh, en), []);
+});
+
+test('compareBilingualStructure 清楚区分缺失、额外、乱序、重复与改名', () => {
+  const zh = README_SECTION_MAP.map((pair) => pair.zh);
+  const en = README_SECTION_MAP.map((pair) => pair.en);
+
+  const missing = zh.filter((_, i) => i !== 2);
+  assert.match(compareBilingualStructure(missing, en).join('\n'), /README\.md.*缺少.*支持矩阵/);
+
+  const extra = [...en, 'Appendix'];
+  assert.match(compareBilingualStructure(zh, extra).join('\n'), /README\.en\.md.*额外.*Appendix/);
+
+  const reordered = [...zh];
+  [reordered[3], reordered[4]] = [reordered[4], reordered[3]];
+  assert.match(compareBilingualStructure(reordered, en).join('\n'), /README\.md.*顺序/);
+
+  const duplicate = [...en];
+  duplicate.splice(4, 0, en[3]);
+  assert.match(compareBilingualStructure(zh, duplicate).join('\n'), /README\.en\.md.*重复.*Install/);
+
+  const renamed = [...en];
+  renamed[3] = 'Installation';
+  assert.match(
+    compareBilingualStructure(zh, renamed).join('\n'),
+    /README\.en\.md.*改名.*Install.*Installation/,
+  );
+});
+
+test('checkDocs 真正接入双语结构比较，注入畸形 README 会返回结构问题', (t) => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-docs-gate-'));
+  t.after(() => fs.rmSync(outDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outDir, 'index.html'), '<!doctype html><title>fixture</title>');
+
+  const zh = README_SECTION_MAP.map((pair) => pair.zh);
+  [zh[3], zh[4]] = [zh[4], zh[3]];
+  const fixtures = {
+    'README.md': zh.map((heading) => `## ${heading}`).join('\n\n'),
+    'README.en.md': README_SECTION_MAP.map((pair) => `## ${pair.en}`).join('\n\n'),
+  };
+  const result = checkDocs(outDir, { readReadme: (name) => fixtures[name] });
+
+  assert.equal(result.htmlFiles, 1);
+  assert.match(result.problems.join('\n'), /README\.md.*顺序不一致/);
+});
 
 test('codeChunks 只取代码位：围栏块与行内 span，正文散句不算', () => {
   const chunks = codeChunks([

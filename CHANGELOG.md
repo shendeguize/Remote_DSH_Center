@@ -11,6 +11,9 @@
 - GitHub Release 的 `.tar.gz` 发布包现在带有 GitHub 构建溯源证明；下载后可用
   `gh attestation verify ./dsh-center-v0.2.0-darwin-arm64.tar.gz --repo shendeguize/Remote_DSH_Center`
   验证。
+- 项目主页新增 canonical、`index,follow`、Open Graph 与 Twitter 分享元数据。
+  GitHub Pages 项目子路径同时提供固定内容的 `robots.txt` / `sitemap.xml`，列出主页与在线
+  demo；它们是项目站点产物，不宣称具备站点 origin 根 `robots.txt` 的自动发现语义。
 
 ## [0.2.0-rc.11] - 2026-08-24
 
