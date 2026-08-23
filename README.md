@@ -41,13 +41,24 @@
 
 | | 要求 |
 |---|---|
-| 本机 | macOS（主战场；`dshc service` 的开机自启是 launchd 专属）或 Linux；**Node ≥ 22**。要纳管本机时才需在本机安装并配置 `dsh` web profile |
+| 本机 | 源码 / git 通道需要 **Node ≥ 22**；发布包自带官方 Node。要纳管本机时才需在本机安装并配置 `dsh` web profile |
 | 远端 | 已装 DeepSeek Harness（`dsh`）且配好 web profile。本工具只**探测**，不负责安装 |
 | 连通性 | 主机来自 `~/.ssh/config`，免密可登；远端未禁用 `AllowTcpForwarding` |
 
 本机纳管是可选的：setup 会给出一个内置本机候选，可不勾选；一台 manager 最多纳管一个
 `local:true` 条目，也不会因为名称是 `localhost` 或 `127.0.0.1` 就把 SSH 主机猜成本机。
 任一目标缺 `dsh` 或 web profile 都会被明确标成"未安装/未配置"，不会假装能用。
+
+## 支持矩阵
+
+| 平台 | 安装与发布承诺 | 验证 |
+|---|---|---|
+| macOS arm64（Apple Silicon） | 一等支持：源码 / git 安装与独立 Release 发布包 | 对应架构发布包会构建并实机验包 |
+| macOS x64（Intel） | 一等支持：源码 / git 安装与独立 Release 发布包 | 对应架构发布包会构建并实机验包 |
+| Linux | 源码 / git 安装与前台运行按 best-effort 支持；不提供发布包；`dshc service` 依赖 macOS launchd，因此不可用 | Ubuntu CI 跑通项目闸门 |
+
+源码 / git 安装以 **Node 22** 为经过测试的最低版本。若提高最低版本，会在
+[CHANGELOG](CHANGELOG.md) 与对应 Release notes 中提前说明。
 
 ## 安装
 
@@ -265,8 +276,9 @@ setup 还会加入一台安全命名的本机候选。
 
 ## FAQ
 
-**能在 Linux 上用吗？** 能，manager 与 CLI 都可用。只有 `dshc service`（开机自启）是
-launchd 专属，Linux 上用不了——自己写 systemd unit 指向 `dshc up --foreground` 即可。
+**能在 Linux 上用吗？** 源码 / git 安装与前台运行按 best-effort 支持，CI 会在 Ubuntu
+跑项目闸门；不提供 Linux 发布包。`dshc service` 依赖 macOS launchd，在 Linux 上不可用；
+需要自启时可自行写 systemd unit 指向 `dshc up --foreground`。
 
 **本机或远端没装 dsh 会怎样？** 探测把它标成"未安装/未配置"并说明原因
 （缺二进制 / 缺 web profile），不会尝试安装，也不会让你误点拉起。

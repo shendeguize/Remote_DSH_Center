@@ -147,6 +147,10 @@ Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell �
 配置本身进版本管控，改保护走 PR。**只走 `gh api` 应用，不在网页 UI 手点**：
 UI 改动不落 JSON，就是配置漂移的开始。
 
+About 元数据与安全开关这类 online-only Settings 不能完整落成仓库文件，也仍按
+settings-as-code 管理：本文记录逐字取值与可审计、可重放的命令，线上值另用只读命令核验。
+文档中的命令是配置契约，不代表它们已自动执行。
+
 ```bash
 # 首次创建（三份各跑一次）
 gh api -X POST repos/:owner/:repo/rulesets --input .github/rulesets/main.json
@@ -171,7 +175,25 @@ gh api -X PUT repos/:owner/:repo/rulesets/<id> -f enforcement=active
 matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节）；required checks 只能
 引用已有运行记录的 check，新仓库得先让 CI 跑过一次。
 
-其余仓库设置（一次性，`gh api -X PATCH repos/:owner/:repo` 或对应端点）：
+仓库 About 元数据使用以下逐字值；重复执行可安全收敛 description、homepage，并确保
+三个约定 topic 存在：
+
+```bash
+gh repo edit shendeguize/Remote_DSH_Center \
+  --description 'One-page local manager and CLI for local and remote dsh web instances, with SSH tunnels for remote hosts.' \
+  --homepage 'https://shendeguize.github.io/Remote_DSH_Center/' \
+  --add-topic dsh \
+  --add-topic ssh-tunnel \
+  --add-topic dashboard
+
+# 只读核验：不得修改线上设置
+gh repo view shendeguize/Remote_DSH_Center \
+  --json description,homepageUrl,repositoryTopics \
+  --jq '{description, homepage: .homepageUrl, topics: ((.repositoryTopics // []) | map(.name) | sort)}'
+```
+
+其余 online-only 仓库设置的期望状态如下（应用时使用
+`gh api -X PATCH repos/:owner/:repo` 或对应端点）：
 
 | 项 | 取值 | 为什么 |
 |---|---|---|
@@ -183,8 +205,8 @@ matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节�
 | Actions 允许范围 | 仅 GitHub 官方（`actions/*`） | 零依赖哲学在 CI 侧的延伸 |
 | GITHUB_TOKEN 默认权限 | 只读 | release.yml 在 workflow 级显式声明 `contents: write` |
 | fork PR 跑 workflow | 需批准 | public 仓库防算力白嫖与 secrets 探测 |
-| secret scanning + push protection | 开 | 天天摸 ssh 配置，误提交私钥当场被拦比事后撤销便宜 |
-| private vulnerability reporting | 开 | 给外部人一个私下报安全问题的通道 |
+| secret scanning + push protection | 开 | [SECURITY.md](SECURITY.md) 要求保护并脱敏本机配置、日志与 SSH 数据 |
+| private vulnerability reporting | 开 | 提供 [SECURITY.md](SECURITY.md) 指定的私密漏洞报告通道 |
 
 ## 本地环境
 

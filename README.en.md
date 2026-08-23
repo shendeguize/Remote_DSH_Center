@@ -51,7 +51,7 @@ This tool folds every one of those steps into one place:
 
 | | |
 |---|---|
-| Local | macOS (primary target; `dshc service` autostart is launchd-only) or Linux; **Node ≥ 22**. A local `dsh` installation and web profile are needed only if you choose to manage this machine |
+| Local | The source / git channel requires **Node ≥ 22**; release bundles carry an official Node runtime. A local `dsh` installation and web profile are needed only if you choose to manage this machine |
 | Remote | DeepSeek Harness (`dsh`) installed with a web profile configured. This tool **probes** only — it does not install anything |
 | Connectivity | Hosts come from `~/.ssh/config` with key-based login; the remote must not disable `AllowTcpForwarding` |
 
@@ -60,6 +60,17 @@ leave unselected. A manager may contain at most one `local:true` entry, and an S
 is never guessed to be local just because it is named `localhost` or `127.0.0.1`.
 Any target missing `dsh` or its web profile is labelled "not installed / not configured"
 explicitly rather than pretending to be usable.
+
+## Support matrix
+
+| Platform | Install and release commitment | Verification |
+|---|---|---|
+| macOS arm64 (Apple Silicon) | First-class: source / git installs and a standalone Release bundle | The matching bundle is built and verified on real hardware |
+| macOS x64 (Intel) | First-class: source / git installs and a standalone Release bundle | The matching bundle is built and verified on real hardware |
+| Linux | Best-effort source / git installation and foreground operation; no release bundle; `dshc service` is unavailable because it requires macOS launchd | Project gates run in Ubuntu CI |
+
+**Node 22** is the tested minimum for source / git installations. Any increase to that
+minimum is announced in the [CHANGELOG](CHANGELOG.md) and the corresponding release notes.
 
 ## Install
 
@@ -312,8 +323,10 @@ under that assumption:
 
 ## FAQ
 
-**Does it work on Linux?** Yes — manager and CLI both work. Only `dshc service` (autostart)
-is launchd-specific; on Linux write a systemd unit pointing at `dshc up --foreground`.
+**Does it work on Linux?** Source / git installation and foreground operation are supported
+on a best-effort basis, with project gates running in Ubuntu CI. There is no Linux release
+bundle. `dshc service` is unavailable because it requires macOS launchd; for autostart,
+write a systemd unit pointing at `dshc up --foreground`.
 
 **What if the local or remote target has no dsh?** The probe labels it
 "not installed / not configured" with the reason (missing binary vs. missing web profile).
