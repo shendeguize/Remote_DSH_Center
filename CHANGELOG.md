@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.2.0-rc.8] - 2026-08-23
+
 ### 变更
 
 - 管理页新增「批量同步配置」：可从一台源主机预览并同步到最多 200 台目标，只复制远端 web
@@ -461,7 +463,8 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.7...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.8...HEAD
+[0.2.0-rc.8]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.7...v0.2.0-rc.8
 [0.2.0-rc.7]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...v0.2.0-rc.7
 [0.2.0-rc.6]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.5...v0.2.0-rc.6
 [0.2.0-rc.5]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.4...v0.2.0-rc.5
