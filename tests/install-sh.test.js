@@ -54,6 +54,10 @@ function makeOriginRepo(dir) {
   }
   const git = (...args) => execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe' });
   execFileSync('git', ['init', '-b', 'main', dir], { stdio: 'pipe' });
+  // commit 会触发可脱离到后台的 auto-maintenance；临时仓库必须在首次提交前关掉，
+  // 否则 teardown 可能与仍在写 .git/objects 的维护进程竞态。
+  git('config', '--local', 'maintenance.auto', 'false');
+  git('config', '--local', 'gc.auto', '0');
   git('add', '-A');
   git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed');
   // 真仓库有 main 与 release 两条分支，装的默认是 release。
@@ -124,6 +128,16 @@ function rig(t) {
     },
   };
 }
+
+test('临时 origin 在首次 commit 前关闭自动 maintenance 与 gc', { skip }, (t) => {
+  const { origin } = rig(t);
+  const config = (key) => execFileSync(
+    'git', ['-C', origin, 'config', '--local', '--get', key], { encoding: 'utf8' },
+  ).trim();
+
+  assert.equal(config('maintenance.auto'), 'false');
+  assert.equal(config('gc.auto'), '0');
+});
 
 test('install.sh：不指定 DSHC_REF 时装的是 release 分支', { skip }, (t) => {
   // 默认渠道是承重的：默认值被改成不存在的分支，所有新装当场失败，
