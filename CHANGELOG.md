@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.3.0-rc.1] - 2026-08-24
+
 ### 新增
 
 - 新增 npm 安装通道：`npm i -g dsh-center`（需自备 Node ≥ 22；预发布用
