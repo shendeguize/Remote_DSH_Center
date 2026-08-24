@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
+### 变更
+
+- `0.2` 系列首个稳定版；运行行为与 `0.2.0-rc.11` 相同。此前经预发布验证的能力现已
+  进入稳定更新通道。
+
 ### 新增
 
 - GitHub Release 的 `.tar.gz` 发布包现在带有 GitHub 构建溯源证明；下载后可用
@@ -517,7 +524,8 @@
 - `CONTRIBUTING.md`（分支 / PR / CI / 发版 / 修复 / review 全流程规矩）、
   `AGENTS.md`（改代码前的硬约束速查）、本变更记录。
 
-[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.9...HEAD
+[Unreleased]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.1.0...v0.2.0
 [0.2.0-rc.9]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.8...v0.2.0-rc.9
 [0.2.0-rc.8]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.7...v0.2.0-rc.8
 [0.2.0-rc.7]: https://github.com/shendeguize/Remote_DSH_Center/compare/v0.2.0-rc.6...v0.2.0-rc.7
