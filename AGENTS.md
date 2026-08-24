@@ -8,7 +8,10 @@
 
 1. **零 npm 依赖**——运行时与测试都只用 Node ≥ 22 内置能力。不许出现
    `dependencies` / `devDependencies`，不许 import 裸包名，不许引入构建链
-   （前端是原生 ESM，浏览器直接吃）。
+   （前端是原生 ESM，浏览器直接吃）。唯一例外：`plugin/` 子目录是独立 npm 包
+   （dsh 插件），依赖与构建链封闭在 plugin/ 内；主体（根 package.json、src/、
+   tests/、scripts/、site/）仍零依赖，边界由 `tests/architecture.test.js` 的
+   插件边界闸门钉死。
 2. **不误杀**——关停远端进程前逐字比对 `ps -o args=` 命令行指纹，对不上就拒杀。
    动 kill 判据 = 改契约，必须先写设计文档。新增的诊断信息（如 VERIFY 回读的
    `CWD=`）只许用于展示，绝不进判据。
@@ -29,6 +32,7 @@ src/defaults.js   第 0 层：零依赖出厂常量表
 
 依赖图必须无环、分层不许倒挂——`tests/architecture.test.js` 是硬闸门。
 `src/web/setup-schema.js` 是 CLI 与页面共用的纯模块，必须保持零 import。
+`plugin/` 在主体分层之外（独立 npm 包，是叶子），主体代码禁止 import plugin/。
 
 ## 改协议模板要当心
 
@@ -60,6 +64,7 @@ npm run check          # 六关：lint → 测试/覆盖率 → 浏览器 → �
 - 外部可观察的变更（config schema / 协议语义 / CLI 表面 / 退出码 / 页面行为）
   写进 `CHANGELOG.md` 的 `[Unreleased]`。
 - 测试不许碰真机：`tests/harness/` 是假 ssh/scp/dsh-web 垫片 + 状态引擎 + 故障场景。
+- 动了 `plugin/` 还要在 plugin/ 内跑 `npm run verify`。
 
 ## 提交前
 

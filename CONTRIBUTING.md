@@ -60,6 +60,10 @@ mac 问题出不了 Release。
 `required_status_checks`——只改一边的后果不是 CI 变红，而是 PR 永久卡在等一个
 永不到来的检查。`tests/tooling.test.js` 有一条用例把这对耦合钉死。
 
+插件另有独立 lane：`ci.yml` 的 `plugin` job（ubuntu，PR 与合入 main 都跑）在
+plugin/ 内跑 `npm ci && npm run verify`。它**不进 required checks**——required
+名单与 ruleset 强耦合有用例钉死，plugin lane 稳定一个里程碑后再议是否升 required。
+
 ## CHANGELOG 纪律
 
 外部可观察的变更（config schema、远端协议语义、CLI 表面、退出码、页面行为）
@@ -117,6 +121,33 @@ Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell �
 再用 `env -i` 清空环境、PATH 只留 `/usr/bin:/bin` 跑 `dshc version --json`——
 系统 node 就此不可见，跑通即证明「没装 node 的机器上也能用」。
 
+## 插件发版（plugin/ 子包）
+
+`plugin/` 子包（dsh 插件 `dsh-center-hub`）独立发版：**版本唯一源 =
+`plugin/package.json` 的 `version`**，tag 形态 `plugin-v<version>`——与主体的 `v*`
+触发器互不匹配，release.yml 零改动。变更记录在 `plugin/CHANGELOG.md`
+（根 CHANGELOG 只在插件首发时记一条，此后的插件版本演进不回写）。
+
+```bash
+# 1. 发版 PR：bump plugin/package.json 版本号 + plugin/CHANGELOG.md 搬运
+#    （Unreleased → 版本号 + 日期），标题 chore(release): plugin-vX.Y.Z，
+#    走正常 PR 流程合入 main。不夹带功能。
+
+# 2. 直接在 main 的合入提交上打 tag（没有 release 快进步，见下）
+git tag plugin-vX.Y.Z && git push origin plugin-vX.Y.Z
+
+# 3. 等 .github/workflows/plugin-publish.yml：
+#    publish（三守卫 → 插件自测 → npm publish --provenance）
+#    → smoke（发后安装冒烟）→ release（GitHub Release，rc 自动标 Pre-release）
+```
+
+**守卫**（plugin-publish.yml 的 publish 段，任一红则不发布）：tag 名必须等于
+`plugin-v${plugin/package.json version}`；`plugin/CHANGELOG.md` 有对应小节且正文非空；
+tag 提交必须包含于 `main`。**与主体守卫的偏离**：不要求「正式版必须是 `release`
+HEAD」——`release` 分支的语义是主体 standalone 发布的稳定指针，插件版本独立演进且
+不产出 standalone 包，绑定 release HEAD 会把两套发版节奏强耦合。主体四步在这里
+因此收成三步：没有 release 快进步。
+
 ## 修复
 
 - main 上的缺陷：`fix/<slug>` → PR（**附回归用例，先红后绿**）→ 合入。
@@ -132,7 +163,7 @@ Release 会自动标成 Pre-release（判定同样出自 semver，不在 shell �
 | # | 检查项 |
 |---|---|
 | RV-1 | 不误杀契约未被削弱：kill 判据仍是 `ps` 命令行指纹逐字全等；新增信息（如 CWD 回读）只展示、不判杀 |
-| RV-2 | 零依赖未破：无裸包名 import、无 dependencies/devDependencies、无构建链混入 |
+| RV-2 | 零依赖未破（plugin/ 除外）：主体无裸包名 import、根 package.json 无 dependencies/devDependencies 且无 workspaces、无构建链混入主体；plugin/ 依赖不外溢（主体无一处 import plugin/） |
 | RV-3 | 分层未倒挂：lib 纯内核、web 不碰 `node:`、`defaults.js` 是唯一出厂表、config.json 是唯一配置源 |
 | RV-4 | 远端零常驻未破：新远端行为仍是一次性 ssh，落地物只进 `~/.dsh_center_remote/` |
 | RV-5 | 协议模板变更核对过 LAUNCH/POLL/VERIFY/STOP/LOG 全链兼容性与退出码占用表 |
@@ -162,6 +193,10 @@ gh api repos/:owner/:repo/rulesets --jq '.[] | "\(.id)\t\(.name)"'
 gh api -X PUT repos/:owner/:repo/rulesets/<id> --input .github/rulesets/main.json
 ```
 
+> **变更记录（2026-08-24）**：`.github/rulesets/tags.json` 的 include 增列
+> `refs/tags/plugin-v*`——插件发版 tag 与 `v*` 同享禁删改保护。按上面的
+> `gh api -X PUT` 契约应用，并在对应 PR 留痕。
+
 `bypass_actors` 恒空——规则对本人同样生效，防的就是自己的顺手误操作。确实需要
 绕过时把该 ruleset 的 `enforcement` 临时改 `disabled`，用完立刻恢复 `active`，
 并在相关 PR / issue 里留一句记录：
@@ -176,7 +211,7 @@ matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节�
 引用已有运行记录的 check，新仓库得先让 CI 跑过一次。
 
 仓库 About 元数据使用以下逐字值；重复执行可安全收敛 description、homepage，并确保
-三个约定 topic 存在：
+四个约定 topic 存在（`dsh-plugin` 是 awesome 收录门槛，随 plugin/ 子包加入）：
 
 ```bash
 gh repo edit shendeguize/Remote_DSH_Center \
@@ -184,7 +219,8 @@ gh repo edit shendeguize/Remote_DSH_Center \
   --homepage 'https://shendeguize.github.io/Remote_DSH_Center/' \
   --add-topic dsh \
   --add-topic ssh-tunnel \
-  --add-topic dashboard
+  --add-topic dashboard \
+  --add-topic dsh-plugin
 
 # 只读核验：不得修改线上设置
 gh repo view shendeguize/Remote_DSH_Center \
@@ -254,6 +290,12 @@ gh api repos/:owner/:repo/code-scanning/default-setup \
 | secret scanning + push protection | 开 | [SECURITY.md](SECURITY.md) 要求保护并脱敏本机配置、日志与 SSH 数据 |
 | private vulnerability reporting | 开 | 提供 [SECURITY.md](SECURITY.md) 指定的私密漏洞报告通道 |
 | CodeQL default setup | JavaScript/TypeScript，default query suite | 不另加 workflow，以 GitHub 托管的默认配置持续扫描入库代码，补足 [SECURITY.md](SECURITY.md) 的报告与处置通道 |
+
+**npm Trusted Publishing（一次性配置，待用户）**：插件包 `dsh-center-hub` 经
+plugin-publish.yml 以 OIDC 发布（`npm publish --provenance`，免长期 token）。需要
+npm 账号所有者在 npmjs.com 的包设置里一次性登记本仓库与 workflow 文件名
+（Trusted Publishing）——该操作只能在 npm 网页端完成，无法落成仓库文件；完成前
+publish 步骤会因鉴权失败而红。配置受阻时降级 `NPM_TOKEN` secret，并回来在此留痕。
 
 ## 本地环境
 

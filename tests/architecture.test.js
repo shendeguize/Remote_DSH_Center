@@ -206,6 +206,72 @@ test('setup-schema 是双侧共用的纯模块：零 import', () => {
   assert.deepEqual(importsOf(file), [], 'CLI 与页面都要能直接吃它，不能带任何依赖');
 });
 
+// ── plugin 例外边界：plugin/ 是零依赖底线的唯一例外，边界钉死在这四条里 ──────
+
+/** plugin 闸门要跨 .mjs 与 package.json，与上面只收 .js 的 walk 分开。 */
+function walkPluginGate(dir, keep, skipDirs) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (skipDirs.has(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkPluginGate(full, keep, skipDirs));
+    else if (keep(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+test('plugin 例外边界：根 package.json 无 dependencies/devDependencies/workspaces', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.dependencies, undefined, '主体运行时不许有依赖（例外只在 plugin/ 内）');
+  assert.equal(pkg.devDependencies, undefined, '主体测试也不许有依赖');
+  assert.equal(pkg.workspaces, undefined, '不用 npm workspaces：plugin/ 是独立子包（ADR-2）');
+});
+
+test('plugin 例外边界：全仓 package.json 清单只许根与 plugin/ 两份', () => {
+  // 第三个 package.json 出现即红——那是零依赖例外在静默扩散，先改设计再动手。
+  const found = walkPluginGate(
+    ROOT,
+    (name) => name === 'package.json',
+    new Set(['node_modules', '.git']),
+  ).map(rel).sort();
+  assert.deepEqual(found, ['package.json', 'plugin/package.json']);
+});
+
+test('plugin 例外边界：主体无任何 import/require 指向 plugin/（plugin 是叶子）', () => {
+  const offenders = [];
+  for (const scope of ['src', 'tests', 'scripts', 'site']) {
+    const dir = path.join(ROOT, scope);
+    if (!fs.existsSync(dir)) continue;
+    const jsFiles = walkPluginGate(
+      dir,
+      (name) => name.endsWith('.js') || name.endsWith('.mjs'),
+      new Set(['node_modules']),
+    );
+    for (const file of jsFiles) {
+      const text = fs.readFileSync(file, 'utf8');
+      const specs = [
+        ...importsOf(file),
+        ...[...text.matchAll(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]),
+      ];
+      for (const spec of specs) {
+        const resolved = spec.startsWith('.') || spec.startsWith('/')
+          ? rel(path.resolve(path.dirname(file), spec))
+          : spec;
+        if (resolved === 'plugin' || resolved.startsWith('plugin/')) {
+          offenders.push(`${rel(file)} → ${spec}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `主体禁止依赖 plugin/：\n${offenders.join('\n')}`);
+});
+
+test('plugin 例外边界：根 files 白名单无 plugin 前缀条目（主体包不夹带插件）', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const leaked = (pkg.files ?? []).filter((entry) => entry.startsWith('plugin'));
+  assert.deepEqual(leaked, [], '插件经 plugin-v* 独立发 npm，不进主体 npm 包');
+});
+
 // ── 覆盖率门槛脚本自身的判定（TST-07） ────────────────────────────────────
 
 const LCOV = [

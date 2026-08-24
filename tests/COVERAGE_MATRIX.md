@@ -313,6 +313,7 @@
 | lcov 必须包含磁盘上每个 `src/**/*.js`，缺任一文件或整份空报告即红；branch/function 只聚合诊断，不扩大行覆盖门槛 | 同上（sourceJsFiles / missingSourceFiles / coverageVerdict / BRH-BRF / FNH-FNF） |
 | lcov 重复 `SF` 与重复 `DA` 按「同一行任一命中即命中」合并；仅在磁盘不存在同名真实文件时剥离运行器附加的 `?query` / `#fragment`，磁盘上真实含 `?` / `#` 的 JS 必须分别计入分母 | `tests/architecture.test.js`（parseLcov 别名合并与真实文件反例） |
 | 覆盖率源码扫描 fail-closed：`src` 根、目录或文件为 symlink 都拒绝；轻量 lexer 能区分除法与 regex、字符串/template 与真实注释，按 ECMAScript Unicode 标识符边界识别 inline/trailing/template-expression 中的 Node/c8/istanbul suppression pragma | `tests/architecture.test.js`（sourceJsFiles / findCoverageSuppressions） |
+| plugin 例外边界（零依赖底线的唯一例外）：根 package.json 的 dependencies/devDependencies/workspaces 三字段均无；全仓（除 node_modules/.git）package.json 清单逐字等于根 + plugin/ 两份；主体（src/tests/scripts/site 的 .js/.mjs）无任何 import/require 指向 plugin/；根 `files` 无 plugin 前缀条目 | `tests/architecture.test.js`（plugin 例外边界四条） |
 
 ## 8.1 工程化工具链（ENG-24 的交付面）
 
@@ -416,6 +417,10 @@ SSH timing flake bounded retry；`git diff --check` 通过。
 | `src/web/components/**` | 98.28%（4123/4195） | 仅报告 | 不单独设卡，仍计入 overall |
 
 全仓 branch 与 function 仅诊断，不参与门槛。
+
+`plugin/` **不计入主体覆盖率分母**（覆盖率源码扫描限定 `src/**`，lint 路径也不含
+plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 plugin lane
+（ci.yml `plugin` job：`npm ci && npm run verify`）承担，门槛在 plugin/ 内自治。
 
 ## 10. 功能矩阵口径与豁免
 

@@ -12,3 +12,5 @@ node_modules/
 _site/
 # 发布包由 tag 触发的流水线现构建（scripts/build-bundle.mjs），不入库
 dist/
+# 插件构建产物只进 npm 包，不入库（发版流水线现构建）
+plugin/lib/

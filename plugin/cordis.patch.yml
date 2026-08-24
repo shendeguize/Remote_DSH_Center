@@ -1,0 +1,6 @@
+# `dsh plugin add` 据此把插件行叠进 profile 的 bundle layer。
+- insert:
+    - id: dsh-center-hub
+      name: 'dsh-center-hub'
+      # 刻意不带 config 块：层叠对 config 是整块替换不深合并，包内预置值会被
+      # 用户 profile 覆盖时静默丢弃，schemastery 默认值兜底更稳（设计 §3）。

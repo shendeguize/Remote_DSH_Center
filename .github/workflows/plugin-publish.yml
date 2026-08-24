@@ -1,0 +1,118 @@
+name: plugin-publish
+
+on:
+  push:
+    tags: ['plugin-v*']
+
+# 默认全关，逐 job 显式声明（设计 §8.5）
+permissions: {}
+
+# 三段：publish（三守卫 → 插件自测 → npm publish --provenance）→ smoke（发后安装
+# 冒烟：真从 registry 装回来核对产物与 manifest）→ release（GitHub Release，
+# rc 自动标 Pre-release）。
+#
+# 与主体 release.yml 的关系：插件走独立 tag 前缀 plugin-v*（与 v* 互不匹配，
+# release.yml 零改动），版本唯一源是 plugin/package.json；守卫不绑 release 分支
+# HEAD（偏离说明见 scripts/plugin-release-guard.mjs 与 CONTRIBUTING「插件发版」）。
+# 发布认证双路径（ADR-9）：npm 侧配置了 Trusted Publishing 时 OIDC 生效（免长期
+# token）；未配置时回落仓库 secret NPM_TOKEN（经 setup-node 的 registry-url 机制
+# 注入 ~/.npmrc）。两条路产物都带 provenance，均为 npm CLI 原生能力，不需要第三方
+# action。当前生效路径：NPM_TOKEN（2026-08-24 配置）。
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # npm Trusted Publishing / provenance
+    outputs:
+      version: ${{ steps.guard.outputs.version }}
+      prerelease: ${{ steps.guard.outputs.prerelease }}
+
+    steps:
+      # 守卫三要判「tag 提交是否包含于 main」，得有完整历史
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 采集分支事实
+        id: facts
+        run: |
+          git fetch --quiet origin main
+          if git merge-base --is-ancestor "$GITHUB_REF" origin/main; then
+            echo "in_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 三守卫：版本号一致 / plugin/CHANGELOG.md 小节非空 / tag 出自 main。
+      # 顺带把 version 与 prerelease 吐进 step outputs——「什么是预发布」的判定
+      # 只有 semver 那一份，不在 shell 里再猜一次。
+      - name: 插件发版守卫
+        id: guard
+        run: |
+          node scripts/plugin-release-guard.mjs "$GITHUB_REF_NAME" \
+            --in-main "${{ steps.facts.outputs.in_main }}" \
+            --vars-out "$GITHUB_OUTPUT"
+
+      - name: 插件自测（typecheck + 测试 + 构建 + 打包清单）
+        working-directory: plugin
+        run: npm ci && npm run verify
+
+      # NPM_TOKEN 缺席时该 env 为空，setup-node 生成的 ~/.npmrc 拿不到凭据，
+      # npm CLI 转而尝试 OIDC（Trusted Publishing）——两路自然互斥，无需分支。
+      - name: 发布到 npm（provenance；OIDC 或 NPM_TOKEN，ADR-9）
+        working-directory: plugin
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --ignore-scripts
+
+  smoke:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      # 版本号用守卫从 tag 解出的那一份（step outputs），不在 shell 里再剥一次前缀
+      - name: 发后安装冒烟
+        run: node scripts/plugin-smoke.mjs --version "${{ needs.publish.outputs.version }}"
+
+  release:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: 建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/plugin-release-guard.mjs --extract-notes "$GITHUB_REF_NAME" \
+            > "$RUNNER_TEMP/plugin-release-notes.md"
+          args=(--title "dsh-center-hub $GITHUB_REF_NAME" --verify-tag)
+          args+=(--notes-file "$RUNNER_TEMP/plugin-release-notes.md")
+          # rc 自动标 Pre-release：判定复用守卫脚本（semver 那一份口径）
+          if [ "$(node scripts/plugin-release-guard.mjs --is-prerelease "$GITHUB_REF_NAME")" = 'true' ]; then
+            args+=(--prerelease)
+            echo "预发布通道：Release 会标 Pre-release，不动 latest 指针"
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}"

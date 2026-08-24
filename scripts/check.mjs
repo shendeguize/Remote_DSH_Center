@@ -44,7 +44,7 @@ export const PACK_RULES = Object.freeze({
     'src/cli.js', 'src/server.js', 'src/web/index.html', 'src/web/style.css',
     'scripts/install.mjs',
   ],
-  forbidden: ['tests/', '.local/', 'scripts/real-acceptance', '.github/'],
+  forbidden: ['tests/', '.local/', 'scripts/real-acceptance', '.github/', 'plugin/'],
 });
 
 /**

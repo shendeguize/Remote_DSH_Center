@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增 `plugin/` 子包：dsh 插件 `dsh-center-hub`，把 DSH Center 面板挂进 dsh web 页面。
+  它是仓库零 npm 依赖底线的唯一例外（依赖与构建链封闭在 plugin/ 内），以独立的
+  `plugin-v*` tag 发版——推 tag 即触发自动发版链（三守卫 → 插件自测 →
+  `npm publish --provenance` → 发后安装冒烟 → GitHub Release，rc 自动标
+  Pre-release），变更记录见 `plugin/CHANGELOG.md`；主体与插件的边界由新增的
+  零依赖例外边界闸门（`tests/architecture.test.js`）钉死。
+
 ## [0.2.0] - 2026-08-24
 
 ### 变更

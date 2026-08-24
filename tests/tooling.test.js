@@ -37,6 +37,10 @@ import {
 } from '../scripts/lint.mjs';
 import { evaluateGuards, extractChangelogSection, versionFromTag } from '../scripts/release-guard.mjs';
 import {
+  evaluatePluginGuards, pluginNotesFromChangelog, versionFromPluginTag,
+} from '../scripts/plugin-release-guard.mjs';
+import { MAX_INSTALL_RETRIES, auditPackageFacts, readPackageFacts } from '../scripts/plugin-smoke.mjs';
+import {
   evaluateS12, findChrome, findSecretInDomSnapshot, snapshotDomObservables,
 } from '../scripts/ui-smoke.mjs';
 import { armExitGuard } from '../scripts/lib/exit-guard.mjs';
@@ -1004,6 +1008,159 @@ test('evaluateGuards：预发布不要求打在 release HEAD 上，但仍要求�
   // 反面：同样的 sha 错位，正式版必须红——别把豁免误伤到正式版上
   const asFinal = evaluateGuards({ ...rc, tag: 'v0.2.0', pkgVersion: '0.2.0', changelog: '## [0.2.0]\n\n- 正式\n' });
   assert.match(asFinal.problems.join(''), /正式版 tag 只许打在 release HEAD 上/);
+});
+
+// ── 插件发版守卫（plugin-v*，scripts/plugin-release-guard.mjs） ────────────
+
+test('versionFromPluginTag：只认 plugin-v 前缀，主体 v* 与残缺形状都不算', () => {
+  assert.equal(versionFromPluginTag('refs/tags/plugin-v0.1.0'), '0.1.0');
+  assert.equal(versionFromPluginTag('plugin-v0.2.0-rc.1'), '0.2.0-rc.1', '预发布 tag 要认');
+  assert.equal(versionFromPluginTag('v0.1.0'), null, '主体 tag 不归插件守卫管');
+  assert.equal(versionFromPluginTag('plugin-0.1.0'), null, '少了 v 不算');
+  assert.equal(versionFromPluginTag('plugin-v0.1'), null, '必须三段');
+  assert.equal(
+    versionFromPluginTag('plugin-v0.1.0+build.5'), null,
+    'build 元数据不参与比较，放过去只会让守卫一莫名其妙地红',
+  );
+  assert.equal(versionFromPluginTag(''), null);
+});
+
+test('evaluatePluginGuards：三关各自一红一绿，全过则带出正文', () => {
+  const changelog = '## [0.1.0] - 2026-08-24\n\n### 新增\n- 插件首发\n';
+  const base = {
+    tag: 'plugin-v0.1.0', pkgVersion: '0.1.0', changelog, inMain: true,
+  };
+
+  const pass = evaluatePluginGuards(base);
+  assert.equal(pass.ok, true, pass.problems.join('；'));
+  assert.equal(pass.version, '0.1.0');
+  assert.equal(pass.prerelease, false);
+  assert.match(pass.body, /插件首发/);
+
+  assert.match(
+    evaluatePluginGuards({ ...base, pkgVersion: '0.2.0' }).problems.join(''),
+    /plugin\/package\.json 的 version 是 0\.2\.0/,
+    '守卫一红：tag 与 plugin/package.json 版本对不上',
+  );
+  assert.match(
+    evaluatePluginGuards({ ...base, changelog: '## [0.9.0]\n\n- 别的版本\n' }).problems.join(''),
+    /没有 \[0\.1\.0\] 的小节/,
+    '守卫二红：plugin/CHANGELOG.md 缺对应小节',
+  );
+  assert.match(
+    evaluatePluginGuards({ ...base, changelog: '## [0.1.0] - 2026-08-24\n\n' }).problems.join(''),
+    /小节正文是空的/,
+    '守卫二红：只有标题没正文也算不合格',
+  );
+  assert.match(
+    evaluatePluginGuards({ ...base, inMain: false }).problems.join(''),
+    /不在 main 上/,
+    '守卫三红：tag 从野分支上长出来',
+  );
+  assert.equal(
+    evaluatePluginGuards({ ...base, inMain: null }).ok, true,
+    '守卫三绿：本地预检不给 in-main 时不判（与 release-guard 同款口径）',
+  );
+  assert.match(
+    evaluatePluginGuards({ ...base, tag: 'v0.1.0' }).problems.join(''),
+    /不是 plugin-v/,
+    '主体形状的 tag 直接拒：两条发版线不许互吃',
+  );
+});
+
+test('evaluatePluginGuards：rc 版本一致性与 CHANGELOG 照旧，且不看 release 分支', () => {
+  // 偏离主仓守卫（设计 §8.4）：插件不产出 standalone 包，判定里根本没有 release
+  // 分支这个输入——rc 与正式版都只要求「出自 main」。
+  const changelog = '## [0.1.1-rc.1] - 2026-08-25\n\n- 试装\n';
+  const rc = evaluatePluginGuards({
+    tag: 'plugin-v0.1.1-rc.1', pkgVersion: '0.1.1-rc.1', changelog, inMain: true,
+  });
+  assert.equal(rc.ok, true, rc.problems.join('；'));
+  assert.equal(rc.prerelease, true, 'rc 判定出自 semver 那一份口径');
+  assert.match(
+    evaluatePluginGuards({
+      tag: 'plugin-v0.1.1-rc.1', pkgVersion: '0.1.1', changelog, inMain: true,
+    }).problems.join(''),
+    /version 是 0\.1\.1/,
+    'rc 的版本一致性一点不放松：0.1.1 与 0.1.1-rc.1 是两个版本',
+  );
+});
+
+test('pluginNotesFromChangelog：--extract-notes 的正文口径', () => {
+  const changelog = [
+    '# Changelog — dsh-center-hub', '',
+    '## [Unreleased]', '',
+    '## [0.1.0] - 2026-08-24', '', '### 新增', '- 首发', '',
+    '[0.1.0]: https://example.com/plugin-v0.1.0', '',
+  ].join('\n');
+
+  const hit = pluginNotesFromChangelog(changelog, 'plugin-v0.1.0');
+  assert.equal(hit.ok, true, hit.problem ?? '');
+  assert.equal(hit.notes, '### 新增\n- 首发', '链接引用区不算正文');
+
+  const missing = pluginNotesFromChangelog(changelog, 'plugin-v9.9.9');
+  assert.equal(missing.ok, false, '没有对应小节不能给空 release notes 蒙混过去');
+  assert.match(missing.problem, /没有 \[9\.9\.9\] 的小节/);
+  assert.match(
+    pluginNotesFromChangelog(changelog, 'v0.1.0').problem,
+    /不是 plugin-v/,
+    '主体 tag 形状直接拒',
+  );
+});
+
+// ── 插件安装冒烟（scripts/plugin-smoke.mjs）的断言口径 ────────────────────
+
+test('plugin-smoke 断言：假包结构齐全则绿，缺哪样各自点名', (t) => {
+  const dir = tmpdir(t);
+  const write = (relPath, text) => {
+    const full = path.join(dir, relPath);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, text);
+  };
+  write('package.json', JSON.stringify({
+    name: 'dsh-center-hub',
+    version: '0.1.0',
+    dsh: {
+      engines: { dsh: '>=0.1.1-rc.2' },
+      bundle: { patch: './cordis.patch.yml' },
+      client: { platform: 'web' },
+    },
+  }));
+  write('lib/index.js', 'export {};\n');
+  write('lib/client.js', 'window.__ModuleLoader__.load("dsh-center-hub/client", () => {});\n');
+  write('cordis.patch.yml', '- insert: []\n');
+
+  const facts = readPackageFacts(dir);
+  assert.deepEqual(
+    auditPackageFacts(facts, { expectName: 'dsh-center-hub', expectVersion: '0.1.0' }),
+    [],
+    '三件套齐、双半区产物在、指纹对——必须绿',
+  );
+  assert.match(
+    auditPackageFacts(facts, { expectVersion: '0.2.0' }).join('\n'),
+    /装到的版本是 0\.1\.0，要的是 0\.2\.0/,
+    'registry 给错版本（如 dist-tag 指飞了）要红',
+  );
+
+  const bare = auditPackageFacts({ ...facts, pkg: { name: 'dsh-center-hub', version: '0.1.0' } });
+  assert.match(bare.join('\n'), /dsh\.engines\.dsh/, 'manifest 三件套缺一不可（engines）');
+  assert.match(bare.join('\n'), /dsh\.bundle\.patch/, 'manifest 三件套缺一不可（bundle.patch）');
+  assert.match(bare.join('\n'), /dsh\.client/, 'manifest 三件套缺一不可（client）');
+
+  write('lib/client.js', 'module.exports = {};\n');
+  assert.match(
+    auditPackageFacts(readPackageFacts(dir)).join('\n'),
+    /__ModuleLoader__\.load/,
+    'browser 半区没按 lazy-CJS factory 构建时必须点名指纹',
+  );
+
+  fs.rmSync(path.join(dir, 'lib', 'client.js'));
+  fs.rmSync(path.join(dir, 'cordis.patch.yml'));
+  const gone = auditPackageFacts(readPackageFacts(dir)).join('\n');
+  assert.match(gone, /包内缺 lib\/client\.js/);
+  assert.match(gone, /包内缺 cordis\.patch\.yml/, 'dsh plugin add 靠它叠 bundle layer，掉出 files 白名单要当场红');
+
+  assert.equal(MAX_INSTALL_RETRIES, 2, '网络重试上界是契约：≤2 次，绝不无限重试');
 });
 
 /**

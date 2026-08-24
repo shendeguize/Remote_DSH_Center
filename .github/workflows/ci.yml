@@ -117,3 +117,20 @@ jobs:
             .local/tmp/site-check/
           if-no-files-found: ignore
           retention-days: 7
+
+  # plugin/ 子包是零依赖底线的唯一例外（独立 npm 包，依赖与构建链封闭在 plugin/ 内），
+  # 走自己的 lane；不动上面的 check job 与零依赖自检（例外边界闸门在 tests/ 里补位）。
+  # 不进 required checks：required 名单与 ruleset 强耦合有用例钉死，稳定一个里程碑后再议。
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: 插件自测（typecheck + 测试 + 构建 + 打包清单）
+        working-directory: plugin
+        run: npm ci && npm run verify
