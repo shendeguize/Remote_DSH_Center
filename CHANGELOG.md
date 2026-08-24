@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-24
+
+### 变更
+
+- `0.3` 系列首个稳定版；运行行为与 `0.3.0-rc.1` 相同。本版起 `dsh-center` 同步发布到
+  npm（`npm i -g dsh-center`，需自备 Node ≥ 22），并提供 dsh 插件 `dsh-center-hub`
+  （在 dsh web 页面内嵌 DSH Center 面板，独立 `plugin-v*` 发版）。standalone 与
+  git 安装通道的行为与产物不变。
+
 ## [0.3.0-rc.1] - 2026-08-24
 
 ### 新增
