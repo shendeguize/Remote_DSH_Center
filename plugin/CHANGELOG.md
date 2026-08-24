@@ -8,6 +8,8 @@ CHANGELOG.md 的主体版本线，见设计 ADR-6）。
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-24
+
 ### 新增
 
 - 「DSH Center」Tab（`conversation.view` 环）：探活通过后以 iframe 整页内嵌
