@@ -33,7 +33,11 @@
 - **本机**：协议脚本交给本机 shell；浏览器直连当次 `dsh web` 的实际环回端口，不创建
   `ssh -L`，不会进入 `degraded`。
 - **远端**：控制动作是单条一次性 SSH；页面经 `ssh -L` 映射到本机环回端口。远端没有
-  Center agent 或守护进程，落地物只在 `~/.dsh_center_remote/`。
+  Center agent 或守护进程。
+
+两类运输都把 Center 管理的日志、patch、settings staging 与备份放在目标账户的
+`~/.dsh_center_remote/`。用户明确保存 dsh 配置时，唯一例外是写入解析后的
+`${DSH_HOME:-$HOME/.dsh}/settings.yaml`。
 
 任一目标缺少 `dsh` 或 web profile 时，探测会明确标为“未安装/未配置”，不会假装可用，
 也不会代为安装。
@@ -72,9 +76,13 @@ curl -fsSL <上面的 URL> | bash -s -- --standalone          # 强制 standalon
 curl -fsSL <上面的 URL> | bash -s -- --git                 # 强制 git；缺 Node 直接报错
 curl -fsSL <上面的 URL> | bash -s -- --pre                 # 允许安装预发布版本
 curl -fsSL <上面的 URL> | bash -s -- --version v0.1.0      # standalone 钉死某个 Release
-curl -fsSL <上面的 URL> | DSHC_REF=main bash               # git 跟随 main
-curl -fsSL <上面的 URL> | DSHC_REF=v0.1.0 bash             # git 钉死 tag/分支
+curl -fsSL <上面的 URL> | DSHC_REF=main bash               # 仅本次安装检出 main
+curl -fsSL <上面的 URL> | DSHC_REF=v0.1.0 bash             # 仅本次安装检出该 tag
 ```
+
+`DSHC_REF` 只选择这次安装的 git 检出目标，不会保存成后续更新策略。以后直接运行
+`dshc update` 仍默认回到 `release`；要继续 main 或指定 tag，应显式运行
+`dshc update --ref main` / `dshc update --ref <tag>`，或重跑安装器时再次设置 `DSHC_REF`。
 
 管道中向底层安装器传参要使用 `bash -s --`：
 
@@ -195,7 +203,8 @@ dsh Web 自带目录选择器仍按其自身规则从目标账户 `HOME` 开始�
 读取和编辑 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`；本机条目使用等价本机通道。
 
 Center 把文件视为不透明 UTF-8 文本，不解析或改写 YAML，因此不绑定 dsh 当前 schema。
-读写上限均为 512 KiB。保存前用校验和确认文件未被其他编辑器改动，再备份并原子替换。
+正文只通过一次性命令的 stdin/stdout 流转：读取时以可逆 hex 经 stdout 返回，保存时经 stdin
+送入。读写上限均为 512 KiB。保存前用校验和确认文件未被其他编辑器改动，再备份并原子替换。
 遇到冲突或无法确认保存结果时，页面要求重新加载并保留原草稿供手工合并。dsh 自行监视并
 加载该文件；Center 不修改 dsh CLI，也不自动重启实例。
 
@@ -209,12 +218,15 @@ Center 把文件视为不透明 UTF-8 文本，不解析或改写 YAML，因此�
   origin，`Host` 必须是环回名。后者防止攻击者域名解析到 `127.0.0.1` 后把页面放进其 origin。
   CLI 不带 `Origin`，不受影响。
 - 远端数据面使用 `ssh -L`，加密和鉴权取决于 SSH 配置与密钥；本机数据面直连环回地址。
-- dsh 配置文件可能含凭据。正文只短暂停留在 manager/浏览器内存和一次性命令 stdin，
-  不写入 manager 配置、日志或 SSE。不要向不可信的人开放 manager 页面或浏览器会话。
+- dsh 配置文件可能含凭据。正文只短暂停留在 manager/浏览器内存和一次性命令 stdin/stdout
+  （读取内容是可逆 hex）中，不写入 manager 配置、日志或 SSE。不要向不可信的人开放
+  manager 页面或浏览器会话。
 - 除用户明确点击“保存文件”外，本机与远端受管侧落地物只在各自 HOME 下的
   `~/.dsh_center_remote/`（日志、patch、settings staging 与单份备份）。显式保存只允许写入
-  解析后的 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`，API 不接受任意路径。patch 同步不会清理
-  无法确认归属的既有文件，目标路径也限制在该目录。
+  解析后的 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`，API 不接受任意路径。**本机** patch
+  sync 与用户文件共用 `patches/`，不会清理无法证明归属的既有文件；**远端**
+  `~/.dsh_center_remote/patches/` 是 Center 管理目录，同步会清理已不再被配置引用的文件。
+  两类 patch 目标都限制在该管理目录内。
 - 注入的环境变量和追加参数会原样出现在目标命令行，`ps` 可见；**不要把密钥放进去。**
 - **不误杀是硬边界**：本机与远端停止前都逐字比较记录的 `ps` 命令行指纹。手动实例只读；
   指纹不一致就拒杀。最坏结果是该停的没停，而不是误杀别人的进程。
@@ -263,8 +275,10 @@ dshc update --pre        # 允许更新到预发布版本
 dshc update --restart    # 更新后重启 manager；默认只提示，避免自动中断隧道
 ```
 
-- **git 安装**跟随 `origin/release`，只允许快进。工作区脏或目标不是当前提交后代时会拒绝，
-  不会 merge 覆盖本地改动。回退示例：`git -C ~/.dsh_center/app checkout v0.1.0`。
+- **git 安装**运行 `dshc update` 时默认选择 `origin/release`；只有显式
+  `dshc update --ref main` / `--ref <tag>` 才改用该目标，且仅作用于当次更新。更新只允许快进；
+  工作区脏或目标不是当前提交后代时会拒绝，不会 merge 覆盖本地改动。回退示例：
+  `git -C ~/.dsh_center/app checkout v0.1.0`。
 - **standalone 安装**只有 SHA256 校验通过才落盘，通过“解包到 `.new` → 原子改名”切换；
   上一版保留在 `~/.dsh_center/app.prev`，可换回。
 
@@ -272,14 +286,33 @@ dshc update --restart    # 更新后重启 manager；默认只提示，避免自
 
 ## 彻底卸载
 
+先按安全顺序停止服务与 manager：
+
 ```bash
-dshc service uninstall                                  # 1. 如安装过 launchd 自启
-dshc down                                               # 2. 停 manager 与隧道
-node ~/.dsh_center/app/scripts/install.mjs --uninstall  # 3. 删除 PATH 中的 dshc 软链
-rm -rf ~/.dsh_center                                    # 4. 删除配置、状态、日志与代码
+dshc service uninstall  # 1. 如安装过 launchd 自启
+dshc down               # 2. 停 manager 与隧道
 ```
 
-第 4 步不会删除受管侧目录。本机日志与 patch 仍可能在 `~/.dsh_center_remote/`；远端同理。
+再按安装通道调用随安装提供的卸载脚本摘掉链接，二选一：
+
+```bash
+# git 默认路径：使用系统 Node
+node ~/.dsh_center/app/scripts/install.mjs --uninstall
+
+# standalone 默认路径：使用随包 Node
+~/.dsh_center/app/runtime/bin/node \
+  ~/.dsh_center/app/app/scripts/install.mjs --uninstall
+```
+
+若安装时自定义了 `--prefix`，卸载时传入同一 `--prefix`；若自定义了 app 根目录，相应替换
+上面的脚本与随包 Node 路径。不要用 `rm` 盲删链接代替卸载脚本。摘链完成后再删除 manager 数据：
+
+```bash
+rm -rf ~/.dsh_center
+```
+
+删除 manager 数据不会删除受管侧目录。本机日志与 patch 仍可能在
+`~/.dsh_center_remote/`；远端同理。
 确认相关实例已经停止后再逐台清理：
 
 ```bash

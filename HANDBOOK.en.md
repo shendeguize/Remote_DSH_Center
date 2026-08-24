@@ -4,7 +4,7 @@
 
 This handbook carries the complete usage and maintenance details that do not belong on the
 README front page. For a first run, start with the
-[README quick start](README.en.md#quick-start).
+[README quick start](README.en.md#five-minute-quick-start).
 
 ## Requirements and local/remote differences
 
@@ -35,8 +35,11 @@ The two host types use different transports:
 - **Local:** protocol scripts run through the local shell. The browser connects directly to that
   run's actual loopback port, with no `ssh -L`, and the host never enters `degraded`.
 - **Remote:** control actions are one-shot SSH commands. The page reaches a local loopback mapping
-  through `ssh -L`. There is no Center agent or daemon on the host; artifacts stay under
-  `~/.dsh_center_remote/`.
+  through `ssh -L`. There is no Center agent or daemon on the host.
+
+For both transports, Center-managed logs, patches, settings staging, and backups stay under the
+target account's `~/.dsh_center_remote/`. The one exception is an explicit user save to the
+resolved `${DSH_HOME:-$HOME/.dsh}/settings.yaml`.
 
 If a target lacks `dsh` or its web profile, probing labels it "not installed / not configured"
 instead of pretending it is usable. Center never installs it.
@@ -76,9 +79,14 @@ curl -fsSL <the URL above> | bash -s -- --standalone         # force standalone
 curl -fsSL <the URL above> | bash -s -- --git                # force git; fail if Node is missing
 curl -fsSL <the URL above> | bash -s -- --pre                # allow pre-release versions
 curl -fsSL <the URL above> | bash -s -- --version v0.1.0     # pin a Release for standalone
-curl -fsSL <the URL above> | DSHC_REF=main bash              # make git track main
-curl -fsSL <the URL above> | DSHC_REF=v0.1.0 bash            # pin a git tag or branch
+curl -fsSL <the URL above> | DSHC_REF=main bash              # check out main for this install only
+curl -fsSL <the URL above> | DSHC_REF=v0.1.0 bash            # check out this tag for this install only
 ```
+
+`DSHC_REF` selects only this installation's git checkout; it does not persist an update policy.
+A later plain `dshc update` defaults back to `release`. To keep using main or a particular tag,
+run `dshc update --ref main` / `dshc update --ref <tag>` explicitly, or set `DSHC_REF` again
+when rerunning the installer.
 
 Flags passed through a pipe require `bash -s --`:
 
@@ -216,8 +224,10 @@ edit `${DSH_HOME:-$HOME/.dsh}/settings.yaml` over SSH. A local entry uses the eq
 transport.
 
 Center treats the file as opaque UTF-8 and never parses or rewrites YAML, avoiding dependence on
-dsh's current schema. Reads and writes are each limited to 512 KiB. Before save, a checksum
-detects another editor's changes; Center then makes a backup and atomically replaces the file.
+dsh's current schema. The body flows only through one-shot command stdin/stdout: reads return
+reversible hex over stdout, and saves send the body over stdin. Reads and writes are each limited
+to 512 KiB. Before save, a checksum detects another editor's changes; Center then makes a backup
+and atomically replaces the file.
 On conflict or an unknown save result, the page asks for a reload and preserves the old draft
 for manual merging. dsh watches and reloads this file itself; Center does not modify the dsh CLI
 or restart the instance.
@@ -236,14 +246,17 @@ This tool is designed as a **single-user desktop tool on a trusted network**:
 - The remote data plane is `ssh -L`; encryption and authentication come from SSH configuration
   and keys. The local data plane connects directly to loopback.
 - A dsh configuration file may contain credentials. Its body exists briefly in manager/browser
-  memory and one-shot command stdin, and is never written to manager config, logs, or SSE. Do
-  not share the manager page or browser session with untrusted users.
+  memory and one-shot command stdin/stdout (reads use reversible hex), and is never written to
+  manager config, logs, or SSE. Do not share the manager page or browser session with untrusted
+  users.
 - Apart from an explicit **Save file** action, managed-side artifacts stay under
   `~/.dsh_center_remote/` in that account's HOME (logs, patches, settings staging, and one
   backup). Explicit save may write only the resolved
-  `${DSH_HOME:-$HOME/.dsh}/settings.yaml`; the API accepts no arbitrary path. Patch sync never
-  removes an existing file whose ownership it cannot prove, and the destination is constrained
-  to that directory.
+  `${DSH_HOME:-$HOME/.dsh}/settings.yaml`; the API accepts no arbitrary path. **Local** patch
+  sync shares `patches/` with user files and refuses to remove an existing file whose ownership
+  it cannot prove. The remote `~/.dsh_center_remote/patches/` is Center-managed, so remote sync
+  removes files no longer referenced by configuration. Both patch destinations remain confined
+  to that managed directory.
 - Injected environment variables and extra arguments appear verbatim on the target command line
   and are visible to `ps`; **never put secrets there**.
 - **Never killing the wrong process is a hard boundary.** Before local or remote stop, Center
@@ -299,9 +312,11 @@ dshc update --pre        # allow a pre-release version
 dshc update --restart    # restart the manager afterward; default is only a reminder
 ```
 
-- A **git install** tracks `origin/release` and is fast-forward only. A dirty working tree or a
-  target that is not a descendant is refused; it never merges over local changes. Example
-  rollback: `git -C ~/.dsh_center/app checkout v0.1.0`.
+- For a **git install**, plain `dshc update` defaults to `origin/release`. Only an explicit
+  `dshc update --ref main` / `--ref <tag>` selects another target, for that update only. Updates
+  are fast-forward only: a dirty working tree or a target that is not a descendant is refused,
+  and local changes are never overwritten by a merge. Example rollback:
+  `git -C ~/.dsh_center/app checkout v0.1.0`.
 - A **standalone install** writes only after SHA256 verification, switching with "unpack to
   `.new` → atomic rename." The previous release remains at `~/.dsh_center/app.prev` and can be
   moved back.
@@ -310,16 +325,35 @@ See [CHANGELOG.md](CHANGELOG.md) for release changes.
 
 ## Full uninstallation
 
+First stop the service and manager in this safe order:
+
 ```bash
-dshc service uninstall                                  # 1. if launchd autostart was installed
-dshc down                                               # 2. stop the manager and tunnels
-node ~/.dsh_center/app/scripts/install.mjs --uninstall  # 3. remove the dshc symlink from PATH
-rm -rf ~/.dsh_center                                    # 4. delete config, state, logs, and code
+dshc service uninstall  # 1. if launchd autostart was installed
+dshc down               # 2. stop the manager and tunnels
 ```
 
-Step 4 does not remove managed-side directories. Local logs and patches may remain in
-`~/.dsh_center_remote/`, and remotes are the same. Confirm that relevant instances have stopped,
-then clean each host:
+Then invoke the installed channel's own uninstaller to remove the link; choose one:
+
+```bash
+# Default git path: use the system Node
+node ~/.dsh_center/app/scripts/install.mjs --uninstall
+
+# Default standalone path: use the bundled Node
+~/.dsh_center/app/runtime/bin/node \
+  ~/.dsh_center/app/app/scripts/install.mjs --uninstall
+```
+
+If installation used a custom `--prefix`, pass the same `--prefix` during uninstall. If the app
+root was customized, replace the script and bundled-Node paths accordingly. Do not blindly `rm`
+the link instead of using the installer. After unlinking, remove manager data:
+
+```bash
+rm -rf ~/.dsh_center
+```
+
+Removing manager data does not remove managed-side directories. Local logs and patches may
+remain in `~/.dsh_center_remote/`, and remotes are the same. Confirm that relevant instances have
+stopped, then clean each host:
 
 ```bash
 rm -rf ~/.dsh_center_remote

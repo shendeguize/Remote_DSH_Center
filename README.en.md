@@ -20,16 +20,23 @@ against an in-browser mock manager; try start, disconnect, and recovery ·
 
 *Hub — every available host, current state, and entry point on one page.*
 
-**Five-minute quick start**
+## Five-minute quick start
+
+Minimum prerequisites: run the manager on macOS or Linux; source / git installs need Node ≥ 22;
+managed targets need a configured `dsh` web profile, and remotes also need key-based SSH with TCP
+forwarding. See [Requirements](#requirements) for details.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"  # default prefix; add a custom prefix as the installer says
 dshc init      # four steps: ports → remote convention → choose local/SSH hosts → confirm
 dshc up        # start the local manager in the background
 dshc open      # open the Hub in your browser
 ```
 
-The installer chooses the git or macOS standalone channel automatically; the wizard probes a
+By default, installation links `dshc` under `~/.local/bin`; the `export` makes it available in
+the current shell immediately. If you passed `--prefix`, use the directory printed by the
+installer instead. The installer chooses the git or macOS standalone channel automatically; the wizard probes a
 local candidate plus remotes from `~/.ssh/config`. See the [handbook](HANDBOOK.en.md) for every
 install option and first-start detail.
 
@@ -37,8 +44,9 @@ install option and first-start detail.
 
 - **One local + remote entry point.** The browser uses the actual local web port or an
   `ssh -L` mapped port for a remote.
-- **Nothing resident or installed remotely.** Control actions use one-shot SSH; remote
-  artifacts stay under `~/.dsh_center_remote/`.
+- **Nothing resident or installed remotely.** Control actions use one-shot SSH. Center-managed
+  logs, patches, and temporary files stay under `~/.dsh_center_remote/`; the one explicit
+  exception is a user saving dsh configuration to `${DSH_HOME:-$HOME/.dsh}/settings.yaml`.
 - **Hub plus persistent tabs.** Start and enter a `ready` host in one click; iframe sessions
   survive view switches without reloads.
 - **Self-healing tunnels.** A remote disconnect becomes `degraded` and retries with backoff;
@@ -76,15 +84,16 @@ with `SHA256SUMS` plus `gh attestation verify`.
 
 ## A look around
 
-All screenshots below come from the same headless-browser capture flow and reuse only product
-shots under `site/assets/shots/`.
+Center UI screenshots come from one headless-browser capture flow. The iframe image uses an
+independent mock dsh web only to show the shape of the integration; it is not a screenshot of
+the target product's real page.
 
 | | |
 |---|---|
 | ![First-run wizard probing local and remote hosts](site/assets/shots/setup.png) | ![Host details with configuration and management actions](site/assets/shots/drawer.png) |
 | *First-run wizard — probe candidates and choose managed hosts.* | *Host details — configuration, logs, and actions in one place.* |
-| ![A dsh web session in a persistent tab](site/assets/shots/iframe.png) | ![Recovery overlay after a remote tunnel disconnects](site/assets/shots/degraded.png) |
-| *Workspace tab — iframe switches do not reload.* | *Disconnect recovery — content stays while the tunnel reconnects.* |
+| ![A mock dsh web in a persistent tab](site/assets/shots/iframe.png) | ![Recovery overlay after a remote tunnel disconnects](site/assets/shots/degraded.png) |
+| *Workspace tab — an independent mock shows the integration shape; switches do not reload.* | *Disconnect recovery — content stays while the tunnel reconnects.* |
 
 ## Architecture and data flow
 
@@ -163,7 +172,7 @@ Follow the [handbook procedure](HANDBOOK.en.md#full-uninstallation) to stop inst
 the service and CLI, and then delete manager data. Do not replace `dshc stop` with the
 unfingerprinted `pkill -f "dsh web"`; it may kill other users' matching processes.
 
-### Documentation
+## Documentation
 
 - [English handbook](HANDBOOK.en.md) · [中文使用手册](HANDBOOK.md)
 - [Changelog](CHANGELOG.md)

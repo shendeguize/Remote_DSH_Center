@@ -20,23 +20,29 @@
 
 *Hub — 所有可用主机、运行状态与入口集中在一页。*
 
-**5 分钟上手**
+## 5 分钟上手
+
+最小前提：manager 运行在 macOS 或 Linux；源码 / git 通道需要 Node ≥ 22；受管目标已配置
+`dsh` web profile，远端还需免密 SSH 与 TCP 转发。细节见[前提](#前提)。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shendeguize/Remote_DSH_Center/main/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"  # 默认 prefix；自定义 prefix 请按安装器提示加入 PATH
 dshc init      # 四步向导：端口 → 远端约定 → 选择本机/SSH 主机 → 确认
 dshc up        # 后台启动本机 manager
 dshc open      # 在浏览器打开 Hub
 ```
 
-安装器会自动选择 git 或 macOS standalone 通道；向导会探测本机候选和
+默认安装把 `dshc` 链接到 `~/.local/bin`，上面的 `export` 让当前 shell 立即可用；若指定了
+`--prefix`，请改为安装器提示的目录。安装器会自动选择 git 或 macOS standalone 通道；向导会探测本机候选和
 `~/.ssh/config` 中的远端候选。完整安装选项与首次启动说明见[使用手册](HANDBOOK.md)。
 
 ## 它解决什么问题
 
 - **本机 + 远端统一入口**：本机浏览器直连实际 web 端口；远端页面走 `ssh -L` 映射端口。
-- **远端零常驻、零安装**：控制动作使用单条一次性 SSH，远端落地物仅在
-  `~/.dsh_center_remote/`。
+- **远端零常驻、零安装**：控制动作使用单条一次性 SSH；Center 管理的日志、patch 与临时文件在
+  `~/.dsh_center_remote/`。唯一显式例外是用户保存 dsh 配置时写入
+  `${DSH_HOME:-$HOME/.dsh}/settings.yaml`。
 - **Hub + 保活标签页**：`ready` 主机一步拉起并进入；切页不重载 iframe，会话状态保留。
 - **隧道自愈**：远端断联进入 `degraded` 并退避重连；进程真死才标为 `crashed`。
 - **不误杀**：关停前逐字核对 `ps` 命令行指纹；手动实例只读，指纹不符就拒杀。
@@ -67,14 +73,15 @@ dshc open      # 在浏览器打开 Hub
 
 ## 界面速览
 
-以下截图均由同一套无头浏览器流程生成；图片只复用 `site/assets/shots/` 中的产品截图。
+Center 界面截图来自同一套无头浏览器生成流程。iframe 图使用独立的 mock dsh web，仅用于呈现
+Center 的嵌入集成轮廓，不是目标产品真实页面截图。
 
 | | |
 |---|---|
 | ![首启向导：探测并选择本机与远端主机](site/assets/shots/setup.png) | ![主机详情：配置与管理动作](site/assets/shots/drawer.png) |
 | *首启向导 — 探测候选并选择纳管主机。* | *主机详情 — 配置、日志与管理动作集中呈现。* |
-| ![保活标签页中的 dsh web](site/assets/shots/iframe.png) | ![远端隧道断联后的重连遮罩](site/assets/shots/degraded.png) |
-| *工作标签 — iframe 切换不重载。* | *断联恢复 — 内容保留，隧道重连后继续。* |
+| ![保活标签页中的 mock dsh web](site/assets/shots/iframe.png) | ![远端隧道断联后的重连遮罩](site/assets/shots/degraded.png) |
+| *工作标签 — 独立 mock 展示嵌入轮廓；切换不重载。* | *断联恢复 — 内容保留，隧道重连后继续。* |
 
 ## 架构与数据流
 
@@ -142,7 +149,7 @@ dsh Workspace 登记、`${DSH_HOME:-$HOME/.dsh}/settings.yaml` 的并发安全�
 按[手册的卸载顺序](HANDBOOK.md#彻底卸载)先停实例、卸载服务与 CLI，再删除 manager 数据。
 不要用未经指纹校验的 `pkill -f "dsh web"` 代替 `dshc stop`，它可能误杀其他人的实例。
 
-### 文档
+## 文档
 
 - [中文使用手册](HANDBOOK.md) · [English handbook](HANDBOOK.en.md)
 - [版本变化](CHANGELOG.md)

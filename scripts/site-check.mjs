@@ -58,6 +58,7 @@ export async function waitUntil(ok, label, { timeoutMs = 5_000, stepMs = 100 } =
 
 /** README 顶层结构的逐节双语契约；顺序也是契约的一部分。 */
 export const README_SECTION_MAP = Object.freeze([
+  Object.freeze({ zh: '5 分钟上手', en: 'Five-minute quick start' }),
   Object.freeze({ zh: '它解决什么问题', en: 'The problem' }),
   Object.freeze({ zh: '前提', en: 'Requirements' }),
   Object.freeze({ zh: '支持矩阵', en: 'Support matrix' }),
@@ -71,6 +72,7 @@ export const README_SECTION_MAP = Object.freeze([
   Object.freeze({ zh: '安全边界', en: 'Security boundary' }),
   Object.freeze({ zh: 'FAQ', en: 'FAQ' }),
   Object.freeze({ zh: '彻底卸载', en: 'Full uninstall' }),
+  Object.freeze({ zh: '文档', en: 'Documentation' }),
   Object.freeze({ zh: '开发', en: 'Development' }),
   Object.freeze({ zh: 'License', en: 'License' }),
 ]);

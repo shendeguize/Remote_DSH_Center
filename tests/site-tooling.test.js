@@ -27,6 +27,19 @@ import { COMMANDS } from '../src/cli.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_PAGES_BASE_URL = 'https://shendeguize.github.io/Remote_DSH_Center/';
 
+function headingIndex(headings, heading) {
+  const index = headings.indexOf(heading);
+  assert.notEqual(index, -1, `测试前提失效：README_SECTION_MAP 缺少「${heading}」`);
+  return index;
+}
+
+function swapAdjacentHeadings(headings, first, second) {
+  const firstAt = headingIndex(headings, first);
+  const secondAt = headingIndex(headings, second);
+  assert.equal(secondAt, firstAt + 1, `测试前提失效：「${first}」与「${second}」应相邻`);
+  [headings[firstAt], headings[secondAt]] = [headings[secondAt], headings[firstAt]];
+}
+
 // ── build-site：唯一的内容改写 ────────────────────────────────────────────
 
 test('rewriteDemoHtml：根绝对路径全改相对，启动脚本换成「先装垫片再启动」', () => {
@@ -234,7 +247,7 @@ test('extractLevel2Headings：只有 closing markers 的 H2 归一为空标题',
 
   const zh = README_SECTION_MAP.map((pair) => pair.zh);
   const en = README_SECTION_MAP.map((pair) => pair.en);
-  zh[2] = headings[0];
+  zh[headingIndex(zh, '支持矩阵')] = headings[0];
   const message = compareBilingualStructure(zh, en).join('\n');
   assert.match(message, /README\.md.*空.*标题/);
   assert.match(message, /README\.md.*缺少.*支持矩阵/);
@@ -253,22 +266,24 @@ test('compareBilingualStructure 清楚区分缺失、额外、乱序、重复与
   const zh = README_SECTION_MAP.map((pair) => pair.zh);
   const en = README_SECTION_MAP.map((pair) => pair.en);
 
-  const missing = zh.filter((_, i) => i !== 2);
+  const missing = [...zh];
+  missing.splice(headingIndex(missing, '支持矩阵'), 1);
   assert.match(compareBilingualStructure(missing, en).join('\n'), /README\.md.*缺少.*支持矩阵/);
 
   const extra = [...en, 'Appendix'];
   assert.match(compareBilingualStructure(zh, extra).join('\n'), /README\.en\.md.*额外.*Appendix/);
 
   const reordered = [...zh];
-  [reordered[3], reordered[4]] = [reordered[4], reordered[3]];
+  swapAdjacentHeadings(reordered, '安装', '界面速览');
   assert.match(compareBilingualStructure(reordered, en).join('\n'), /README\.md.*顺序/);
 
   const duplicate = [...en];
-  duplicate.splice(4, 0, en[3]);
+  const installAt = headingIndex(duplicate, 'Install');
+  duplicate.splice(installAt + 1, 0, duplicate[installAt]);
   assert.match(compareBilingualStructure(zh, duplicate).join('\n'), /README\.en\.md.*重复.*Install/);
 
   const renamed = [...en];
-  renamed[3] = 'Installation';
+  renamed[headingIndex(renamed, 'Install')] = 'Installation';
   assert.match(
     compareBilingualStructure(zh, renamed).join('\n'),
     /README\.en\.md.*改名.*Install.*Installation/,
@@ -281,7 +296,7 @@ test('checkDocs 真正接入双语结构比较，注入畸形 README 会返回�
   fs.writeFileSync(path.join(outDir, 'index.html'), '<!doctype html><title>fixture</title>');
 
   const zh = README_SECTION_MAP.map((pair) => pair.zh);
-  [zh[3], zh[4]] = [zh[4], zh[3]];
+  swapAdjacentHeadings(zh, '安装', '界面速览');
   const fixtures = {
     'README.md': zh.map((heading) => `## ${heading}`).join('\n\n'),
     'README.en.md': README_SECTION_MAP.map((pair) => `## ${pair.en}`).join('\n\n'),
