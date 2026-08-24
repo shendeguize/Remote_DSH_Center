@@ -3,7 +3,6 @@
   "version": "0.2.0",
   "description": "Local manager for remote dsh web instances: ssh tunnels, single-entry iframe shell, CLI lifecycle control",
   "type": "module",
-  "private": true,
   "engines": {
     "node": ">=22"
   },
@@ -35,5 +34,15 @@
     "ssh-tunnel",
     "manager"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shendeguize/Remote_DSH_Center.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shendeguize/Remote_DSH_Center/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

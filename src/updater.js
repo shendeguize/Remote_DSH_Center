@@ -1,9 +1,11 @@
 /**
  * 版本自证与自更新（模块层）。
  *
- * 两种安装通道，判据是落地物而不是猜：
+ * 三种安装通道，判据是落地物而不是猜：
  *   git      —— 仓库 clone（软链安装 / 开发机）：`<root>/.git` 在
  *   bundle   —— 自带 Node 运行时的发布包：`<root>/../BUNDLE_INFO.json` 在
+ *   npm      —— `npm i -g dsh-center` 装出来的包：上级目录叫 `node_modules`
+ *               （npm / pnpm 全局与本地装置的共同形态）；更新归 npm 管，这里不代跑
  * 认不出通道时一律拒绝更新而不是挑一条试——猜错要么白跑，要么把用户的目录搞坏。
  *
  * 更新的两条硬纪律：
@@ -39,9 +41,10 @@ export const DEFAULT_GIT_REF = 'release';
 
 /**
  * @param {string} [repoRoot] 含 package.json 的目录
- * @returns {{channel:'git'|'bundle'|'unknown', root:string, repoRoot:string,
+ * @returns {{channel:'git'|'bundle'|'npm'|'unknown', root:string, repoRoot:string,
  *   bundleInfo:object|null, reason:string|null}}
- *   `root` = 更新时要替换/前进的那个目录：bundle 是 bundle 根，git 是仓库本身
+ *   `root` = 更新时要替换/前进的那个目录：bundle 是 bundle 根，git 是仓库本身，
+ *   npm 是包目录（只作展示，更新走 npm 自己）
  */
 export function resolveInstall(repoRoot = REPO_ROOT, deps = {}) {
   const exists = deps.existsSync ?? fs.existsSync;
@@ -66,12 +69,18 @@ export function resolveInstall(repoRoot = REPO_ROOT, deps = {}) {
     return { channel: 'git', root: repoRoot, repoRoot, bundleInfo: null, reason: null };
   }
 
+  // npm / pnpm 装置（全局或本地）的共同落地形态：包目录躺在 node_modules 下
+  if (path.basename(path.dirname(repoRoot)) === 'node_modules') {
+    return { channel: 'npm', root: repoRoot, repoRoot, bundleInfo: null, reason: null };
+  }
+
   return {
     channel: 'unknown',
     root: repoRoot,
     repoRoot,
     bundleInfo: null,
-    reason: `${repoRoot} 既不是 git clone（没有 .git），也不是发布包（上层没有 ${BUNDLE_INFO_FILE}）`,
+    reason: `${repoRoot} 既不是 git clone（没有 .git），不是发布包（上层没有 ${BUNDLE_INFO_FILE}），`
+      + '也不是 npm 装的包（上级目录不叫 node_modules）',
   };
 }
 
@@ -140,6 +149,8 @@ export async function collectVersionInfo({
     channelDetail = `bundle ${info.tag ?? `v${info.version ?? '?'}`}（${info.arch ?? '?'}）`;
   } else if (install.channel === 'git') {
     channelDetail = git ? `git ${git.sha}（${git.ref}）` : 'git（取不到提交信息）';
+  } else if (install.channel === 'npm') {
+    channelDetail = 'npm 全局包（更新走 npm i -g dsh-center@latest）';
   } else {
     channelDetail = `认不出（${install.reason}）`;
   }

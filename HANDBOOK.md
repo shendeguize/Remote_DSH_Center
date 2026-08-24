@@ -101,6 +101,20 @@ cd ~/.dsh_center/app && npm run install:cli
 安装后用 `dshc version` 查看版本、安装通道、使用的 Node 与安装目录。也可不安装 CLI，
 在仓库中直接运行 `node src/cli.js <命令>`。安装脚本细节见 [install.sh](install.sh)。
 
+### npm 通道
+
+机器上已有 Node ≥ 22 时，也可以直接从 npm 安装，不经一键脚本：
+
+```bash
+npm i -g dsh-center            # 安装最新正式版
+npm i -g dsh-center@next       # 跟预发布（rc）
+npm i -g dsh-center@latest     # 更新到最新正式版
+npm rm -g dsh-center           # 卸载
+```
+
+如实分层：npm 通道需**自备 Node ≥ 22**，没有 standalone 的自带运行时。该通道的
+更新归 npm 管——`dshc update` 只给出上面的 npm 命令指引，不代跑。
+
 ## 首次启动
 
 ```bash
@@ -281,6 +295,8 @@ dshc update --restart    # 更新后重启 manager；默认只提示，避免自
   `git -C ~/.dsh_center/app checkout v0.1.0`。
 - **standalone 安装**只有 SHA256 校验通过才落盘，通过“解包到 `.new` → 原子改名”切换；
   上一版保留在 `~/.dsh_center/app.prev`，可换回。
+- **npm 安装**由 npm 自己管：`npm i -g dsh-center@latest`（预发布用
+  `dsh-center@next`）。`dshc update` 在该通道只给指引、不代跑。
 
 每版变化见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -293,7 +309,8 @@ dshc service uninstall  # 1. 如安装过 launchd 自启
 dshc down               # 2. 停 manager 与隧道
 ```
 
-再按安装通道调用随安装提供的卸载脚本摘掉链接，二选一：
+再按安装通道摘掉链接。npm 安装直接 `npm rm -g dsh-center`；git / standalone 安装
+调用随安装提供的卸载脚本，二选一：
 
 ```bash
 # git 默认路径：使用系统 Node

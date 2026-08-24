@@ -101,7 +101,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 # 4. 等 .github/workflows/release.yml：
 #    build（三守卫 → 复跑闸门 → 组装双架构发布包）
 #    → verify（macos-latest / macos-15-intel 各自解包，用包内自带 node 真跑一遍）
-#    → release（挂 3 个附件建 GitHub Release）
+#    → 之后两条车道并行：release（挂 3 个附件建 GitHub Release）与
+#      publish → npm-smoke（发 npm 包：正式版发 latest、rc 发 next dist-tag，
+#      再真从 registry 装回来冒烟）。GitHub Release 不依赖 npm 车道成败。
 ```
 
 第 2 步 `--ff-only` 失败 = `release` 出现过独有提交（不该发生），先查清再动，别用
@@ -296,6 +298,8 @@ plugin-publish.yml 以 OIDC 发布（`npm publish --provenance`，免长期 toke
 npm 账号所有者在 npmjs.com 的包设置里一次性登记本仓库与 workflow 文件名
 （Trusted Publishing）——该操作只能在 npm 网页端完成，无法落成仓库文件；完成前
 publish 步骤会因鉴权失败而红。配置受阻时降级 `NPM_TOKEN` secret，并回来在此留痕。
+主体包 `dsh-center` 经 release.yml 的 publish job 走同一套双路径认证，与插件
+共用同一 `NPM_TOKEN` secret。
 
 ## 本地环境
 

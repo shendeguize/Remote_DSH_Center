@@ -8,8 +8,10 @@ on:
 permissions:
   contents: read
 
-# 三段：build（守卫 + 闸门 + 组装双架构产物）→ verify（两种 mac 上真跑一遍）
-# → release（挂附件建 Release）。
+# build（守卫 + 闸门 + 组装双架构产物）→ verify（两种 mac 上真跑一遍），之后
+# 两条车道并行：release（挂附件建 GitHub Release）与 publish → npm-smoke（发
+# npm 包，再真从 registry 装回来冒烟）。GitHub Release 不依赖 npm 发布成败——
+# standalone 通道的行为与产物不因 npm 车道而变。
 #
 # 为什么要拆：产物必须在**两种 CPU 架构的真机**上跑过才配挂到 Release 上——
 # 「x64 包在 arm 机上打完就发」这种事，装的人才是第一个发现的。verify 不过就不建
@@ -246,3 +248,92 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: gh release view "$GITHUB_REF_NAME" --json isPrerelease,assets
+
+  # 发布认证双路径（与 plugin-publish.yml 同款，ADR-9）：npm 侧配置了 Trusted
+  # Publishing 时 OIDC 生效（免长期 token）；未配置时回落仓库 secret NPM_TOKEN
+  # （经 setup-node 的 registry-url 机制注入 ~/.npmrc）。两条路产物都带
+  # provenance，均为 npm CLI 原生能力，不需要第三方 action。主体与插件共用
+  # 同一 NPM_TOKEN secret。
+  publish:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # npm Trusted Publishing / provenance
+
+    steps:
+      # 发布只需要 tag 那份源码（打包白名单在 package.json 的 files 里），默认深度即可
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # NPM_TOKEN 缺席时该 env 为空，setup-node 生成的 ~/.npmrc 拿不到凭据，
+      # npm CLI 转而尝试 OIDC（Trusted Publishing）——两路自然互斥，无需分支。
+      # rc 发到 next dist-tag、不动 latest；预发布判定只用守卫吐的那一份，
+      # 不在 shell 里再猜一次 semver。
+      - name: 发布到 npm（provenance；OIDC 或 NPM_TOKEN）
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          args=(--provenance --access public --ignore-scripts)
+          if [ "$PRERELEASE" = 'true' ]; then
+            args+=(--tag next)
+            echo "预发布通道：发到 next dist-tag，不动 latest 指针"
+          fi
+          npm publish "${args[@]}"
+
+  # 发后安装冒烟：真从 registry 装回来跑 dshc version --json，自证 npm 通道
+  npm-smoke:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      # registry 传播有延迟：装不上不等于没发上，循环重试后仍装不上才红
+      - name: 从 registry 装回来（≤10 次、每次隔 30s）
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          for attempt in $(seq 1 10); do
+            if npm i -g "dsh-center@$VERSION"; then
+              echo "第 $attempt 次尝试装上 dsh-center@$VERSION"
+              exit 0
+            fi
+            echo "registry 还没有 dsh-center@$VERSION（第 $attempt/10 次），30s 后再试"
+            sleep 30
+          done
+          echo "::error::重试 10 次仍装不到 dsh-center@$VERSION——发布没生效或传播异常"
+          exit 1
+
+      - name: 冒烟断言：dshc version --json 自证 npm 通道
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          dshc version --json > "$RUNNER_TEMP/version.json"
+          cat "$RUNNER_TEMP/version.json"
+
+          # 以下 ${...} 是 JavaScript 模板字面量；单引号特意阻止 shell 展开
+          # shellcheck disable=SC2016
+          node -e '
+            const fs = require("node:fs");
+            const info = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const problems = [];
+            if (info.version !== process.argv[2]) problems.push(`版本 ${info.version} != ${process.argv[2]}`);
+            if (info.channel !== "npm") problems.push(`通道 ${info.channel} != npm`);
+            if (problems.length > 0) {
+              console.error(`::error::npm 冒烟断言未过：${problems.join("；")}`);
+              process.exit(1);
+            }
+            console.log(`✔ npm 通道 v${info.version}`);
+          ' "$RUNNER_TEMP/version.json" "$VERSION"

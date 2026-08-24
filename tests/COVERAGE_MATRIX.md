@@ -342,7 +342,8 @@
 | 本机装着预发布时「已是最新」要点出更新的预发布（rc 用户不被卡在旧 rc 上），装正式版的人不受打扰、已在 `--pre` 口径上不重复啰嗦 | `tests/updater.test.js`（`chooseTarget.newerPrerelease`）、`tests/cli.test.js`（`upToDateLines` 文案） |
 | 产物名与 `SHA256SUMS` 格式的逐字形态（改名 = 下载 404，静默） | `tests/lib/bundle.test.js` |
 | 发布仓库单一源：`install.sh` 默认 URL == `RELEASE_REPO` | 同上（跨语言一致性用例） |
-| 安装通道识别：git / bundle / 认不出（含 `BUNDLE_INFO.json` 坏掉） | `tests/updater.test.js`（`resolveInstall`、`collectVersionInfo`） |
+| 安装通道识别：git / bundle / npm / 认不出（含 `BUNDLE_INFO.json` 坏掉；npm 判据不抢 bundle/git 优先级） | `tests/updater.test.js`（`resolveInstall`、`collectVersionInfo`） |
+| npm 通道口径：`dshc update` 只指路退 1（stderr 给 `npm i -g` 命令）、`dshc version --json` 自证 `channel: npm` 退 0 | `tests/updater.test.js`（真 CLI spawn 于 `node_modules/dsh-center` 落地形态，不 mock） |
 | git 通道**只快进**：脏工作区拒、非后代拒、ref 不存在报清楚、detached HEAD 形态下成立 | 同上（本地一对真仓库演练，PV-5） |
 | bundle 通道：校验和不符 / SUMS 缺项 / HTTP 非 200 一律拒装 | 同上（假 Releases 服务，PV-12） |
 | bundle 通道原子换目录：`.new` 解包 → 改名，旧版留 `.prev`；结构不对时原安装一字节不动 | 同上（`installBundle`，PV-6 / PV-10 的自动化部分） |

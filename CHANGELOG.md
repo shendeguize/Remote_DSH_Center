@@ -8,6 +8,12 @@
 
 ### 新增
 
+- 新增 npm 安装通道：`npm i -g dsh-center`（需自备 Node ≥ 22；预发布用
+  `dsh-center@next`）。`dshc version` 能识别 npm 通道并在通道说明里给出更新指引；
+  `dshc update` 在该通道不代跑，只指引 `npm i -g dsh-center@latest` 并以退出码 1
+  （操作未执行）结束。发版链在双真机 verify 通过后追加 npm 发布（带 provenance；
+  rc 发布到 `next` dist-tag、不动 `latest`），并从 registry 装回来冒烟核对；
+  standalone 通道的行为与产物不变。
 - 新增 `plugin/` 子包：dsh 插件 `dsh-center-hub`，把 DSH Center 面板挂进 dsh web 页面。
   它是仓库零 npm 依赖底线的唯一例外（依赖与构建链封闭在 plugin/ 内），以独立的
   `plugin-v*` tag 发版——推 tag 即触发自动发版链（三守卫 → 插件自测 →

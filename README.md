@@ -50,7 +50,7 @@ dshc open      # 在浏览器打开 Hub
 
 ## 前提
 
-- 源码 / git 安装需要 **Node ≥ 22**；macOS standalone 发布包自带官方 Node。
+- 源码 / git / npm 安装需要 **Node ≥ 22**；macOS standalone 发布包自带官方 Node。
 - 要纳管的本机或远端已安装 DeepSeek Harness（`dsh`）并配置 web profile；Center 只探测，
   不代装 `dsh`。
 - 远端主机已写入 `~/.ssh/config`、可免密登录，且允许 TCP 转发。本机纳管可选。
@@ -68,8 +68,9 @@ dshc open      # 在浏览器打开 Hub
 
 ## 安装
 
-一键安装命令见页首。强制通道、预发布版本、安装目录、launchd 自启、手动安装，以及
-`SHA256SUMS` + `gh attestation verify` 发布包溯源验证见[安装手册](HANDBOOK.md#安装)。
+一键安装命令见页首。有 Node ≥ 22 的机器也可以 `npm i -g dsh-center`。强制通道、
+预发布版本、安装目录、launchd 自启、手动安装，以及 `SHA256SUMS` +
+`gh attestation verify` 发布包溯源验证见[安装手册](HANDBOOK.md#安装)。
 
 ## 界面速览
 

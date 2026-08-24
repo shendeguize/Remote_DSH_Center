@@ -14,7 +14,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import { BUNDLE_INFO_FILE, assetName } from '../src/lib/bundle.js';
 import {
@@ -85,6 +86,66 @@ test('resolveInstall：BUNDLE_INFO.json 坏了算 unknown，不当成好包接�
   const got = resolveInstall(app);
   assert.equal(got.channel, 'unknown');
   assert.match(got.reason, /读不出来/);
+});
+
+test('resolveInstall：躺在 node_modules 下认成 npm 通道（npm i -g 的落地形态）', (t) => {
+  const dir = tmpdir(t);
+  const repo = makeRepoRoot(path.join(dir, 'node_modules', 'dsh-center'));
+  const got = resolveInstall(repo);
+  assert.equal(got.channel, 'npm');
+  assert.equal(got.root, repo, 'npm 通道 root 就是包目录（只作展示，更新归 npm）');
+  assert.equal(got.bundleInfo, null);
+  assert.equal(got.reason, null);
+});
+
+test('resolveInstall：npm 判据不抢 bundle / git 的优先级', (t) => {
+  const dir = tmpdir(t);
+
+  // node_modules 里带 .git（npm i git+https 或有人 clone 进去）仍算 git——
+  // .git 判定在前，这里把顺序钉死
+  const gitRepo = makeRepoRoot(path.join(dir, 'node_modules', 'dsh-center'), { git: true });
+  assert.equal(resolveInstall(gitRepo).channel, 'git');
+
+  // 上层有 BUNDLE_INFO.json 时 bundle 判定最先，哪怕上层恰好叫 node_modules
+  const { app } = makeBundleInstall(path.join(dir, 'b', 'node_modules'));
+  assert.equal(resolveInstall(app).channel, 'bundle');
+});
+
+test('collectVersionInfo：npm 通道的自证文本给出 npm 更新指引', async (t) => {
+  const dir = tmpdir(t);
+  const repo = makeRepoRoot(path.join(dir, 'node_modules', 'dsh-center'), { version: '0.3.0' });
+  const info = await collectVersionInfo({ repoRoot: repo });
+  assert.equal(info.channel, 'npm');
+  assert.equal(info.version, '0.3.0');
+  assert.match(info.channelDetail, /npm i -g dsh-center@latest/, '人话里要带出更新的路');
+  assert.equal(info.git, null, 'npm 通道不去采 git 事实');
+});
+
+/**
+ * 真 CLI 在 npm 落地形态下的口径（M4 验收②）：把 src/ 整个摆进
+ * <tmp>/node_modules/dsh-center/ 再 spawn，REPO_ROOT 由 cli.js 自身位置推导，
+ * 不 mock。update 只指路（操作未执行 = 退 1），version 自证 npm 通道（退 0）。
+ */
+test('npm 通道下的真 CLI：update 只指路退 1，version --json 自证 npm 通道退 0', (t) => {
+  const dir = tmpdir(t);
+  const repo = path.join(dir, 'node_modules', 'dsh-center');
+  fs.mkdirSync(repo, { recursive: true });
+  fs.cpSync(fileURLToPath(new URL('../src', import.meta.url)), path.join(repo, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'package.json'), `${JSON.stringify({ name: 'dsh-center', version: '9.9.9' }, null, 2)}\n`);
+  const cli = path.join(repo, 'src', 'cli.js');
+  const env = { ...process.env, DSHC_HOME: path.join(dir, 'home') };
+
+  const update = spawnSync(process.execPath, [cli, 'update'], { env, encoding: 'utf8' });
+  assert.equal(update.status, 1, `stdout=${update.stdout} stderr=${update.stderr}`);
+  assert.match(update.stderr, /npm i -g dsh-center@latest/, '要指出 npm 的更新命令');
+  assert.match(update.stderr, /dsh-center@next/, '跟预发布的路也要指出来');
+  assert.equal(update.stdout, '', '没执行操作就不该在 stdout 冒充成功');
+
+  const version = spawnSync(process.execPath, [cli, 'version', '--json'], { env, encoding: 'utf8' });
+  assert.equal(version.status, 0, `stdout=${version.stdout} stderr=${version.stderr}`);
+  const info = JSON.parse(version.stdout);
+  assert.equal(info.channel, 'npm');
+  assert.equal(info.version, '9.9.9');
 });
 
 test('collectVersionInfo：三种通道各自的自证文本', async (t) => {

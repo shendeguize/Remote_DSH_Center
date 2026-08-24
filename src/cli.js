@@ -773,6 +773,12 @@ async function cmdUpdate({ flags }) {
     return EXIT.failed;
   }
 
+  // npm 装的包归 npm 管：dshc 代跑 npm i -g 会踩权限与多包管器的浑水，只指路
+  if (install.channel === 'npm') {
+    errOut('这是 npm 装的，更新请用：npm i -g dsh-center@latest（跟预发布用 npm i -g dsh-center@next）');
+    return EXIT.failed;
+  }
+
   if (install.channel === 'git') {
     const ref = flags.ref ?? updater.DEFAULT_GIT_REF;
     const res = await updater.updateGit({ root: install.root, ref });
