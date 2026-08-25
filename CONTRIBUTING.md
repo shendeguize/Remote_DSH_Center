@@ -35,7 +35,7 @@ agent 的一屏速查见 [AGENTS.md](AGENTS.md)（那边只放指针，不复制
 开 PR 前本地先过闸门：
 
 ```bash
-npm run check          # 六关：lint → 测试/覆盖率 → 真浏览器 → 站点/文档 → 打包 → CLI
+npm run check          # 七关：lint → 测试/覆盖率 → 真浏览器 → 站点/文档 → 墙钟基线 → 打包 → CLI
 ```
 
 第一关由 `scripts/lint.mjs` 下载脚本内固定版本的 oxlint 单文件二进制；下载物与
@@ -52,17 +52,75 @@ CI 跑的是同一条命令，但按事件分平台（成本管控——同一�
 | `push`（合入 main） | macOS | launchd / `dshc service` 是 mac 语义，产品也只发 mac |
 | 手动 `workflow_dispatch` | 两个都跑 | 合入前想自己确认双平台时用 |
 
-**required check 只有 `check (ubuntu-latest)`**，红了合不进去。mac 侧的最终兜底在
-tag 上：`release.yml` 的 verify 段会在 arm64 与 intel 两台真 mac 上解包实跑，
-mac 问题出不了 Release。
+**required check 是 `check (ubuntu-latest)` 与 `plugin`**，任一红了都合不进去。mac 侧
+的最终兜底在 tag 上：`release.yml` 的 verify 段会在 arm64 与 intel 两台真 mac 上解包
+实跑，mac 问题出不了 Release。
 
 改 `ci.yml` 的 os 矩阵，就必须同步改 `.github/rulesets/main.json` 的
 `required_status_checks`——只改一边的后果不是 CI 变红，而是 PR 永久卡在等一个
 永不到来的检查。`tests/tooling.test.js` 有一条用例把这对耦合钉死。
 
 插件另有独立 lane：`ci.yml` 的 `plugin` job（ubuntu，PR 与合入 main 都跑）在
-plugin/ 内跑 `npm ci && npm run verify`。它**不进 required checks**——required
-名单与 ruleset 强耦合有用例钉死，plugin lane 稳定一个里程碑后再议是否升 required。
+plugin/ 内跑 `npm ci && npm run verify`。它**已是 required check**：不带 matrix，
+context 就是裸 job 名 `plugin`；上面那条耦合用例连它一起核对（job 必须存在、不带
+matrix、`if` 条件不能把 PR 排除掉）。
+
+## 墙钟基线是软闸
+
+第五关 `perf` 量的是墙钟，而墙钟在共享 runner 上不可靠——所以它在 PR CI 里一律带
+`--perf-advisory`（只报不挡），只有 `cron.yml` 的 macOS 那格是严格模式，因为
+[tests/perf/BASELINE.json](tests/perf/BASELINE.json) 就是在 macOS 上录的，跨平台比
+数字没有意义。真正当硬闸的性能判据在 `tests/perf/invariants.test.js`：ssh 调用**次数**、
+在飞并发**峰值**、落盘**次数**、退避**上界**——这些量与机器快慢无关，跟着 tests 关跑。
+
+想看本机数字：`npm run perf:gate`。确属预期的口径变化才 `-- --record` 重录，并在 PR
+里写清为什么（RV-10）。
+
+这一关的成本是有预算的：加上行为清单对账、攻击语料、性能双闸与 fuzz 之后，本机
+`npm run check` 从约 67s 涨到约 70s（同一台机器交替跑五轮取最小值——墙钟的噪声比这个
+差值还大，取最小值才看得清趋势），涨幅约 5%。往 `check` 里加东西前先想清楚它值不值这
+几秒：秒级到分钟级的进 `check`，更贵的进周检 cron。
+
+## 周检才跑的两件事：fuzz 探新与变异测试
+
+`npm run check` 是每次改动都要过的闸门，所以它只装得下秒级到分钟级的东西。另有两件
+明显更贵、但缺了就会让测试悄悄退化的事，放在 [cron.yml](.github/workflows/cron.yml)：
+
+**fuzz 探新。** 日常 `npm test` 里的五个 fuzz 目标是**固定种子 + 固定例数**（秒级，
+只保证不退化）；周检那步换一个从未跑过的根种子、按 60s/目标的时间盒放开跑。逮到的
+失败会落进 `.local/evidence/fuzz/`，日志里带现成的单例重放命令。处置走
+`node scripts/fuzz-sink.mjs --write`：按触发路径去重后写进 `tests/fuzz/corpus/`
+永久回放，注入类的再自动转写一条 adversarial 语料（RV-10）。
+
+**变异测试。** 覆盖率只能证明某行**跑过**，证明不了它的**结果被断言过**。变异闸门
+把产品代码按白名单算子改坏一处再跑相关测试：测试红了叫「杀死」，依然全绿叫「幸存」
+——幸存意味着那处逻辑没有任何断言在保护。`src/lib/**` 是设卡档（kill 率 ≥85% 且不许
+有新幸存者），`src/*.js` 先只报告。
+
+幸存者不全是坏事：等价变异（改了但语义确实没变）杀不掉是应该的，登记进
+[tests/mutation/ALLOWED_SURVIVORS.json](tests/mutation/ALLOWED_SURVIVORS.json) 并
+**写清为什么**（占位符会被闸门直接判红）。判据不是「现在杀不掉」而是「杀不掉是对的」
+——只是缺断言的，去补断言。首批两条豁免都是同一个形态（`if (a === b) return 0;` 之后
+再比 `<`，相等的输入到不了那一行，所以 `<` 与 `<=` 同结果），可以当范本看。
+
+读这一关的数字前先看一眼「自检」那行：每轮开跑前，**未变异**的沙盒会先跑一遍全部直接
+用例。这挡的是变异闸门最安静的失败方式——沙盒里的测试要是本来就红（少复制了文件、
+某条用例在这台机器上本来就不过），那么每个变异体都会被判成「杀死」，kill 率漂亮地接近
+100%，而闸门其实一个字都没测。自检不过就整轮作废，不出数字。
+
+本机想跑：
+
+```bash
+npm run mutation:gate -- --tier lib --only shq.js   # 单文件，秒级
+npm run mutation:gate -- --tier lib --list          # 只看会生成哪些变异体
+npm run mutation:gate -- --tier lib                 # 整档（十几分钟，视核数）
+```
+
+全部变异都发生在临时沙盒（整仓副本，开跑时一次性 `cp` 出来）里，工作区不会被改动；
+反过来也成立——整轮读的是那份快照，跑的过程中你继续改工作区不会污染结论。默认算子集
+不含 `num-minus-1`（与 `num-plus-1` 问的是同一个问题，却占掉近一半预算），要挖就
+`--op num-minus-1` 单独跑。缩范围跑（`--only` / `--op`）时，范围外的豁免不会被误报成
+悬空——一个会误报的闸门等于一个没人看的闸门。
 
 ## CHANGELOG 纪律
 
@@ -174,6 +232,8 @@ HEAD」——`release` 分支的语义是主体 standalone 发布的稳定指针
 | RV-7 | 外部可观察变更进了 CHANGELOG `[Unreleased]`；README 与设计文档回写完成 |
 | RV-8 | 提交卫生：一 PR 一意图、标题合约定、无 `.local` 与密钥泄漏 |
 | RV-9 | 退出码语义（0 成功 / 1 操作失败 / 2 超时或通信失败 / 3 用法错误 / 130 等待被 Ctrl-C 打断）与错误文案「说人话」标准未破 |
+| RV-10 | 安全修复附了 `tests/adversarial/corpus/` 语料条目 ID（一条修复至少一条语料，语料只增不改）；性能基线更新在 PR 描述里写明理由与测量条件 |
+| RV-11 | 新增的变异幸存者豁免逐条写清「为什么杀不掉是对的」（等价变异），没有一条是拿豁免代替补断言；删掉的豁免说明是被哪条新断言杀掉的 |
 
 ## GitHub 侧配置（settings-as-code）
 
@@ -209,8 +269,8 @@ gh api -X PUT repos/:owner/:repo/rulesets/<id> -f enforcement=disabled
 gh api -X PUT repos/:owner/:repo/rulesets/<id> -f enforcement=active
 ```
 
-**两个坑**：required check 的名字（`check (ubuntu-latest)`）与 `ci.yml` 的 job 名 +
-matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节）；required checks 只能
+**两个坑**：required check 的名字（`check (ubuntu-latest)`、`plugin`）与 `ci.yml` 的
+job 名 + matrix 值耦合，改名必须同步 JSON（有用例钉，见上文 CI 一节）；required checks 只能
 引用已有运行记录的 check，新仓库得先让 CI 跑过一次。
 
 仓库 About 元数据使用以下逐字值；重复执行可安全收敛 description、homepage，并确保

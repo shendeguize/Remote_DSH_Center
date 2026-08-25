@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增开发者命令 `npm run matrix:gate`：把源码里算出来的行为清单（API 路由 / 状态机
+  迁移 / 故障场景 / 远端退出码 / 错误码 / CLI 子命令）与 `tests/COVERAGE_MATRIX.md`
+  的登记对账，未登记的新行为、矩阵里的死行为、悬空的文件引用都判红；加
+  `-- --suggest` 会给未登记项列候选用例。这一关已并入 `npm run check` 的 tests 关，
+  运行时行为与安装产物不变。
+- 新增开发者命令 `npm run perf:gate`：量三条主路径（探测扇出 / 复核风暴 / 一拍巡检）
+  与四个微基准的墙钟中位数，超基线 ×2.5 判红；`-- --record` 重录基线、`-- --advisory`
+  只报不挡。`npm run check` 因此多出第五关 `perf`（顺序 lint → tests → ui → site →
+  perf → pack → cli），可用 `--perf-advisory` 降级为只告警；PR CI 一律降级，只有每周
+  cron 的 macOS 那格严格判定。运行时行为与安装产物不变。
+- 新增开发者命令 `npm run mutation:gate`：把产品代码按白名单算子改坏一处再跑相关测试，
+  测试没红的「幸存者」就是没有断言在保护的逻辑；`src/lib/**` 设卡（kill 率 ≥85% 且不许
+  有新幸存者），`src/*.js` 先只报告。等价变异登记进
+  `tests/mutation/ALLOWED_SURVIVORS.json` 并须写清理由。变异只发生在临时沙盒里，
+  工作区不受影响。这一关**不进** `npm run check`（太贵），跑在每周 cron 的独立 job 上；
+  同一份 cron 另加了 fuzz 探新一步（随机根种子 + 60s/目标时间盒）。运行时行为与安装
+  产物不变。
+
 ## [0.4.0] - 2026-08-25
 
 ### 变更

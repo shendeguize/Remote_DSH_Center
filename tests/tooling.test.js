@@ -366,13 +366,13 @@ test('打包白名单含 scripts/install.mjs：发布包里要靠它摘链/装�
 test('selectStages：only / skip 组合，打错字要报错', () => {
   assert.deepEqual(
     selectStages(CHECK_STAGES).map((s) => s.id),
-    ['lint', 'tests', 'ui', 'site', 'pack', 'cli'],
+    ['lint', 'tests', 'ui', 'site', 'perf', 'pack', 'cli'],
     'lint 必须是统一闸门第一关',
   );
   assert.deepEqual(selectStages(CHECK_STAGES, { only: 'pack,cli' }).map((s) => s.id), ['pack', 'cli']);
   assert.deepEqual(
     selectStages(CHECK_STAGES, { skip: 'lint,ui' }).map((s) => s.id),
-    ['tests', 'site', 'pack', 'cli'],
+    ['tests', 'site', 'perf', 'pack', 'cli'],
   );
   assert.deepEqual(
     selectStages(CHECK_STAGES, { only: 'lint,tests,ui', skip: 'ui' }).map((s) => s.id),
@@ -1432,10 +1432,12 @@ test('每周双平台完整闸门保留固定错峰日程与最小只读权限',
   const checkStep = workflowStepChunks(checkJob?.text ?? '')
     .find((step) => workflowStepRun(step).includes('npm run check'));
   assert.ok(checkStep, `${name} 必须执行完整质量闸门`);
+  // Ubuntu 那支既要真跑浏览器，又要把墙钟那关降成 advisory——基线是在 macOS 上录的，
+  // 拿它判 ubuntu 等于在量两个平台的机器差异。macOS 那支不带旗标，即严格模式。
   assert.match(
     workflowStepRun(checkStep),
-    /\$\{\{\s*matrix\.os\s*==\s*'ubuntu-latest'\s*&&\s*'-- --require-browser'\s*\|\|\s*''\s*\}\}/,
-    `${name} 必须要求 Ubuntu 真跑浏览器，macOS 可按环境省略`,
+    /\$\{\{\s*matrix\.os\s*==\s*'ubuntu-latest'\s*&&\s*'-- --require-browser --perf-advisory'\s*\|\|\s*''\s*\}\}/,
+    `${name} 必须要求 Ubuntu 真跑浏览器且墙钟只告警，macOS 可按环境省略`,
   );
 });
 
@@ -1489,11 +1491,37 @@ test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边�
 
   const osList = prMatrixOsList(text.slice(text.indexOf('\njobs:')));
   assert.ok(osList, 'ci.yml 的 os 矩阵不是已知形状，请回来核对 required_status_checks');
+
+  // 矩阵 job 的 context 带 `(os)` 后缀，独立 job 就是 job id 本身。两类分开核对：
+  // 矩阵那一半必须与 PR 上真跑的 os 列表逐字相等，独立那一半必须真存在且在 PR 上会跑
+  // ——required 名单里多一个永不到来的检查，合入就永久卡住。
+  const jobs = new Map(workflowJobChunks(text).map((job) => [job.id, job.text]));
+  const matrixContexts = contexts.filter((c) => c.startsWith('check ('));
+  const plainContexts = contexts.filter((c) => !c.startsWith('check ('));
+
   assert.deepEqual(
-    [...contexts].sort(),
+    [...matrixContexts].sort(),
     osList.map((o) => `check (${o})`).sort(),
     'required check 与 PR 上真会跑的 job 名对不上：合入会卡在等一个永不到来的检查',
   );
+
+  const problems = [];
+  for (const context of plainContexts) {
+    const chunk = jobs.get(context);
+    if (chunk === undefined) {
+      problems.push(`${context}：ci.yml 里没有这个 job`);
+      continue;
+    }
+    if (/^\s{4}strategy:/m.test(chunk)) {
+      problems.push(`${context}：这个 job 带 matrix，context 名会是「${context} (…)」而不是裸名`);
+    }
+    const guard = /^\s{4}if:\s*(.+)$/m.exec(chunk)?.[1];
+    if (guard && !guard.includes('pull_request')) {
+      problems.push(`${context}：if 条件「${guard}」在 PR 上未必成立，required 会等不到它`);
+    }
+  }
+  assert.deepEqual(problems, [], problems.join('\n'));
+  assert.ok(plainContexts.includes('plugin'), 'plugin lane 是 required check（CONTRIBUTING §GitHub 侧配置）');
 });
 
 test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO', () => {

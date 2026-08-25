@@ -2,11 +2,12 @@
 /**
  * 统一质量闸门：一条命令跑完发版前该跑的所有东西，给一份摘要与一个退出码。
  *
- * 分六关，任一关红就整体红（退出码 1）：
+ * 分七关，任一关红就整体红（退出码 1）：
  *   lint      oxlint 静态检查（固定版本，本机缓存，不进 npm 依赖）
- *   tests     全量测试 + 覆盖率总闸与分档门槛（架构护栏用例也在这一关里）
+ *   tests     全量测试 + 覆盖率总闸与分档门槛 + 行为清单对账（架构护栏用例也在这一关里）
  *   ui        真浏览器冒烟（无头 Chrome + CDP）；没装 Chrome 则跳过，除非 --require-browser
  *   site      站点构建 + 无头 demo 冒烟 + 双语 README 链接与命令核对
+ *   perf      墙钟基线（软闸：本机与 cron 判红，PR CI 传 --advisory 只报不挡）
  *   pack      npm 打包产物清单核对：该进的都在、tests/.local 之类别混进去
  *   cli       装出来的 dshc 能被 node 直接执行（--help 走通）
  *
@@ -17,6 +18,7 @@
  *   npm run check -- --only tests    # 只跑某几关（逗号分隔）
  *   npm run check -- --skip ui
  *   npm run check -- --require-browser   # CI 上要求 Chrome 必须在
+ *   npm run check -- --perf-advisory     # 墙钟那关只报不挡（PR CI 用，机器异构）
  */
 
 import path from 'node:path';
@@ -125,7 +127,10 @@ export const STAGES = [
     async run() {
       const res = await node('coverage-gate.mjs');
       if (res.code !== 0) throw new Error('测试或覆盖率门槛未过（详见上方输出）');
-      return '总闸 + 分档达标';
+      // 行为清单对账排在覆盖率之后：先确认「行」够，再确认「行为面」没漏登记。
+      const matrix = await node('matrix-gate.mjs');
+      if (matrix.code !== 0) throw new Error('行为清单与矩阵不一致（详见上方输出）');
+      return '总闸 + 分档达标 + 行为清单对账';
     },
   },
   {
@@ -152,6 +157,18 @@ export const STAGES = [
       const res = await node('site-check.mjs', args);
       if (res.code !== 0) throw new Error('站点或文档检查未过（详见上方输出）');
       return findChrome() ? '构建 + demo 冒烟 + 双语文档' : '构建 + 双语文档（无 Chrome，demo 冒烟已跳过）';
+    },
+  },
+  {
+    id: 'perf',
+    // 墙钟判据只能是软闸：共享 runner 与本机差三倍不稀奇，判紧了就天天假红。
+    // 硬性的性能判据（调用次数、在飞峰值、落盘次数）在 tests/perf/invariants.test.js，
+    // 那些量与机器快慢无关，已经在 tests 关里当硬闸跑了。
+    label: '墙钟基线',
+    async run({ perfAdvisory }) {
+      const res = await node('perf-gate.mjs', perfAdvisory ? ['--advisory'] : []);
+      if (res.code !== 0) throw new Error('墙钟基线未过（详见上方输出）');
+      return perfAdvisory ? '仅告警（--advisory）' : '在宽容带内';
     },
   },
   {
@@ -207,13 +224,14 @@ async function main() {
   }
 
   const requireBrowser = flag('require-browser');
+  const perfAdvisory = flag('perf-advisory');
   const results = [];
   for (const stage of stages) {
     process.stdout.write(`\n── ${stage.label} ${'─'.repeat(Math.max(0, 56 - stage.label.length))}\n`);
     const started = Date.now();
     try {
       // eslint-disable-next-line no-await-in-loop -- 关卡按顺序跑，前一关红了后面的结论没意义
-      const out = await stage.run({ requireBrowser });
+      const out = await stage.run({ requireBrowser, perfAdvisory });
       const skipped = typeof out === 'object' && out?.skipped;
       results.push({
         id: stage.id, label: stage.label, status: skipped ? 'skip' : 'pass', note: skipped || out, ms: Date.now() - started,

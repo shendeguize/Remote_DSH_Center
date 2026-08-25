@@ -105,11 +105,89 @@ function settingsArgs(body, kind) {
   };
 }
 
-/** 留一份运输层账本，供全链用例断言本机没有误起 ssh -L。 */
+/**
+ * 留一份运输层账本，供全链用例断言本机没有误起 ssh -L。
+ *
+ * 每次调用记两行：进入时 `phase:'begin'`，做完时 `phase:'end'`（由返回的 `done()` 落账）。
+ * 「在飞并发」就靠这两行算——垫片是一堆各自独立的短命进程，跨进程没有共享内存也没有
+ * 可比的 `performance.now()`，但 `O_APPEND` 小写入是原子的，**文件里的行序就是全局
+ * 全序**。顺序扫一遍 begin 记 +1、end 记 -1，峰值即真实在飞数，一个时钟都不需要。
+ *
+ * `at`（墙钟毫秒）与 `hr`（`hrtime.bigint()`，同机跨进程都取自 CLOCK_MONOTONIC）只作
+ * 诊断与时长展示，不进任何判据——判据一旦挂到时钟上，CI 抖一下就成假红。
+ *
+ * @param {object} event
+ * @returns {() => void} 落 end 行；不落也不会让 begin 行失效（只是那次算作未完成）
+ */
 export function recordTransport(event) {
   const dir = process.env.DSHC_HARNESS_DIR;
-  if (!dir) return;
-  fs.appendFileSync(path.join(dir, 'transport.ndjson'), `${JSON.stringify(event)}\n`);
+  if (!dir) return () => {};
+  const file = path.join(dir, 'transport.ndjson');
+  const id = `${process.pid}-${nextLocalSeq()}`;
+  const write = (phase) => {
+    fs.appendFileSync(file, `${JSON.stringify({
+      ...event, phase, id, at: Date.now(), hr: String(process.hrtime.bigint()),
+    })}\n`);
+  };
+  write('begin');
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    write('end');
+  };
+}
+
+let localSeq = 0;
+const nextLocalSeq = () => {
+  localSeq += 1;
+  return localSeq;
+};
+
+/** 未落 end 的收尾函数集合；exit 钩子只挂一个（否则每次调用都挂会撞监听器上限）。 */
+const pendingEnds = new Set();
+let exitHookInstalled = false;
+
+function settleOnExit(done) {
+  pendingEnds.add(done);
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on('exit', () => {
+      for (const pending of pendingEnds) pending();
+      pendingEnds.clear();
+    });
+  }
+  return () => {
+    pendingEnds.delete(done);
+    done();
+  };
+}
+
+/**
+ * 账本 → 在飞并发统计。纯函数，判定逻辑单测直接喂它。
+ * @param {Array<{phase?:string, kind?:string, transport?:string}>} events 账本原序
+ * @param {(event:object) => boolean} [include] 只统计关心的那一类调用
+ * @returns {{peak:number, total:number, unfinished:number, sequence:number[]}}
+ */
+export function inFlightStats(events, include = () => true) {
+  let current = 0;
+  let peak = 0;
+  let total = 0;
+  const sequence = [];
+  for (const event of events) {
+    if (!include(event)) continue;
+    if (event.phase === 'end') {
+      current -= 1;
+    } else {
+      current += 1;
+      total += 1;
+      if (current > peak) peak = current;
+    }
+    sequence.push(current);
+  }
+  return {
+    peak, total, unfinished: current, sequence,
+  };
 }
 
 // ── 协议回放 ─────────────────────────────────────────────────────────────
@@ -644,25 +722,35 @@ export function dispatchProtocol(name, body, {
 } = {}) {
   const kind = classify(body);
   const args = kind.startsWith('settings-') ? settingsArgs(body, kind) : null;
-  recordTransport({ transport, kind, host: name, home });
-  if (kind === 'settings-read') {
-    replySettingsRead(name, args);
-    return;
+  // 有几条回放路径以 process.exit 收场（模板要求的非零码），finally 到不了；
+  // 记进未完成集合、由一个进程级 exit 钩子兜住，让在飞计数不会永远悬着。
+  const done = settleOnExit(recordTransport({ transport, kind, host: name, home }));
+  // 真机一次 ssh 往返是几百毫秒量级，垫片几十毫秒就退，重叠窗口窄到「在飞并发」判据
+  // 会失真（明明没上闸也测不出峰值）。slowReplyMs 把窗口拉开，对**所有**协议种类生效。
+  const slow = hostState({ hosts: readState().hosts ?? {} }, name).faults.slowReplyMs;
+  if (slow) sleepBlocking(slow);
+  try {
+    if (kind === 'settings-read') {
+      replySettingsRead(name, args);
+      return;
+    }
+    if (kind === 'settings-write') {
+      replySettingsWrite(name, { ...args, input });
+      return;
+    }
+    const handlers = {
+      probe: replyProbe,
+      launch: replyLaunch,
+      poll: replyPoll,
+      verify: replyVerify,
+      stop: replyStop,
+      cleanup: replyCleanup,
+      logtail: replyLogTail,
+    };
+    handlers[kind](name, body, { home });
+  } finally {
+    done();
   }
-  if (kind === 'settings-write') {
-    replySettingsWrite(name, { ...args, input });
-    return;
-  }
-  const handlers = {
-    probe: replyProbe,
-    launch: replyLaunch,
-    poll: replyPoll,
-    verify: replyVerify,
-    stop: replyStop,
-    cleanup: replyCleanup,
-    logtail: replyLogTail,
-  };
-  handlers[kind](name, body, { home });
 }
 
 // ── 隧道形态（ssh -N -L） ────────────────────────────────────────────────

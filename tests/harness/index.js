@@ -149,17 +149,17 @@ export function createHarness(opts = {}) {
       return readState(harnessDir).hosts?.[name]?.files ?? {};
     },
 
-    /** ssh/local 两种运输实际收到的协议种类；隧道另记 kind=tunnel。 */
+    /**
+     * 账本全部事件，**原序**（begin/end 各一行；文件行序就是跨进程全序，见 fake-ssh
+     * 的 recordTransport）。在飞并发只能从这里算——transportCalls() 滤掉了 end 行。
+     */
+    transportEvents() {
+      return readTransport(harnessDir);
+    },
+
+    /** ssh/local 两种运输实际收到的协议种类；隧道另记 kind=tunnel。一次调用只算一条。 */
     transportCalls() {
-      try {
-        return fs.readFileSync(path.join(harnessDir, 'transport.ndjson'), 'utf8')
-          .trim()
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => JSON.parse(line));
-      } catch {
-        return [];
-      }
+      return readTransport(harnessDir).filter((event) => event.phase !== 'end');
     },
 
     /** 杀掉本次装置拉起的全部假 dsh web，清理临时目录。 */
@@ -173,6 +173,18 @@ export function createHarness(opts = {}) {
       fs.rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+function readTransport(harnessDir) {
+  try {
+    return fs.readFileSync(path.join(harnessDir, 'transport.ndjson'), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
 }
 
 function normalizeLocal(value) {

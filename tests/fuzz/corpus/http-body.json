@@ -1,0 +1,54 @@
+[
+  {
+    "id": "FZ-HTTP-001",
+    "target": "http-body",
+    "signature": "http-body|seed|proto-pollution-host-config",
+    "input": {
+      "endpoint": "host-config",
+      "raw": null,
+      "body": { "__proto__": { "polluted": true }, "enabled": true },
+      "contentType": "application/json"
+    },
+    "origin": "人工种入（P3 落地）：原型污染的经典形态——__proto__ 作为请求体字段名",
+    "note": "JSON.parse 会把 __proto__ 造成自有属性；校验器与 store 都不许把它当成 enabled 一类的真字段"
+  },
+  {
+    "id": "FZ-HTTP-002",
+    "target": "http-body",
+    "signature": "http-body|seed|deep-nesting-defaults",
+    "input": {
+      "endpoint": "defaults",
+      "raw": "{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "body": null,
+      "contentType": "application/json"
+    },
+    "origin": "人工种入（P3 落地）：深嵌套 JSON——解析器的栈深与 schema 的递归都在这条上",
+    "note": "合法 JSON 但结构完全不符 schema，期望 400 而不是解析器爆栈"
+  },
+  {
+    "id": "FZ-HTTP-003",
+    "target": "http-body",
+    "signature": "http-body|seed|truncated-json-setup",
+    "input": {
+      "endpoint": "setup",
+      "raw": "{\"hosts\":{\"a\":{\"enabled\":true",
+      "body": null,
+      "contentType": "application/json"
+    },
+    "origin": "人工种入（P3 落地）：截断的 JSON（连接中断的真实形态）",
+    "note": "引导态门禁 + 解析失败两层都要给人话，不许把 SyntaxError 的 stack 抛给调用方"
+  },
+  {
+    "id": "FZ-HTTP-004",
+    "target": "http-body",
+    "signature": "http-body|seed|wrong-content-type-settings",
+    "input": {
+      "endpoint": "dsh-settings",
+      "raw": "content=hello",
+      "body": null,
+      "contentType": "text/plain"
+    },
+    "origin": "人工种入（P3 落地）：表单形态的体配 text/plain（错把 settings 当表单提交）",
+    "note": "settings 写入是有副作用的端点，体不合法时必须一个字节都不落到远端"
+  }
+]

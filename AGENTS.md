@@ -54,7 +54,7 @@ src/defaults.js   第 0 层：零依赖出厂常量表
 ## 改完必做
 
 ```bash
-npm run check          # 六关：lint → 测试/覆盖率 → 浏览器 → 站点/文档 → 打包 → CLI
+npm run check          # 七关：lint → 测试/覆盖率 → 浏览器 → 站点/文档 → 墙钟基线 → 打包 → CLI
 ```
 
 - lint 告警必须可见且不超过当前 107 条基线；工具细则见 CONTRIBUTING。
@@ -69,5 +69,5 @@ npm run check          # 六关：lint → 测试/覆盖率 → 浏览器 → �
 ## 提交前
 
 分支 `<type>/<slug>`、PR 标题 `<type>(<scope>): <一句话>`、squash 合入、
-review 走 CONTRIBUTING 的 RV-1…9 清单。设计语料与验收记录留在本机 `.local/`，
+review 走 CONTRIBUTING 的 RV-1…11 清单。设计语料与验收记录留在本机 `.local/`，
 **不入库**。细则一律以 [CONTRIBUTING.md](CONTRIBUTING.md) 为准。

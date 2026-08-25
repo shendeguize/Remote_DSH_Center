@@ -1,0 +1,44 @@
+[
+  {
+    "id": "FZ-MACHINE-001",
+    "target": "machine-walk",
+    "signature": "machine-walk|seed|running-crash-loop",
+    "input": {
+      "start": "running",
+      "steps": [
+        { "to": "degraded", "preferIllegal": false },
+        { "to": "unknown", "preferIllegal": true },
+        { "to": "crashed", "preferIllegal": false },
+        { "to": "starting", "preferIllegal": false },
+        { "to": "running", "preferIllegal": false },
+        { "to": "no_dsh", "preferIllegal": true },
+        { "to": "ready", "preferIllegal": false },
+        { "to": "starting", "preferIllegal": false },
+        { "to": "ready", "preferIllegal": false }
+      ],
+      "junk": ["__proto__", "constructor", "Ready", "ready "]
+    },
+    "origin": "人工种入（P3 落地）：running→degraded→crashed→starting 这条崩溃-重启环是线上最常走的路径",
+    "note": "环里混入探测结论作为非法目标（running 收不到 unknown / no_dsh），验「被拒不许改态」"
+  },
+  {
+    "id": "FZ-MACHINE-002",
+    "target": "machine-walk",
+    "signature": "machine-walk|seed|probe-outcomes-self-loop",
+    "input": {
+      "start": "unreachable",
+      "steps": [
+        { "to": "unreachable", "preferIllegal": false },
+        { "to": "no_dsh", "preferIllegal": false },
+        { "to": "no_dsh", "preferIllegal": false },
+        { "to": "ready", "preferIllegal": false },
+        { "to": "ready", "preferIllegal": false },
+        { "to": "unreachable", "preferIllegal": false },
+        { "to": "degraded", "preferIllegal": true }
+      ],
+      "junk": ["", "toString", "prototype", "0"]
+    },
+    "origin": "人工种入（P3 落地）：三个探测结论态之间反复横跳，含自环",
+    "note": "探测结论态的目标表复用 PROBE_OUT，自环因此出现在表里——这条把自环恒许可钉住"
+  }
+]

@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { createHarness, FAKE_SSH } from './index.js';
+import { inFlightStats } from './fake-ssh.js';
 import { newHostState, readState, writeState } from './state.js';
 import { unshq } from './shell-word.js';
 import { buildProbeScript, kvOne, parseProtoOutput } from '../../src/lib/proto.js';
@@ -403,6 +404,60 @@ test('slow-probe 场景不阻塞其他主机（并行探测）', async (t) => {
   assert.equal(slow.phase, 'ready');
   assert.equal(fast.phase, 'ready');
   assert.ok(elapsed < 1600, `并行应远快于串行，实测 ${elapsed}ms`);
+});
+
+// ── 运输账本：在飞并发的算法与落账 ───────────────────────────────────────
+
+test('inFlightStats：begin/end 配对算峰值，过滤器只数关心的那类', () => {
+  const events = [
+    { kind: 'probe', phase: 'begin' },
+    { kind: 'probe', phase: 'begin' },
+    { kind: 'tunnel', phase: 'begin' }, // 被过滤掉，不该影响 probe 的峰值
+    { kind: 'probe', phase: 'end' },
+    { kind: 'probe', phase: 'begin' },
+    { kind: 'probe', phase: 'end' },
+    { kind: 'probe', phase: 'end' },
+  ];
+  const stats = inFlightStats(events, (e) => e.kind === 'probe');
+  assert.equal(stats.total, 3, '三次调用');
+  assert.equal(stats.peak, 2, '同时最多两条在飞');
+  assert.equal(stats.unfinished, 0);
+  assert.deepEqual(stats.sequence, [1, 2, 1, 2, 1, 0]);
+
+  const all = inFlightStats(events);
+  assert.equal(all.total, 4, '不给过滤器就全算');
+  assert.equal(all.peak, 3);
+});
+
+test('inFlightStats：没有 phase 的旧账本行按 begin 算，未收尾的会报出来', () => {
+  // 兼容性：只写了一行的调用（没有 end）不该让统计崩，而是老实报 unfinished
+  const stats = inFlightStats([{ kind: 'probe' }, { kind: 'probe' }, { kind: 'probe', phase: 'end' }]);
+  assert.equal(stats.total, 2);
+  assert.equal(stats.peak, 2);
+  assert.equal(stats.unfinished, 1, '有 ssh 起了没收，要能看出来');
+});
+
+test('账本每次调用记两行：begin 与 end 成对、id 一致、顺序即全序', async (t) => {
+  const h = harnessFixture(t);
+  await Promise.all([probeOnce('gpu-1'), probeOnce('gpu-1')]);
+
+  const events = h.transportEvents().filter((e) => e.kind === 'probe');
+  assert.equal(events.length, 4, `两次探测该记四行，实为 ${JSON.stringify(events)}`);
+  assert.equal(h.transportCalls().filter((e) => e.kind === 'probe').length, 2, 'transportCalls 只数调用，不数 end 行');
+
+  const byId = new Map();
+  for (const event of events) {
+    byId.set(event.id, [...(byId.get(event.id) ?? []), event.phase]);
+  }
+  assert.equal(byId.size, 2, '两次调用应有两个 id');
+  for (const [id, phases] of byId) {
+    assert.deepEqual(phases, ['begin', 'end'], `${id} 的两行顺序不对：${phases.join(',')}`);
+  }
+  for (const event of events) {
+    assert.ok(Number.isInteger(event.at), 'at 应是墙钟毫秒（诊断用）');
+    assert.match(String(event.hr), /^\d+$/u, 'hr 应是单调纳秒的十进制串（诊断用）');
+  }
+  assert.equal(inFlightStats(events).unfinished, 0, '进程正常退出的调用不许悬着');
 });
 
 test('隧道垫片：ssh -N -L 转发到假 dsh web，杀垫片即隧道断', async (t) => {

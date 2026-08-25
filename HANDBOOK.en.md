@@ -403,6 +403,9 @@ npm run check -- --only tests    # select gates; also --skip ui / --require-brow
 npm test                         # unit, fake-remote integration, CLI e2e, frontend, tooling, install.sh
 npm run coverage                 # coverage report
 npm run coverage:gate            # overall and tiered coverage gate
+npm run matrix:gate              # behavior inventory vs coverage matrix; -- --suggest lists candidate tests
+npm run perf:gate                # wall-clock baseline (soft gate); -- --record re-records, -- --advisory warns only
+npm run mutation:gate            # mutation testing (weekly gate); -- --tier lib --only shq.js for a fast single file, -- --list to preview
 npm run ui:smoke                 # real-browser smoke in headless Chrome
 ```
 

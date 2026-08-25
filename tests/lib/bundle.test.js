@@ -76,7 +76,13 @@ test('URL 拼装', () => {
     assetUrl({ tag: 'v0.2.0', name: 'x.tar.gz', repo: 'o/r' }),
     'https://github.com/o/r/releases/download/v0.2.0/x.tar.gz',
   );
-  assert.match(releasesUrl(), new RegExp(RELEASE_REPO.replace('/', '\\/')), '默认指向本仓库');
+  // 逐字钉住默认形态，而不只是 match 一个仓库名：per_page 是「挑 latest 时能看见
+  // 多少个 tag」的上限，调小了会静默地看不到更早的版本。
+  assert.equal(
+    releasesUrl(),
+    `https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=30`,
+    '默认仓库与默认页大小都要钉住',
+  );
 });
 
 test('发布仓库只有一个源：install.sh 的默认 URL 必须和 RELEASE_REPO 对得上', () => {

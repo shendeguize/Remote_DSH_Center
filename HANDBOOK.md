@@ -377,6 +377,9 @@ npm run check -- --only tests    # 只跑指定关；也支持 --skip ui / --req
 npm test                         # 单测、假远端集成、CLI e2e、前端、工具链、install.sh
 npm run coverage                 # 覆盖率报告
 npm run coverage:gate            # 总体与分层覆盖率闸门
+npm run matrix:gate              # 行为清单 ↔ 覆盖矩阵对账；-- --suggest 给未登记项找候选用例
+npm run perf:gate                # 墙钟基线（软闸）；-- --record 重录、-- --advisory 只报不挡
+npm run mutation:gate            # 变异测试（周检闸门）；-- --tier lib --only shq.js 单文件秒级、-- --list 只看清单
 npm run ui:smoke                 # 无头 Chrome 真浏览器冒烟
 ```
 

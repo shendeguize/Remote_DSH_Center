@@ -7,30 +7,33 @@
 - 一条命令跑全：`npm run check`（lint → 测试/覆盖率 → 真浏览器 → 站点/文档 → 打包 → CLI）
 - 全量单测与集成：`npm test`
 - 覆盖率门槛核对：`npm run coverage:gate`
+- 行为清单对账（§11）：`npm run matrix:gate`（加 `-- --suggest` 给未登记项列候选用例）
 - 真浏览器冒烟：`npm run ui:smoke`（无头 Chrome + 假远端，覆盖 Hub / 管理页 / iframe）
 - 真机验收：`npm run acceptance:real -- --host <ssh-host>`
 
 ## 1. 主机状态机迁移（`src/lib/machine.js` TRANSITIONS 全表）
 
-自环恒许可（只刷数据不算迁移），下表为 8 态间的全部合法迁移。
+自环恒许可（只刷数据不算迁移），下表为 8 态间的全部合法迁移。第一列的 `FSM:` ID 由
+`scripts/lib/inventory.mjs` 直接从 `TRANSITIONS` 算出，`npm run matrix:gate` 逐项对账：
+迁移表加了一条而这里没登记即红。
 
-| from → to | 触发者 | 覆盖 |
+| ID（from→to） | 触发者 | 覆盖 |
 |---|---|---|
-| unknown → ready/no_dsh/unreachable | 探测三分类 | `tests/prober.test.js`（applyProbe 三分类）、`tests/integration/flows.test.js`（探测流程）、IT-01 |
-| unreachable → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`「unreachable 后再探测可回到 ready」 |
-| no_dsh → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`（no_dsh 两种原因）、`tests/harness/harness.test.js`（PROBE 三分类） |
-| ready → starting | start / autoStart | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-02 |
-| ready → ready/no_dsh/unreachable | 探测覆盖 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
-| starting → running | 拉起成功 | `tests/integration/flows.test.js`、`tests/integration/loop.test.js`、IT-02、IT-03 |
-| starting → ready | 拉起失败回滚 | `tests/integration/flows.test.js`（launch-dies）、`tests/integration/cli.test.js`（退出码 1）、假远端 `bind-busy-twice` |
-| running → degraded | 隧道断联 | `tests/integration/resilience.test.js`、IT-06 |
-| running → crashed | 深复核判死 | `tests/integration/resilience.test.js`（两条：隧道同时断 / 隧道照活）、IT-07 |
-| running → ready | stop | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-05 |
-| degraded → running | 重连成功 / 巡检重建子进程 | `tests/integration/resilience.test.js`、IT-06 |
-| degraded → crashed | 重连前复核判死 | `tests/integration/resilience.test.js` |
-| degraded → ready | 挂起/重连期间 stop | `tests/integration/resilience.test.js`「degraded 期间 stop」 |
-| crashed → starting | 直接再 start（视作重启） | `tests/integration/resilience.test.js`、IT-05 后续 |
-| crashed → ready/no_dsh/unreachable | 重新探测 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
+| `FSM:unknown→ready` `FSM:unknown→no_dsh` `FSM:unknown→unreachable` | 探测三分类 | `tests/prober.test.js`（applyProbe 三分类）、`tests/integration/flows.test.js`（探测流程）、IT-01 |
+| `FSM:unreachable→ready` `FSM:unreachable→no_dsh` `FSM:unreachable→unreachable` | 重新探测 | `tests/prober.test.js`「unreachable 后再探测可回到 ready」 |
+| `FSM:no_dsh→ready` `FSM:no_dsh→no_dsh` `FSM:no_dsh→unreachable` | 重新探测 | `tests/prober.test.js`（no_dsh 两种原因）、`tests/harness/harness.test.js`（PROBE 三分类） |
+| `FSM:ready→starting` | start / autoStart | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-02 |
+| `FSM:ready→ready` `FSM:ready→no_dsh` `FSM:ready→unreachable` | 探测覆盖 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
+| `FSM:starting→running` | 拉起成功 | `tests/integration/flows.test.js`、`tests/integration/loop.test.js`、IT-02、IT-03 |
+| `FSM:starting→ready` | 拉起失败回滚 | `tests/integration/flows.test.js`（launch-dies）、`tests/integration/cli.test.js`（退出码 1）、假远端 `bind-busy-twice` |
+| `FSM:running→degraded` | 隧道断联 | `tests/integration/resilience.test.js`、IT-06 |
+| `FSM:running→crashed` | 深复核判死 | `tests/integration/resilience.test.js`（两条：隧道同时断 / 隧道照活）、IT-07 |
+| `FSM:running→ready` | stop | `tests/integration/flows.test.js`、`tests/integration/cli.test.js`、IT-05 |
+| `FSM:degraded→running` | 重连成功 / 巡检重建子进程 | `tests/integration/resilience.test.js`、IT-06 |
+| `FSM:degraded→crashed` | 重连前复核判死 | `tests/integration/resilience.test.js` |
+| `FSM:degraded→ready` | 挂起/重连期间 stop | `tests/integration/resilience.test.js`「degraded 期间 stop」 |
+| `FSM:crashed→starting` | 直接再 start（视作重启） | `tests/integration/resilience.test.js`、IT-05 后续 |
+| `FSM:crashed→ready` `FSM:crashed→no_dsh` `FSM:crashed→unreachable` | 重新探测 | `tests/prober.test.js`、`tests/integration/flows.test.js` |
 | 非法迁移一律拒绝 | 三层守卫 | `tests/lib/machine.test.js`（8×8 快照）、`tests/store.test.js`（setPhase 守卫零改动） |
 
 ## 2. 远端协议分支（12 §1）
@@ -116,38 +119,40 @@
 
 ## 4. 故障注入场景库（`tests/harness/scenarios.js` 30 个）
 
-| 场景 | 覆盖它的用例 |
+场景名即 ID：`SCENARIOS` 加了一个键而这里没登记，`npm run matrix:gate` 即红。
+
+| ID（场景） | 覆盖它的用例 |
 |---|---|
-| healthy | 全部集成主干（flows / loop / cli / sse / setup） |
-| settings-missing | `tests/integration/settings.test.js`（missing→create） |
-| settings-existing | `tests/integration/settings.test.js`（GET/PUT/backup/stale 主干） |
-| settings-empty | `tests/integration/settings.test.js`（零字节存在态） |
-| settings-invalid-utf8 | `tests/integration/settings.test.js`（422 且不泄漏原始字节） |
-| settings-exact-cap | `tests/integration/settings.test.js`（精确 512 KiB GET/PUT） |
-| settings-too-large | `tests/integration/settings.test.js`（超一字节即 413） |
-| settings-unsupported | `tests/integration/settings.test.js`（501，其他生命周期协议不受影响） |
-| settings-read-fail | `tests/integration/settings.test.js`（固定目标读取失败） |
-| settings-protocol-corrupt | `tests/integration/settings.test.js`（CRC/成功帧损坏） |
-| settings-write-fail | `tests/integration/settings.test.js`（提交前失败不改正式文件） |
-| settings-staging-catastrophic | `tests/integration/settings.test.js`（灾难中断后的 reserved staging 收敛） |
-| settings-write-unknown-before-commit | `tests/integration/settings.test.js`（提交前结果未知） |
-| settings-write-unknown-after-commit | `tests/integration/settings.test.js`（已提交但响应未知，必须 GET） |
-| settings-write-unknown | `tests/integration/settings.test.js`（兼容 unknown-after-commit 场景名） |
-| settings-change-before-second-cas | `tests/integration/settings.test.js`（backup 后外部改写，二次 CAS 拒绝覆盖） |
-| no-dsh-missing-bin | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
-| no-dsh-no-profile | 同上 |
-| unreachable | 同上 + IT-01 |
-| hostkey-fail | `tests/harness/harness.test.js` |
-| conn-timeout | `tests/harness/harness.test.js`（强杀链） |
-| bind-busy-once | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-03 |
-| bind-busy-twice | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`（IT-04 的替身） |
-| launch-dies | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
-| forward-disabled | `tests/integration/resilience.test.js`（两条：挂起不退避 / 挂起期间 stop；IT-10 的替身） |
-| no-ss | `tests/harness/harness.test.js` |
-| workdir-missing | `tests/harness/harness.test.js`（含「对 workdir=null 无效」）、`tests/integration/flows.test.js`；真机侧见 IT-14（用户手动） |
-| no-proc-cwd | `tests/harness/harness.test.js`（CWD 降级 + 不误杀判据不受影响）、`tests/web/mount.test.js`（UI 显示「—」） |
-| scp-fail | `tests/harness/harness.test.js` |
-| slow-probe | `tests/harness/harness.test.js`（并行探测不互相阻塞） |
+| `SCN:healthy` | 全部集成主干（flows / loop / cli / sse / setup） |
+| `SCN:settings-missing` | `tests/integration/settings.test.js`（missing→create） |
+| `SCN:settings-existing` | `tests/integration/settings.test.js`（GET/PUT/backup/stale 主干） |
+| `SCN:settings-empty` | `tests/integration/settings.test.js`（零字节存在态） |
+| `SCN:settings-invalid-utf8` | `tests/integration/settings.test.js`（422 且不泄漏原始字节） |
+| `SCN:settings-exact-cap` | `tests/integration/settings.test.js`（精确 512 KiB GET/PUT） |
+| `SCN:settings-too-large` | `tests/integration/settings.test.js`（超一字节即 413） |
+| `SCN:settings-unsupported` | `tests/integration/settings.test.js`（501，其他生命周期协议不受影响） |
+| `SCN:settings-read-fail` | `tests/integration/settings.test.js`（固定目标读取失败） |
+| `SCN:settings-protocol-corrupt` | `tests/integration/settings.test.js`（CRC/成功帧损坏） |
+| `SCN:settings-write-fail` | `tests/integration/settings.test.js`（提交前失败不改正式文件） |
+| `SCN:settings-staging-catastrophic` | `tests/integration/settings.test.js`（灾难中断后的 reserved staging 收敛） |
+| `SCN:settings-write-unknown-before-commit` | `tests/integration/settings.test.js`（提交前结果未知） |
+| `SCN:settings-write-unknown-after-commit` | `tests/integration/settings.test.js`（已提交但响应未知，必须 GET） |
+| `SCN:settings-write-unknown` | `tests/integration/settings.test.js`（兼容 unknown-after-commit 场景名） |
+| `SCN:settings-change-before-second-cas` | `tests/integration/settings.test.js`（backup 后外部改写，二次 CAS 拒绝覆盖） |
+| `SCN:no-dsh-missing-bin` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
+| `SCN:no-dsh-no-profile` | 同上 |
+| `SCN:unreachable` | 同上 + IT-01 |
+| `SCN:hostkey-fail` | `tests/harness/harness.test.js` |
+| `SCN:conn-timeout` | `tests/harness/harness.test.js`（强杀链） |
+| `SCN:bind-busy-once` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-03 |
+| `SCN:bind-busy-twice` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`（IT-04 的替身） |
+| `SCN:launch-dies` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
+| `SCN:forward-disabled` | `tests/integration/resilience.test.js`（两条：挂起不退避 / 挂起期间 stop；IT-10 的替身） |
+| `SCN:no-ss` | `tests/harness/harness.test.js` |
+| `SCN:workdir-missing` | `tests/harness/harness.test.js`（含「对 workdir=null 无效」）、`tests/integration/flows.test.js`；真机侧见 IT-14（用户手动） |
+| `SCN:no-proc-cwd` | `tests/harness/harness.test.js`（CWD 降级 + 不误杀判据不受影响）、`tests/web/mount.test.js`（UI 显示「—」） |
+| `SCN:scp-fail` | `tests/harness/harness.test.js` |
+| `SCN:slow-probe` | `tests/harness/harness.test.js`（并行探测不互相阻塞） |
 
 ## 5. HTTP / SSE 契约（13 文档，TST-05）
 
@@ -321,7 +326,9 @@
 |---|---|
 | 入口判定认软链（装到 PATH 的 dshc 是软链，判错就静默退 0） | `tests/tooling.test.js`（`isMainEntry` + 真软链跑 `dshc --help`） |
 | 安装脚本不覆盖非本仓库的 dshc、PATH 缺失时当场提示 | 同上（`linkPlan` / `prefixInPath` / `pathHint`） |
-| 闸门六关顺序固定为 lint → tests → ui → site → pack → cli；关卡选择与摘要、`--only/--skip` 打错字要报错 | 同上（真实 `CHECK_STAGES` / `selectStages` / `summarize`） |
+| 闸门七关顺序固定为 lint → tests → ui → site → perf → pack → cli；关卡选择与摘要、`--only/--skip` 打错字要报错 | 同上（真实 `CHECK_STAGES` / `selectStages` / `summarize`） |
+| tests 关内含行为清单对账（覆盖率之后）：行为清单 ↔ §11 登记 ↔ 文件引用三方不一致即红 | `tests/architecture.test.js`（§11.5 判定用例），执行入口 `npm run matrix:gate` |
+| perf 关是软闸：墙钟中位数超基线 ×2.5 才判红，`--advisory` 只报不挡；PR CI 一律 advisory、cron 只在 macOS 严格 | `tests/architecture.test.js`（`perfVerdict` / `median` / 噪声地板 / 基线↔场景表同步）、`tests/tooling.test.js`（cron 那步的逐字契约），执行入口 `npm run perf:gate` |
 | `scripts/lint.mjs` 固定 oxlint 版本、平台资产与 Release URL；下载归档和缓存二进制均核对固定 SHA-256，tar 只提取指定普通文件 | `tests/tooling.test.js`（`oxlintDigests` / `cachedBinaryIsTrusted` / `extractOxlintFromTar`），执行入口 `npm run check -- --only lint` |
 | oxlint 告警完整显示并以当前 107 条基线为上限，新增告警即红 | `tests/tooling.test.js`（`OXLINT_MAX_WARNINGS` / `oxlintArgs`） |
 | 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check -- --only pack` |
@@ -478,3 +485,160 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | 请求体超限：超一点点先读完再回 400（人话 + VALIDATION，值一个字节都不落盘）、灌超大体时掐链但 manager 照常服务；目录穿越的多种编码形态（`..%2f`、`%2e%2e`、`.%2e`、`....//`、后缀式）一律 403/404 且不漏内容 | `tests/integration/security.test.js`、`tests/integration/static.test.js` |
 | 标签栏方向键：落点纯函数（左右环绕、Home/End、焦点不在环上时从头算、空标签栏不算、ArrowDown/Enter 不许被抢）；挂载后左右真移焦点且不切页、Tab 落点收成一个并跟着选中标签走、没有游荡在 tablist 之外的 `role="tab"`；真浏览器里原生按键真派到焦点标签上、Enter 才切页（摘掉方向键即红） | `tests/web/tabbar.test.js`、`tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S13） |
 | 收尾兜底：到点仍有句柄就报出句柄名（同名不重复念）并带原退出码硬退、保险自身已 unref（不许拖慢干净的收场）、问不出句柄名也照样退；CDP 应答到手即清超时定时器（不清则收尾空等 20s） | `tests/tooling.test.js` |
+
+## 11. 行为清单登记（机器核对）
+
+上面的章节是给人读的；这一节连同 §1 的 `FSM:` 与 §4 的 `SCN:` 是给机器对账的。
+`scripts/lib/inventory.mjs` 不看这份文档，直接从源码算出六个面的行为清单
+（`API` 路由表、`FSM` 迁移表、`SCN` 场景表、`EXIT` 远端退出码、`ERR` 错误码、
+`CLI` 命令表），`npm run matrix:gate` 三方对账：
+
+- 清单里有、这里没登记 → 红「新增行为未登记」（加了路由/场景/退出码却忘了写矩阵）；
+- 这里登记了、清单里没有 → 红「死行为」（代码删了，矩阵还留着）；
+- 引用的 `tests/` `scripts/` `src/` `site/` 路径不存在 → 红「矩阵引用悬空」。
+
+自动化确实覆盖不了的，同一行写 `EXEMPT(真机)：理由` 一类标记（理由必填，否则也红），
+豁免清单另见 §10。
+
+### 11.1 REST 路由（`API:`）
+
+| ID | 覆盖 |
+|---|---|
+| `API:GET /api/hosts` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/contract/schemas.test.js` |
+| `API:GET /api/config` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `API:GET /api/manager/info` | `tests/api.test.js`、`tests/integration/daemon.test.js` |
+| `API:GET /api/events` | `tests/api.test.js`、`tests/integration/sse.test.js` |
+| `API:GET /api/hosts/:name/log` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
+| `API:GET /api/hosts/:name/dsh-settings` | `tests/api.test.js`、`tests/integration/settings.test.js`、`tests/settings-file.test.js` |
+| `API:PUT /api/hosts/:name/dsh-settings` | `tests/api.test.js`、`tests/integration/settings.test.js`、`tests/settings-file.test.js` |
+| `API:POST /api/hosts/:name/dsh-workspace` | `tests/api.test.js`、`tests/dsh-workspace.test.js`、`tests/integration/workspace.test.js` |
+| `API:POST /api/hosts/local` | `tests/api.test.js`、`tests/demo-contract.test.js` |
+| `API:POST /api/hosts/sync-config` | `tests/api.test.js`、`tests/config-sync.test.js`、`tests/integration/ui-live.test.js` |
+| `API:PUT /api/hosts/:name/config` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
+| `API:PUT /api/config/defaults` | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
+| `API:POST /api/reload` | `tests/integration/flows.test.js`、`tests/integration/resilience.test.js` |
+| `API:POST /api/setup` | `tests/api.test.js`、`tests/integration/setup.test.js` |
+| `API:POST /api/manager/restart` | `tests/integration/daemon.test.js`、`tests/web/actions.test.js` |
+| `API:POST /api/manager/shutdown` | `tests/integration/daemon.test.js`（`dshc down` 走的就是它）、`tests/demo-contract.test.js` |
+| `API:POST /api/hosts/probe` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/scale.test.js` |
+| `API:POST /api/hosts/:name/probe` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `API:POST /api/hosts/:name/start` | `tests/integration/flows.test.js`、`tests/integration/loop.test.js` |
+| `API:POST /api/hosts/:name/stop` | `tests/integration/flows.test.js`、`tests/integration/resilience.test.js` |
+| `API:POST /api/hosts/:name/restart` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `API:POST /api/hosts/:name/reconnect` | `tests/integration/resilience.test.js`、`tests/integration/flows.test.js` |
+
+### 11.2 远端脚本退出码（`EXIT:`）
+
+改协议模板新增分支时，先来这张表确认没撞号（AGENTS.md「退出码占用表」）。
+
+| ID | 语义 | 覆盖 |
+|---|---|---|
+| `EXIT:1` | settings 能力不满足 / 读取失败的通用失败 | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+| `EXIT:8` | LAUNCH 的 workdir 进不去（`ERR=workdir`） | `tests/lib/proto.test.js`、`tests/harness/harness.test.js` |
+| `EXIT:9` | patches 目录 mkdir 失败（LAUNCH 与 CLEAN 共用） | `tests/lib/proto.test.js`、`tests/launcher.test.js` |
+| `EXIT:10` | settings 超过 512 KiB | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+| `EXIT:11` | settings CAS 基线陈旧 | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+| `EXIT:12` | settings 写失败 | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+
+### 11.3 错误码（`ERR:`）
+
+| ID | 覆盖 |
+|---|---|
+| `ERR:VALIDATION` | `tests/api.test.js`、`tests/lib/validate.test.js`、`tests/integration/cli.test.js` |
+| `ERR:NOT_FOUND` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `ERR:SETUP_REQUIRED` | `tests/integration/setup.test.js`、`tests/api.test.js` |
+| `ERR:PHASE_CONFLICT` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `ERR:NOT_ALLOWED` | `tests/api.test.js`、`tests/integration/flows.test.js` |
+| `ERR:FORBIDDEN_ORIGIN` | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
+| `ERR:FORBIDDEN_HOST` | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
+| `ERR:PORT_EXHAUSTED` | `tests/ports.test.js`、`tests/integration/loop.test.js` |
+| `ERR:SSH_UNREACHABLE` | `tests/lib/ssh.test.js`、`tests/harness/harness.test.js` |
+| `ERR:SSH_TIMEOUT` | `tests/lib/ssh.test.js`、`tests/harness/harness.test.js` |
+| `ERR:LOCAL_TIMEOUT` | `tests/lib/ssh.test.js`、`tests/harness/local-flow.test.js` |
+| `ERR:LOCAL_EXEC_FAILED` | `tests/lib/ssh.test.js`、`tests/settings-file.test.js` |
+| `ERR:LOCAL_COPY_FAILED` | `tests/lib/ssh.test.js`、`tests/patchsync.test.js` |
+| `ERR:LOCAL_HOST_EXISTS` | `tests/api.test.js` |
+| `ERR:LOCAL_NAME_CONFLICT` | `tests/api.test.js` |
+| `ERR:PROTO_PARSE` | `tests/lib/proto.test.js`、`tests/monitor.test.js` |
+| `ERR:SETTINGS_TOO_LARGE` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_BUSY` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_STALE` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_WRITE_FAILED` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_READ_FAILED` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_UNSUPPORTED` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:SETTINGS_INVALID_UTF8` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
+| `ERR:WORKSPACE_BUSY` | `tests/dsh-workspace.test.js` |
+| `ERR:WORKSPACE_WORKDIR_REQUIRED` | `tests/dsh-workspace.test.js`、`tests/integration/workspace.test.js` |
+| `ERR:WORKSPACE_CWD_UNAVAILABLE` | `tests/dsh-workspace.test.js` |
+| `ERR:WORKSPACE_INVALID_PATH` | `tests/dsh-workspace.test.js` |
+| `ERR:WORKSPACE_REGISTER_FAILED` | `tests/dsh-workspace.test.js` |
+| `ERR:WORKSPACE_REGISTER_TIMEOUT` | `tests/dsh-workspace.test.js` |
+| `ERR:LAUNCH_FAILED` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
+| `ERR:KILL_REFUSED` | `tests/integration/flows.test.js`、`tests/harness/local-flow.test.js`、`tests/adversarial/fingerprint.test.js` |
+| `ERR:TUNNEL_FORWARD_DISABLED` | `tests/tunnel.test.js`（`SUSPEND_REASONS` 分类）、`tests/integration/resilience.test.js`（`SCN:forward-disabled` 挂起不退避） |
+| `ERR:TUNNEL_PORT_BUSY` | `tests/tunnel.test.js`、`tests/ports.test.js` |
+| `ERR:STATE_ILLEGAL_TRANSITION` | `tests/lib/machine.test.js`、`tests/store.test.js` |
+| `ERR:CONFIG_WRITE_FAILED` | `tests/store.test.js` |
+| `ERR:CONFIG_STALE` | `tests/store.test.js`、`tests/config-sync.test.js`、`tests/integration/cli.test.js` |
+| `ERR:PIDFILE_WRITE_FAILED` | `tests/integration/daemon.test.js`（pidfile 写不进给人话、不吐栈） |
+| `ERR:LOGFILE_OPEN_FAILED` | `tests/integration/daemon.test.js`（manager.log 开不出来给人话、不吐栈） |
+| `ERR:INTERNAL` | `tests/cli.test.js`（`exitCodeFor` 兜底映射）、`tests/patchsync.test.js` |
+
+### 11.4 CLI 命令（`CLI:`）
+
+| ID | 覆盖 |
+|---|---|
+| `CLI:init` | `tests/setup-wizard.test.js`、`tests/integration/cli.test.js` |
+| `CLI:up` | `tests/integration/daemon.test.js`、`tests/cli.test.js` |
+| `CLI:down` | `tests/integration/daemon.test.js` |
+| `CLI:restart` | `tests/integration/daemon.test.js`、`tests/integration/cli.test.js` |
+| `CLI:status` | `tests/integration/daemon.test.js`、`tests/integration/cli.test.js` |
+| `CLI:logs` | `tests/integration/daemon.test.js` |
+| `CLI:service` | `tests/integration/daemon.test.js`（launchd plist 快照） |
+| `CLI:version` | `tests/updater.test.js`、`tests/integration/cli.test.js` |
+| `CLI:update` | `tests/updater.test.js` |
+| `CLI:ls` | `tests/integration/cli.test.js` |
+| `CLI:probe` | `tests/integration/cli.test.js` |
+| `CLI:start` | `tests/integration/cli.test.js`、`tests/cli.test.js` |
+| `CLI:stop` | `tests/integration/cli.test.js`、`tests/cli.test.js` |
+| `CLI:reconnect` | `tests/integration/cli.test.js`、`tests/cli.test.js` |
+| `CLI:log` | `tests/integration/cli.test.js` |
+| `CLI:open` | `tests/integration/cli.test.js`（假 `open` 记账） |
+| `CLI:config` | `tests/cli.test.js`、`tests/integration/cli.test.js` |
+
+### 11.5 harness 体系自身
+
+闸门自己也是代码，一样要有人盯（与 `scripts/coverage-gate.mjs` 同款待遇：判定逻辑
+内嵌在架构护栏用例里）。
+
+| 面 | 覆盖 |
+|---|---|
+| 行为清单提取：路由表正则转可读路径、退出码静态抽取、`COMMANDS` 顶层键、`TRANSITIONS`/`SCENARIOS` 直读 | `tests/architecture.test.js`（`apiRoutesFrom` / `protoExitCodesFrom` / `cliCommandsFrom` / `collectInventory`） |
+| 三方对账判定：未登记、死行为、引用悬空、豁免没写理由各自判红；glob 形态引用只要有一个命中就算落地 | `tests/architecture.test.js`（`matrixVerdict` / `parseRegistrations` / `parseFileRefs` / `globHasMatch`） |
+| 攻击语料库形状：id 唯一、surface 已知、payload 带 canary、expect 与 origin 必填 | `tests/adversarial/corpus.test.js` |
+| 金丝雀 oracle：canary 只许落在单引号词内，成为独立词/命令位/选项位都判逃逸；oracle 自身有正反算例 | `tests/adversarial/oracle.test.js` |
+| 注入面回放：config→LAUNCH 的 env/extraArgs/workdir/patch 名/Host 名、STOP 指纹边界、本机 HTTP 副作用面 | `tests/adversarial/launch-argv.test.js`、`tests/adversarial/fingerprint.test.js`、`tests/adversarial/http.test.js` |
+| 运输账本：每次调用记 begin/end 两行、id 成对、行序即跨进程全序；`inFlightStats` 的峰值/未收尾算法 | `tests/harness/harness.test.js`（账本落账 + `inFlightStats` 正反算例） |
+| 确定性性能不变量（硬闸）：30 台探测 ssh 次数 == N 且在飞峰值 ≤ 6（逐字 6，出厂表一改就红）、`mapPool` 峰值恒等于 limit、重连闸 16 挤 6 且 FIFO、退避上界 `2^n` 封顶 30s、`monitor.tick` 不叠加、单主机深核恒 1 次 VERIFY、同主机 `hostQueue` 严格串行、state.json 落盘有 debounce | `tests/perf/invariants.test.js` |
+| 墙钟软基线：三路径（探测扇出 / 复核风暴 / 一拍巡检）+ 四微基准（模板构建、schema 校验、协议解析、lcov 解析），k=5 取中位数、丢弃预热样本 | `tests/perf/scenarios.js` + `scripts/perf-gate.mjs`（判定逻辑单测在 `tests/architecture.test.js`） |
+| 种子化 fuzz 五目标：转义往返（`unshq` / 真 `sh` / 校验器后果）、协议构建↔派发↔解析往返、schema 变异必被拒、状态机随机游走、HTTP body | `tests/fuzz/shq.test.js`、`tests/fuzz/proto.test.js`、`tests/fuzz/validate.test.js`、`tests/fuzz/machine.test.js`、`tests/fuzz/http.test.js` |
+| fuzz 骨架自身：PRNG 逐位可复现（含逐字快照）、种子分离、预算解析、触发签名去重、语料形状与 ID 号段、沉淀管道的去重与注入类转写 | `tests/fuzz/plumbing.test.js`（`prng.js` / `runner.js` / `corpus.js` / `scripts/fuzz-sink.mjs` 的纯判定） |
+| 变异算子：只改代码区（`=>`/`>>>`/`0x`/浮点/BigInt/字符串里的一律不动）、单行守卫子句可删、变异体 id 与行号无关而与那一行内容有关 | `tests/architecture.test.js`（`scanJs` / `isCodeSpan` / `enumerateMutants` / `applyMutant`） |
+| 变异闸门判定：新幸存者判红、已登记的放行、复活的要报、语法不合法不进分母、超时算杀死、只报告档不影响退出码、悬空豁免与 `--only`/`--op` 缩范围的交互 | `tests/architecture.test.js`（`mutationVerdict` / `parseAllowed` / `interleaveByFile` / `testSetResolver`），执行入口 `npm run mutation:gate` |
+| 变异闸门自检：未变异的沙盒必须先全绿，否则整轮作废——挡的是「沙盒本来就红导致每个变异体都被判成杀死、kill 率虚假接近 100%」这种假杀 | `scripts/mutation-gate.mjs` 开跑前的自检步（日志里逐轮可见），演练记录见 §11.6 |
+| 变异豁免基线：每条都写清理由（占位符判红）、都指向真实存在的变异体、设卡档每个文件都有用例能到达 | `tests/mutation/ALLOWED_SURVIVORS.json` + `tests/architecture.test.js` |
+| 测试卫生：每个用例文件至少一处断言；`tests/adversarial/**`、`tests/perf/**`、`tests/fuzz/**` 只依赖 node 内置与本仓 src/tests/scripts；`scripts/lib/inventory.mjs` 不被 `src/` 引用 | `tests/architecture.test.js` |
+
+### 11.6 可红性演练记录
+
+一个从没红过的闸门等于没有闸门——它可能一直在空转，而没人看得出来。下面每条都是**真的
+把缺陷注入进去跑过一遍**，记的是当时的实际输出；产品代码随后逐字复原（`git diff` 为空）。
+改了任一支柱的判据，照这张表重跑一遍。
+
+| 支柱 | 注入的缺陷 | 实际观察到的红 |
+|---|---|---|
+| 行为清单 | 从 §11.1 删掉 `API:GET /api/config` 一行 | `matrix-gate` 判红：「行为清单：139 项，矩阵登记 138 项」+「新增行为未登记 1 项：`API:GET /api/config`」；补回后退出码 0 |
+| 攻击语料 | `shq` 放开单引号转义（`'${s}'`，不再做关引-转义引-开引） | `tests/adversarial/` 52 例中 3 红。金丝雀 oracle 指名道姓：`AV-ARGV-006 金丝雀逃逸：偏移 169 落在 bare（词：/tmp/dshc-canary-QUOTEBREAK）`，并打印出注入后的整条远端命令；STOP 指纹那组同时红 |
+| 性能不变量 | `src/defaults.js` 的 `SSH_FANOUT_LIMIT` 由 6 改 7 | `tests/perf/invariants.test.js` 9 例中 3 红：「扇出上限就是 6」逐字闸报 `7 !== 6`，`probeAll` 那条报「在飞峰值 7 超过扇出闸 6」并附在飞序列 `…5,6,7,6,5…` |
+| 种子化 fuzz | `shq` 的 `split/join` 换成 `s.replace("'", …)`——只转义**第一个**单引号（经典历史 bug 形态） | 固定种子 `20260825` 第 6 例即被逮住，触发词是含**两个**单引号的 `'.[')a@!&>!![…`（固定语料里原本缺这个形态）。日志给出的单例重放命令逐字可复现；`fuzz-sink.mjs --write` 去重后沉淀为 `FZ-SHQ-002`，复原实现后该语料回放转绿 |
+| 变异测试 | 删掉 `tests/lib/semver.test.js` 里 `isPrerelease('1.0.0-rc')` 那条断言 | 变异闸门报出新幸存者 `src/lib/semver.js:46 [num-plus-1] parsed.prerelease.length > 0`（把 `> 0` 改成 `> 1` 没人管），并给出可直接抄的豁免骨架；补回断言后该档 kill 率回到 100% |

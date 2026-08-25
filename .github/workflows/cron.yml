@@ -36,5 +36,48 @@ jobs:
           node -e "const p=require('./package.json'); if (p.dependencies || p.devDependencies) { console.error('本项目不许有 npm 依赖'); process.exit(1); }"
 
       # Ubuntu 镜像有 Chrome，必须真跑浏览器关；macOS 缺浏览器时允许按闸门原逻辑跳过。
+      #
+      # 墙钟那关的严格度按平台分：tests/perf/BASELINE.json 是在 macOS（产品唯一发布平台）
+      # 上录的，同平台比才有意义，故 macOS 上严格判红；ubuntu 上只 --advisory，
+      # 否则量的是「两个平台的机器差异」而不是「本次改动的退化」。
       - name: 统一质量闸门
-        run: npm run check ${{ matrix.os == 'ubuntu-latest' && '-- --require-browser' || '' }}
+        run: npm run check ${{ matrix.os == 'ubuntu-latest' && '-- --require-browser --perf-advisory' || '' }}
+
+      # 日常 `npm test` 里的 fuzz 是固定种子 + 固定例数（秒级，天天跑，只保证不退化）。
+      # 探新是这一步的活：换一个从未跑过的根种子，按时间盒放开跑。逮到的失败会落到
+      # .local/evidence/fuzz/ 并在日志里给出重放命令，按 RV-10 沉淀成永久语料。
+      - name: fuzz 探新（每目标 60s 时间盒，随机根种子）
+        env:
+          DSHC_FUZZ_SEED: ${{ github.run_id }}
+          DSHC_FUZZ_BUDGET_MS: '60000'
+        run: node --test "tests/fuzz/*.test.js"
+
+  # 变异测试独立成 job：它比其余闸门贵一个数量级（要把产品代码改坏几百次、每次重跑
+  # 相关用例），塞进 check 会把那个 job 的 30 分钟超时撑爆。
+  #
+  # 只在 ubuntu 上跑：变异测试问的是「测试有没有断言这处逻辑」，答案与平台无关，
+  # 两个平台跑等于把账单翻倍换同一个结论。
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      # 时间盒兜底：变异体按文件轮转排队，跑不完时覆盖到的那部分仍横跨所有文件，
+      # 没跑到的记为「未跑」、不进 kill 率分母，所以部分轮次的结论依然是可信的。
+      #
+      # 两档预算（35 + 15 分钟）连开跑前的沙盒自检一起算在内——自检是「未变异的沙盒
+      # 必须先绿」那一步，它保证「杀死」不是假的。算进预算是故意的：这样两档加起来
+      # 咬死在 job 的 60 分钟超时之内，不会因为自检变慢而把整个 job 撞超时。
+      - name: 变异测试（lib 档设卡）
+        run: node scripts/mutation-gate.mjs --tier lib --jobs 3 --budget 2100
+
+      # 模块层先只报告：预算与噪声摸清了再把 TARGETS 里的 enforce 打开。
+      - name: 变异测试（模块层，仅报告）
+        if: always()
+        run: node scripts/mutation-gate.mjs --tier modules --jobs 3 --budget 900 --advisory

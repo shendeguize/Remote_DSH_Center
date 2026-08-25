@@ -20,5 +20,5 @@
 
 ---
 
-Review 清单（CONTRIBUTING.md §Review 的 RV-1…9）逐条在评论里勾选留痕；
+Review 清单（CONTRIBUTING.md §Review 的 RV-1…11）逐条在评论里勾选留痕；
 docs-only PR 只需 RV-7 / RV-8。

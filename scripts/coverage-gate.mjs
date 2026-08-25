@@ -19,6 +19,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { isMainEntry } from '../src/lib/entry.js';
+import { scanJs } from './lib/js-scan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -183,275 +184,33 @@ function normalizeLcovSource(file, root) {
 }
 
 const COVERAGE_SUPPRESSION = /^(?:node:coverage\s+(?:disable|ignore\s+next(?:\s+\d+)?)|c8\s+ignore\s+(?:next(?:\s+\d+)?|start|stop)|istanbul\s+ignore\s+(?:file|next|if|else))$/i;
-const REGEX_PREFIX_KEYWORDS = new Set([
-  'await', 'case', 'delete', 'do', 'else', 'instanceof', 'new',
-  'return', 'throw', 'typeof', 'void', 'yield',
-]);
-const FOR_HEADER_OPERATORS = new Set(['in', 'of']);
-const IDENTIFIER_START = /^(?:[$_]|\p{ID_Start})$/u;
-const IDENTIFIER_CONTINUE = /^(?:[$_\u200C\u200D]|\p{ID_Continue})$/u;
 
 /**
- * 提取真正 JS 注释 token 中的 coverage suppression。扫描器只承担这一个静态护栏：
- * 跳过字符串、template raw（`${}` 内重新按代码扫描）与 regex literal，不冒充通用 parser。
+ * 提取真正 JS 注释 token 中的 coverage suppression——写在字符串里的同一串文本不算。
+ * 「哪些字符是代码」这个判断交给 `scripts/lib/js-scan.mjs`（mutation-gate 用的是同一份，
+ * 两个闸门共用一套跳过逻辑，才不会各自漂移）。
  * @param {string} source
  * @returns {Array<{line:number,directive:string}>}
  */
 export function findCoverageSuppressions(source) {
-  const text = String(source);
   const found = [];
-  const codeFrame = (templateExpression) => ({
-    type: 'code',
-    templateExpression,
-    braces: 0,
-    canStartRegex: true,
-    afterPropertyAccess: false,
-    pendingFor: false,
-    parens: [],
-  });
-  const frames = [codeFrame(false)];
-  const top = () => frames[frames.length - 1];
-  const codePointAt = (offset) => {
-    const value = text.codePointAt(offset);
-    return value === undefined ? '' : String.fromCodePoint(value);
-  };
-  const lineOf = (offset) => {
-    let line = 1;
-    for (let index = 0; index < offset; index += 1) {
-      if (text[index] === '\n') line += 1;
-    }
-    return line;
-  };
-  const inspectComment = (start, end) => {
-    const raw = text.slice(start, end);
-    const directive = raw.trim();
-    if (!COVERAGE_SUPPRESSION.test(directive)) return;
-    const offset = start + raw.indexOf(directive);
-    found.push({ line: lineOf(offset), directive: directive.replace(/\s+/g, ' ') });
-  };
-  const skipQuoted = (start, quote) => {
-    let index = start + 1;
-    while (index < text.length) {
-      if (text[index] === '\\') {
-        index += 2;
-        if (text[index - 1] === '\r' && text[index] === '\n') index += 1;
-      } else if (text[index] === quote) {
-        return index + 1;
-      } else if (text[index] === '\n' || text[index] === '\r') {
-        return index;
-      } else {
-        index += 1;
-      }
-    }
-    return index;
-  };
-  const skipRegex = (start) => {
-    let index = start + 1;
-    let inClass = false;
-    while (index < text.length) {
-      const char = text[index];
-      if (char === '\\') {
-        index += 2;
-      } else if (char === '[') {
-        inClass = true;
-        index += 1;
-      } else if (char === ']' && inClass) {
-        inClass = false;
-        index += 1;
-      } else if (char === '/' && !inClass) {
-        index += 1;
-        while (/[A-Za-z]/.test(text[index] ?? '')) index += 1;
-        return index;
-      } else if (char === '\n' || char === '\r') {
-        return index;
-      } else {
-        index += 1;
-      }
-    }
-    return index;
-  };
-
-  let index = 0;
-  while (index < text.length) {
-    const frame = top();
-    const char = text[index];
-    const next = text[index + 1];
-    const codePoint = codePointAt(index);
-
-    if (frame.type === 'template') {
-      if (char === '\\') {
-        index += 2;
-      } else if (char === '`') {
-        frames.pop();
-        index += 1;
-      } else if (char === '$' && next === '{') {
-        frames.push(codeFrame(true));
-        index += 2;
-      } else {
-        index += 1;
-      }
-      continue;
-    }
-
-    if (/\s/.test(char)) {
-      index += 1;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      index = skipQuoted(index, char);
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      continue;
-    }
-    if (char === '`') {
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      frames.push({ type: 'template' });
-      index += 1;
-      continue;
-    }
-    if (char === '/' && next === '/') {
-      const contentStart = index + 2;
-      index = text.indexOf('\n', contentStart);
-      if (index === -1) index = text.length;
-      inspectComment(contentStart, index);
-      continue;
-    }
-    if (char === '/' && next === '*') {
-      const contentStart = index + 2;
-      const close = text.indexOf('*/', contentStart);
-      const contentEnd = close === -1 ? text.length : close;
-      inspectComment(contentStart, contentEnd);
-      index = close === -1 ? text.length : close + 2;
-      continue;
-    }
-    if (char === '/') {
-      if (frame.canStartRegex) {
-        index = skipRegex(index);
-        frame.canStartRegex = false;
-      } else {
-        index += 1;
-        frame.canStartRegex = true;
-      }
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      continue;
-    }
-    if (IDENTIFIER_START.test(codePoint)) {
-      const start = index;
-      index += codePoint.length;
-      while (IDENTIFIER_CONTINUE.test(codePointAt(index))) {
-        index += codePointAt(index).length;
-      }
-      const word = text.slice(start, index);
-      const propertyName = frame.afterPropertyAccess;
-      const inForHeader = frame.parens.includes('for');
-      const precededByExpression = !frame.canStartRegex;
-      frame.afterPropertyAccess = false;
-      if (!propertyName && word === 'for') {
-        frame.pendingFor = true;
-        frame.canStartRegex = true;
-      } else if (!propertyName && frame.pendingFor && word === 'await') {
-        frame.canStartRegex = true;
-      } else {
-        frame.pendingFor = false;
-        frame.canStartRegex = !propertyName && (
-          REGEX_PREFIX_KEYWORDS.has(word)
-          || (inForHeader && precededByExpression && FOR_HEADER_OPERATORS.has(word))
-        );
-      }
-      continue;
-    }
-    if (/[0-9]/.test(char)) {
-      index += 1;
-      while (/[A-Za-z0-9_.]/.test(text[index] ?? '')) index += 1;
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      continue;
-    }
-    if (char === '(') {
-      frame.parens.push(frame.pendingFor ? 'for' : 'normal');
-      frame.canStartRegex = true;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 1;
-      continue;
-    }
-    if (char === ')') {
-      frame.parens.pop();
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 1;
-      continue;
-    }
-    if (char === '.' && next === '.' && text[index + 2] === '.') {
-      frame.canStartRegex = true;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 3;
-      continue;
-    }
-    if (char === '.' && /[0-9]/.test(next ?? '')) {
-      index += 2;
-      while (/[0-9_]/.test(text[index] ?? '')) index += 1;
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      continue;
-    }
-    if (char === '.' || (
-      char === '?' && next === '.' && !/[0-9]/.test(text[index + 2] ?? '')
-    )) {
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = true;
-      frame.pendingFor = false;
-      index += char === '.' ? 1 : 2;
-      continue;
-    }
-    if (frame.templateExpression && char === '}') {
-      if (frame.braces === 0) {
-        frames.pop();
-      } else {
-        frame.braces -= 1;
-        frame.canStartRegex = false;
-        frame.afterPropertyAccess = false;
-        frame.pendingFor = false;
-      }
-      index += 1;
-      continue;
-    }
-    if (char === '{') {
-      if (frame.templateExpression) frame.braces += 1;
-      frame.canStartRegex = true;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 1;
-      continue;
-    }
-    if (char === ']' || char === '}') {
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 1;
-      continue;
-    }
-    if ((char === '+' || char === '-') && next === char) {
-      frame.canStartRegex = false;
-      frame.afterPropertyAccess = false;
-      frame.pendingFor = false;
-      index += 2;
-      continue;
-    }
-    frame.canStartRegex = true;
-    frame.afterPropertyAccess = false;
-    frame.pendingFor = false;
-    index += 1;
+  for (const comment of scanJs(source).comments) {
+    const directive = comment.text.trim();
+    if (!COVERAGE_SUPPRESSION.test(directive)) continue;
+    // 行号按 directive 的实际位置算：块注释里 pragma 可能不在第一行
+    const offset = comment.start + comment.text.indexOf(directive);
+    const line = comment.line + countNewlines(comment.text, comment.text.indexOf(directive));
+    found.push({ line: offset === -1 ? comment.line : line, directive: directive.replace(/\s+/g, ' ') });
   }
   return found;
+}
+
+function countNewlines(text, upto) {
+  let n = 0;
+  for (let i = 0; i < upto; i += 1) {
+    if (text[i] === '\n') n += 1;
+  }
+  return n;
 }
 
 /**

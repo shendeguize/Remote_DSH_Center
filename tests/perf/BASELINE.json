@@ -1,0 +1,36 @@
+{
+  "note": "墙钟基线（scripts/perf-gate.mjs 生成）。改动须在 PR 里说明理由，见 CONTRIBUTING RV-10。",
+  "tolerance": 2.5,
+  "repeats": 5,
+  "recordedOn": "darwin/arm64 node 22.22.0",
+  "scenarios": {
+    "lcov-parse": {
+      "ms": 14.814,
+      "kind": "micro"
+    },
+    "monitor-tick": {
+      "ms": 5.857,
+      "kind": "path"
+    },
+    "probe-fanout": {
+      "ms": 418.389,
+      "kind": "path"
+    },
+    "proto-build": {
+      "ms": 10.351,
+      "kind": "micro"
+    },
+    "proto-parse": {
+      "ms": 7.963,
+      "kind": "micro"
+    },
+    "validate-config": {
+      "ms": 19.332,
+      "kind": "micro"
+    },
+    "verify-storm": {
+      "ms": 216.405,
+      "kind": "path"
+    }
+  }
+}

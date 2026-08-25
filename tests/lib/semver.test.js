@@ -32,8 +32,12 @@ test('parseVersion：形状不对一律 null，不猜', () => {
   assert.equal(parseVersion('1.0.0-rc.01'), null, 'pre-release 数字段前导零也拦住');
 });
 
-test('isPrerelease：带后缀才算', () => {
+test('isPrerelease：带后缀才算，单段后缀也算', () => {
   assert.equal(isPrerelease('0.2.0-rc.1'), true);
+  // 单段后缀（`-rc` 而非 `-rc.1`）要单独钉一下：判据是「有没有段」，不是「有几段」。
+  // 只用多段样例的话，`length > 0` 写成 `length > 1` 一样能过——而那会把 `1.0.0-rc`
+  // 当成正式版推给稳定用户。
+  assert.equal(isPrerelease('1.0.0-rc'), true, '单段 pre-release 同样是预发布');
   assert.equal(isPrerelease('v0.2.0'), false);
   assert.equal(isPrerelease('不是版本号'), false, '非法输入不算预发布');
 });
@@ -60,6 +64,12 @@ test('compareVersions：pre-release 的四条优先级规则', () => {
   for (let i = 1; i < ordered.length; i += 1) {
     assert.equal(compareVersions(ordered[i - 1], ordered[i]), -1, `${ordered[i - 1]} 应小于 ${ordered[i]}`);
   }
+  // 反向再跑一遍：只按升序比的话，每条规则里「返回正数」的那半个分支从没被断言过，
+  // 把它们改成任何正数都测不出来。而 compareVersions 承诺的返回值是 -1|0|1，
+  // 调用方（updater 的挑版本逻辑）也确实按这个口径读。
+  for (let i = 1; i < ordered.length; i += 1) {
+    assert.equal(compareVersions(ordered[i], ordered[i - 1]), 1, `${ordered[i]} 应大于 ${ordered[i - 1]}`);
+  }
 });
 
 test('compareVersions：非法输入直接抛，不静默当成 0', () => {
@@ -79,4 +89,13 @@ test('pickLatest：非法候选忽略、全空给 null', () => {
   assert.equal(pickLatest(['nightly', 'latest']), null);
   assert.equal(pickLatest([]), null);
   assert.equal(pickLatest(['0.2.0-rc.1']), null, '只有 rc 时稳定口径下没有可选');
+  assert.equal(pickLatest(['0.2.0-rc']), null, '单段 rc 同样该被稳定口径跳过');
+});
+
+test('pickLatest：比较相等的两个写法，先来的胜出（返回值必须是确定的）', () => {
+  // `v0.2.0` 与 `0.2.0` 比较相等但不是同一个字符串，而返回值会被拿去拼下载 URL。
+  // 判据是「严格更大才换人」；写成「大于等于就换人」时结果会翻成后来的那个，
+  // 且只有这种平局样例测得出来。
+  assert.equal(pickLatest(['0.2.0', 'v0.2.0']), '0.2.0');
+  assert.equal(pickLatest(['v0.2.0', '0.2.0']), 'v0.2.0');
 });

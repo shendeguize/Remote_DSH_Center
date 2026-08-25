@@ -1,0 +1,43 @@
+[
+  {
+    "id": "FZ-PROTO-001",
+    "target": "proto-roundtrip",
+    "signature": "proto-roundtrip|drill|launch-argv/inject.extraArgs",
+    "input": {
+      "logName": "I3DPy",
+      "port": 13154,
+      "env": {
+        "b748": "QQ0QQ=.^\u0007@^|💩%"
+      },
+      "patches": [
+        "ng",
+        "OwoS0lP"
+      ],
+      "extraArgs": [
+        "QQ1QQb]|^-@*}''{"
+      ],
+      "workdir": "~/QQ2QQ[1",
+      "workdirCanary": "QQ2QQ[1",
+      "fingerprint": "dsh web --no-open --host 127.0.0.1 --port 51813 QQ3QQ\t",
+      "pid": 588991056,
+      "verifyPort": 1809,
+      "tailLines": 2,
+      "logBody": [
+        "2💩​",
+        "=:+>+'#>{}~​",
+        "~]{(..;][%",
+        "$>@\\}\t<;`"
+      ],
+      "cleanup": {
+        "present": [
+          "u1MT4BVos",
+          "pv",
+          "yPEkkM3kUZ"
+        ],
+        "keepCount": 3
+      }
+    },
+    "origin": "fuzz 自动沉淀（P3 可红性演练，种子 20260825/#0）：先把 shq 的单引号转义改成反斜杠形态、再把 extraArgs 的 shq 整个摘掉，两次都被这串输入逮住",
+    "note": "连号的 '' 加上制表符与星平面字符：转义一松，它先让 LAUNCH 的 sh -n 崩掉，再让金丝雀落到裸露的命令位。转写出的攻击语料是 AV-ARGV-033"
+  }
+]

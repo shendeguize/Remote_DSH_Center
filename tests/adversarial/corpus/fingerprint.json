@@ -1,0 +1,83 @@
+[
+  {
+    "id": "AV-FP-001",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "append", "value": " " },
+    "expect": { "kill": "refused" },
+    "origin": "12 §1.3：指纹是逐字全等判定，多一个尾随空格就不是同一个进程"
+  },
+  {
+    "id": "AV-FP-002",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "prepend", "value": "sh -c " },
+    "expect": { "kill": "refused" },
+    "origin": "真机验收：ps 表里的 sh -c 外壳与目标进程同名，不许被当成同一个"
+  },
+  {
+    "id": "AV-FP-003",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "append", "value": " --extra" },
+    "expect": { "kill": "refused" },
+    "origin": "pid 复用：新进程碰巧也是 dsh web，只是多了个旗标"
+  },
+  {
+    "id": "AV-FP-004",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "replace", "value": "dsh web --no-open --host 127.0.0.1 --port 9999" },
+    "expect": { "kill": "refused" },
+    "origin": "tests/harness/scenarios.js 的 reusePid 默认形态（换端口的另一个实例）"
+  },
+  {
+    "id": "AV-FP-005",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "strip", "value": "--no-open " },
+    "expect": { "kill": "refused" },
+    "origin": "红队 R1：少一个旗标（子串包含关系不能当全等）"
+  },
+  {
+    "id": "AV-FP-006",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "replace", "value": "postgres: writer process" },
+    "expect": { "kill": "refused" },
+    "origin": "误杀底线：pid 被完全无关的关键进程接管"
+  },
+  {
+    "id": "AV-FP-007",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "append", "value": "\ndsh web --no-open --host 127.0.0.1 --port 8899" },
+    "expect": { "kill": "refused" },
+    "origin": "红队 R1：ps 输出多行伪造——第二行逐字等于真指纹，也不许放行"
+  },
+  {
+    "id": "AV-FP-008",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "wrap", "value": "'" },
+    "expect": { "kill": "refused" },
+    "origin": "红队 R1：整条指纹被单引号包住（转义写错时会误判为全等）"
+  },
+  {
+    "id": "AV-FP-009",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "append", "value": " $(touch /tmp/dshc-canary-FPEXEC)" },
+    "canary": "dshc-canary-FPEXEC",
+    "expect": { "kill": "refused", "noSideEffect": true },
+    "origin": "红队 R1：远端 ps 输出里的命令替换（比较位在 [ ] 内，双引号保护必须在）"
+  },
+  {
+    "id": "AV-FP-010",
+    "surface": "fingerprint",
+    "entry": "ps.args",
+    "payload": { "op": "identity", "value": "" },
+    "expect": { "kill": "allowed" },
+    "origin": "反面算例：不改指纹必须能停掉，否则这一面的判据永远是真"
+  }
+]

@@ -104,8 +104,10 @@ jobs:
 
       # Ubuntu 镜像自带 Chrome，那边就要求浏览器关必须真跑；
       # macOS runner 不一定装浏览器，缺了就让它跳过而不是把 CI 判红。
-      - name: 统一质量闸门（测试 + 覆盖率 + 真浏览器 + 站点文档 + 打包 + CLI）
-        run: npm run check ${{ matrix.os == 'ubuntu-latest' && '-- --require-browser' || '' }}
+      # 墙钟那关一律 --advisory：共享 runner 与录基线的机器差几倍是常态，
+      # PR 上判它就是天天假红。严格模式留给 cron（见 cron.yml）。
+      - name: 统一质量闸门（测试 + 覆盖率 + 真浏览器 + 站点文档 + 墙钟 + 打包 + CLI）
+        run: npm run check -- --perf-advisory ${{ matrix.os == 'ubuntu-latest' && '--require-browser' || '' }}
 
       - name: 失败时留下浏览器截图
         if: failure()
@@ -120,7 +122,7 @@ jobs:
 
   # plugin/ 子包是零依赖底线的唯一例外（独立 npm 包，依赖与构建链封闭在 plugin/ 内），
   # 走自己的 lane；不动上面的 check job 与零依赖自检（例外边界闸门在 tests/ 里补位）。
-  # 不进 required checks：required 名单与 ruleset 强耦合有用例钉死，稳定一个里程碑后再议。
+  # 已进 required checks：它在每个事件上都跑且不带 matrix，context 就是裸 job 名 `plugin`。
   plugin:
     runs-on: ubuntu-latest
     timeout-minutes: 15
