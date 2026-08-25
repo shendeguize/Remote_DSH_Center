@@ -38,8 +38,21 @@ const FAST_WAIT = (ms) => new Promise((r) => { const t = setTimeout(r, Math.min(
  * 两个同时在跑的测试文件，pid 差正好是槽数的整数倍时就会算出同一段，然后抢同一批
  * 本机端口，表现是某个用例偶发「端口已被占用 → 拉起失败」。文件越多、跑得越久，
  * 撞上的机会越大——这类假红最费人，因为它只在满负载的整套跑里出现，单跑必绿。
+ *
+ * 段还**必须整体落在临时端口区之下**（见 EPHEMERAL_FLOOR）。互斥只挡得住测试进程
+ * 之间的互抢；一旦某个段落进内核的临时端口区，内核就可能把同一个端口发给任何人——
+ * 包括另一个测试自己的 `--port 0` 降级重拉。`portFree()` 探完到真正 bind 之间有窗口，
+ * 探测再勤也堵不上。原来 remote 段最高摸到 58994，在 macOS（临时端口从 49152 起）上
+ * 意味着 184 号往后的段全泡在临时区里，于是「固定端口路径」偶发被降级成 `--port 0`，
+ * 断言 actualPort 即约定端口的用例就红了（真出现过：期望 55050，实得 55101）。
  */
-const SLOT_COUNT = 380;
+
+// Linux 默认 32768 起、macOS 49152 起，取更小的那个当红线，两边都安全。
+const EPHEMERAL_FLOOR = 32_768;
+const SLOT_WIDTH = 50;
+// 两段各占 SLOT_COUNT * SLOT_WIDTH，全部塞在 20000..EPHEMERAL_FLOOR 之间。
+// 120 段远够用：并发上限是 node --test 的 availableParallelism（本机 14、CI 更少）。
+const SLOT_COUNT = 120;
 const SLOT_DIR = path.join(os.tmpdir(), 'dshc-test-slots');
 
 /** 原子地占一个段号；进程退出时归还。占用者死了的段算空闲（防崩溃后泄漏）。 */
@@ -81,10 +94,31 @@ function ownerAlive(file) {
   }
 }
 
+const LOCAL_ORIGIN = 20_000;
+const REMOTE_ORIGIN = LOCAL_ORIGIN + SLOT_COUNT * SLOT_WIDTH; // 26000
+const LOCAL_RANGE_WIDTH = 45; // < SLOT_WIDTH，段与段之间留 5 个空档
+
+/** 两段合起来能摸到的最高端口——必须始终低于 EPHEMERAL_FLOOR，有用例钉着。 */
+export const PORT_PLAN = Object.freeze({
+  ephemeralFloor: EPHEMERAL_FLOOR,
+  slotCount: SLOT_COUNT,
+  localOrigin: LOCAL_ORIGIN,
+  remoteOrigin: REMOTE_ORIGIN,
+  ceiling: REMOTE_ORIGIN + (SLOT_COUNT - 1) * SLOT_WIDTH + LOCAL_RANGE_WIDTH - 1,
+});
+
+// 开跑就查，别等某个用例偶发红了才回头找：段一旦探进临时端口区，失败会以「随机某个
+// 用例偶尔红一次」的形态出现，最难查。
+if (PORT_PLAN.ceiling >= EPHEMERAL_FLOOR) {
+  throw new Error(
+    `测试端口段最高摸到 ${PORT_PLAN.ceiling}，已探进临时端口区（${EPHEMERAL_FLOOR}+）：`
+    + '内核会把同一个端口发给别人，固定端口路径会偶发被降级。请调小 SLOT_COUNT 或下移起点。',
+  );
+}
+
 const SLOT = claimSlot();
-const LOCAL_BASE = 20_000 + SLOT * 50;
-const REMOTE_BASE = 40_000 + SLOT * 50;
-const LOCAL_RANGE_WIDTH = 45;
+const LOCAL_BASE = LOCAL_ORIGIN + SLOT * SLOT_WIDTH;
+const REMOTE_BASE = REMOTE_ORIGIN + SLOT * SLOT_WIDTH;
 
 let remoteCursor = 0;
 

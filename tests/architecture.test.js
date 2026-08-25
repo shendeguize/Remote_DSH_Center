@@ -928,6 +928,23 @@ test('BASELINE.json 与场景表逐一对应（改场景 id 等于弃掉那条�
   assert.equal(new Set(PERF_SCENARIOS.map((s) => s.id)).size, PERF_SCENARIOS.length, '场景 id 撞号');
 });
 
+test('集成测试的端口段整体低于临时端口区（探进去就会偶发假红）', async () => {
+  // 段与段互斥只挡得住测试进程之间的互抢。段一旦落进内核的临时端口区，内核就可能把
+  // 同一个端口发给任何人——包括另一个测试自己的 `--port 0` 降级重拉；portFree() 探完
+  // 到真正 bind 之间还有窗口，探测再勤也堵不上。这条曾经真红过：remote 段最高摸到
+  // 58994，而 macOS 的临时端口从 49152 起，于是「固定端口路径」偶发被降级成 --port 0，
+  // loop.test.js 断言 actualPort 即约定端口的那条报「期望 55050，实得 55101」。
+  const { PORT_PLAN } = await import('./integration/helpers.js');
+  assert.ok(
+    PORT_PLAN.ceiling < PORT_PLAN.ephemeralFloor,
+    `端口段最高 ${PORT_PLAN.ceiling}，已探进临时端口区 ${PORT_PLAN.ephemeralFloor}+`,
+  );
+  // 红线取 Linux（32768 起）与 macOS（49152 起）里更小的那个，两个平台都得安全
+  assert.ok(PORT_PLAN.ephemeralFloor <= 32_768, '红线放宽到 Linux 默认之上就等于没设');
+  assert.ok(PORT_PLAN.localOrigin >= 1_024, '别踩注册端口区');
+  assert.ok(PORT_PLAN.remoteOrigin >= PORT_PLAN.localOrigin + PORT_PLAN.slotCount * 50, '两段重叠了');
+});
+
 // ── 测试卫生（harness 支柱 C） ────────────────────────────────────────────
 
 /** 断言口子：node:assert 的调用、t.assert.*、以及 assert.fail 之类。 */

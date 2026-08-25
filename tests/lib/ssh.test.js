@@ -42,19 +42,42 @@ const ARGV_DUMP = shim('argv-dump.cjs', `
 process.stdout.write(JSON.stringify(process.argv.slice(2)));
 `);
 
-// 装好 SIGTERM 处理器之后落一个就绪标记：想验「TERM 被收到了」的用例必须等到这个
-// 标记出现才发信号。光「进程已 spawn」不够——node 启动到装上处理器之间有一段窗口，
-// 信号落在窗口里会走默认处置（静默杀掉），拿到的 stdout 就是空串。用固定 sleep 赌
-// 这段窗口，在并行跑满的机器上会偶发假红。
+/*
+ * 信号类用例的共同前提：子进程得先**装好 SIGTERM 处理器**，发过去的信号才有意义。
+ * node 从 spawn 到执行脚本第一行之间有一段启动窗口，信号落在窗口里会走默认处置
+ * （静默杀掉）——SLOW 的 stdout 就是空串而不是 'got-term'，IGNORE_TERM 则会以
+ * SIGTERM 而不是 SIGKILL 收场。两种都表现为「满负载整套跑时偶发红一次，单跑必绿」。
+ *
+ * 两条对策，按用例怎么触发 TERM 分开用：
+ *  - 用例自己发信号（shutdownSsh）→ 等就绪标记出现再发，完全确定。
+ *  - 由 sshExec 的 timeoutMs 发信号 → 时钟在 sshExec 手里，测试插不进去；改为给足
+ *    余量（SIGNAL_TIMEOUT_MS，约启动耗时的十几倍），并在事后核对它确实就绪过。
+ *    万一余量仍不够，assertShimBooted 报「没启动完」，比 '' !== 'got-term' 好查得多。
+ */
 const READY_DIR = path.join(dir, 'ready');
 fs.mkdirSync(READY_DIR, { recursive: true });
+
+/** 让垫片在装好处理器之后落一个就绪标记（按 pid 命名）。 */
+const readyMarker = `
+require('node:fs').writeFileSync(
+  require('node:path').join(${JSON.stringify(READY_DIR)}, String(process.pid)), '');
+`;
+
 const SLOW = shim('slow.cjs', `
 const fs = require('node:fs');
-const path = require('node:path');
 setTimeout(() => { fs.writeSync(1, 'late'); }, 60000);
 process.on('SIGTERM', () => { fs.writeSync(1, 'got-term'); process.exit(0); });
-fs.writeFileSync(path.join(${JSON.stringify(READY_DIR)}, String(process.pid)), '');
+${readyMarker}
 `);
+
+const IGNORE_TERM = shim('ignore-term.cjs', `
+process.on('SIGTERM', () => {});
+setInterval(() => {}, 1000);
+${readyMarker}
+`);
+
+/** 由 timeoutMs 触发 TERM 的用例统一用这个时长：够慢的机器也装得完处理器。 */
+const SIGNAL_TIMEOUT_MS = 1_500;
 
 /** 清掉上一个用例留下的标记——标记按 pid 命名，不清会把旧的算进这一轮。 */
 function resetSlowReady() {
@@ -62,7 +85,7 @@ function resetSlowReady() {
   fs.mkdirSync(READY_DIR, { recursive: true });
 }
 
-/** 等到 READY_DIR 里出现 n 个标记——即 n 个 SLOW 子进程都已装好 SIGTERM 处理器。 */
+/** 等到 READY_DIR 里出现 n 个标记——即 n 个子进程都已装好 SIGTERM 处理器。 */
 async function waitSlowReady(n, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -74,10 +97,14 @@ async function waitSlowReady(n, timeoutMs = 10_000) {
   }
 }
 
-const IGNORE_TERM = shim('ignore-term.cjs', `
-process.on('SIGTERM', () => {});
-setInterval(() => {}, 1000);
-`);
+/** 事后核对：垫片确实启动完过，所以信号是落在处理器上而不是启动窗口里。 */
+function assertShimBooted() {
+  assert.ok(
+    fs.readdirSync(READY_DIR).length > 0,
+    `子进程在 ${SIGNAL_TIMEOUT_MS}ms 内没启动完，信号落进了 node 的启动窗口`
+    + '（走默认处置＝静默杀掉）。这不是产品的问题，是这条用例给的余量不够。',
+  );
+}
 
 const FAIL = shim('fail.cjs', `
 process.stderr.write('ssh: connect to host x port 22: Connection refused');
@@ -321,7 +348,9 @@ test('sshExec 超时：TERM 强杀并标记 timedOut，不 reject', async (t) =>
   t.after(() => { delete process.env.DSHC_SSH_BIN; });
   process.env.DSHC_SSH_BIN = SLOW;
 
-  const res = await sshExec('gpu-1', 'sleep', { timeoutMs: 600 });
+  resetSlowReady();
+  const res = await sshExec('gpu-1', 'sleep', { timeoutMs: SIGNAL_TIMEOUT_MS });
+  assertShimBooted();
   assert.equal(res.timedOut, true);
   assert.equal(res.stdout, 'got-term', '先发 SIGTERM');
 });
@@ -330,10 +359,12 @@ test('sshExec 带满额 input 超时仍走 TERM 强杀且无未处理 stdin 错�
   t.after(() => { delete process.env.DSHC_SSH_BIN; });
   process.env.DSHC_SSH_BIN = SLOW;
 
+  resetSlowReady();
   const res = await sshExec('gpu-1', 'sleep', {
-    timeoutMs: 300,
+    timeoutMs: SIGNAL_TIMEOUT_MS,
     input: Buffer.alloc(SSH_INPUT_CAP_BYTES),
   });
+  assertShimBooted();
   assert.equal(res.timedOut, true);
   assert.equal(res.stdout, 'got-term');
 });
@@ -342,7 +373,9 @@ test('sshExec 对赖着不死的子进程升级到 SIGKILL', async (t) => {
   t.after(() => { delete process.env.DSHC_SSH_BIN; });
   process.env.DSHC_SSH_BIN = IGNORE_TERM;
 
-  const res = await sshExec('gpu-1', 'stubborn', { timeoutMs: 600 });
+  resetSlowReady();
+  const res = await sshExec('gpu-1', 'stubborn', { timeoutMs: SIGNAL_TIMEOUT_MS });
+  assertShimBooted(); // 没装上「忽略 TERM」就会以 SIGTERM 收场，那是假红不是回归
   assert.equal(res.timedOut, true);
   assert.equal(res.signal, 'SIGKILL', 'TERM 后 2s 未退则升级 KILL');
 });
@@ -363,7 +396,9 @@ test('localExec 超时映射 CLI 退出 2，并复用 timeout/AbortSignal 强杀
   t.after(() => { delete process.env.DSHC_LOCAL_SH_BIN; });
   process.env.DSHC_LOCAL_SH_BIN = SLOW;
 
-  const timed = await localExec('sleep', { timeoutMs: 300 });
+  resetSlowReady();
+  const timed = await localExec('sleep', { timeoutMs: SIGNAL_TIMEOUT_MS });
+  assertShimBooted();
   assert.equal(timed.timedOut, true);
   assert.equal(timed.stdout, 'got-term');
   assert.equal(execFailure('workstation', '远端探测', timed).code, 'LOCAL_TIMEOUT');
@@ -374,7 +409,9 @@ test('localExec 超时映射 CLI 退出 2，并复用 timeout/AbortSignal 强杀
   );
 
   process.env.DSHC_LOCAL_SH_BIN = IGNORE_TERM;
-  const killed = await localExec('stubborn', { timeoutMs: 200 });
+  resetSlowReady();
+  const killed = await localExec('stubborn', { timeoutMs: SIGNAL_TIMEOUT_MS });
+  assertShimBooted();
   assert.equal(killed.timedOut, true);
   assert.equal(killed.signal, 'SIGKILL');
 
