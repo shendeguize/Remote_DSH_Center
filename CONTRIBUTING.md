@@ -102,8 +102,9 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 #    build（三守卫 → 复跑闸门 → 组装双架构发布包）
 #    → verify（macos-latest / macos-15-intel 各自解包，用包内自带 node 真跑一遍）
 #    → 之后两条车道并行：release（挂 3 个附件建 GitHub Release）与
-#      publish → npm-smoke（发 npm 包：正式版发 latest、rc 发 next dist-tag，
-#      再真从 registry 装回来冒烟）。GitHub Release 不依赖 npm 车道成败。
+#      publish → npm-smoke（发 npm 包 @shendeguize/remote-dsh-center：正式版发
+#      latest、rc 发 next dist-tag，再真从 registry 装回来冒烟；包名唯一源 =
+#      package.json 的 name）。GitHub Release 不依赖 npm 车道成败。
 ```
 
 第 2 步 `--ff-only` 失败 = `release` 出现过独有提交（不该发生），先查清再动，别用

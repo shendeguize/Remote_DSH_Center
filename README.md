@@ -68,7 +68,7 @@ dshc open      # 在浏览器打开 Hub
 
 ## 安装
 
-一键安装命令见页首。有 Node ≥ 22 的机器也可以 `npm i -g dsh-center`。强制通道、
+一键安装命令见页首。有 Node ≥ 22 的机器也可以 `npm i -g @shendeguize/remote-dsh-center`。强制通道、
 预发布版本、安装目录、launchd 自启、手动安装，以及 `SHA256SUMS` +
 `gh attestation verify` 发布包溯源验证见[安装手册](HANDBOOK.md#安装)。
 

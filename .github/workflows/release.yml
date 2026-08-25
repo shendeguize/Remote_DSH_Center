@@ -10,8 +10,10 @@ permissions:
 
 # build（守卫 + 闸门 + 组装双架构产物）→ verify（两种 mac 上真跑一遍），之后
 # 两条车道并行：release（挂附件建 GitHub Release）与 publish → npm-smoke（发
-# npm 包，再真从 registry 装回来冒烟）。GitHub Release 不依赖 npm 发布成败——
-# standalone 通道的行为与产物不因 npm 车道而变。
+# npm 包 @shendeguize/remote-dsh-center，再真从 registry 装回来冒烟）。包名唯一源
+# 是 package.json 的 name（publish 直接用它）；npm-smoke 里的装包命令要与之一致。
+# GitHub Release 不依赖 npm 发布成败——standalone 通道的行为与产物不因 npm 车道
+# 而变。旧名 dsh-center（≤0.3.0）已在 npm 标 deprecated 指向新名，不再更新。
 #
 # 为什么要拆：产物必须在**两种 CPU 架构的真机**上跑过才配挂到 Release 上——
 # 「x64 包在 arm 机上打完就发」这种事，装的人才是第一个发现的。verify 不过就不建
@@ -306,14 +308,14 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           for attempt in $(seq 1 10); do
-            if npm i -g "dsh-center@$VERSION"; then
-              echo "第 $attempt 次尝试装上 dsh-center@$VERSION"
+            if npm i -g "@shendeguize/remote-dsh-center@$VERSION"; then
+              echo "第 $attempt 次尝试装上 @shendeguize/remote-dsh-center@$VERSION"
               exit 0
             fi
-            echo "registry 还没有 dsh-center@$VERSION（第 $attempt/10 次），30s 后再试"
+            echo "registry 还没有 @shendeguize/remote-dsh-center@$VERSION（第 $attempt/10 次），30s 后再试"
             sleep 30
           done
-          echo "::error::重试 10 次仍装不到 dsh-center@$VERSION——发布没生效或传播异常"
+          echo "::error::重试 10 次仍装不到 @shendeguize/remote-dsh-center@$VERSION——发布没生效或传播异常"
           exit 1
 
       - name: 冒烟断言：dshc version --json 自证 npm 通道

@@ -90,12 +90,22 @@ test('resolveInstall：BUNDLE_INFO.json 坏了算 unknown，不当成好包接�
 
 test('resolveInstall：躺在 node_modules 下认成 npm 通道（npm i -g 的落地形态）', (t) => {
   const dir = tmpdir(t);
-  const repo = makeRepoRoot(path.join(dir, 'node_modules', 'dsh-center'));
+  const repo = makeRepoRoot(path.join(dir, 'node_modules', 'remote-dsh-center'));
   const got = resolveInstall(repo);
   assert.equal(got.channel, 'npm');
   assert.equal(got.root, repo, 'npm 通道 root 就是包目录（只作展示，更新归 npm）');
   assert.equal(got.bundleInfo, null);
   assert.equal(got.reason, null);
+});
+
+test('resolveInstall：scoped 包多一层 @scope 目录也认成 npm 通道', (t) => {
+  const dir = tmpdir(t);
+  const repo = makeRepoRoot(path.join(dir, 'node_modules', '@shendeguize', 'remote-dsh-center'));
+  assert.equal(resolveInstall(repo).channel, 'npm');
+
+  // 反例钉死判据边界：上级像 @scope 但上上级不是 node_modules，不算 npm
+  const notNpm = makeRepoRoot(path.join(dir, 'somewhere', '@shendeguize', 'remote-dsh-center'));
+  assert.equal(resolveInstall(notNpm).channel, 'unknown');
 });
 
 test('resolveInstall：npm 判据不抢 bundle / git 的优先级', (t) => {
@@ -113,32 +123,33 @@ test('resolveInstall：npm 判据不抢 bundle / git 的优先级', (t) => {
 
 test('collectVersionInfo：npm 通道的自证文本给出 npm 更新指引', async (t) => {
   const dir = tmpdir(t);
-  const repo = makeRepoRoot(path.join(dir, 'node_modules', 'dsh-center'), { version: '0.3.0' });
+  const repo = makeRepoRoot(path.join(dir, 'node_modules', '@shendeguize', 'remote-dsh-center'), { version: '0.3.0' });
   const info = await collectVersionInfo({ repoRoot: repo });
   assert.equal(info.channel, 'npm');
   assert.equal(info.version, '0.3.0');
-  assert.match(info.channelDetail, /npm i -g dsh-center@latest/, '人话里要带出更新的路');
+  assert.match(info.channelDetail, /npm i -g @shendeguize\/remote-dsh-center@latest/, '人话里要带出更新的路');
   assert.equal(info.git, null, 'npm 通道不去采 git 事实');
 });
 
 /**
  * 真 CLI 在 npm 落地形态下的口径（M4 验收②）：把 src/ 整个摆进
- * <tmp>/node_modules/dsh-center/ 再 spawn，REPO_ROOT 由 cli.js 自身位置推导，
- * 不 mock。update 只指路（操作未执行 = 退 1），version 自证 npm 通道（退 0）。
+ * <tmp>/node_modules/@shendeguize/remote-dsh-center/ 再 spawn，REPO_ROOT 由
+ * cli.js 自身位置推导，不 mock。update 只指路（操作未执行 = 退 1），
+ * version 自证 npm 通道（退 0）。
  */
 test('npm 通道下的真 CLI：update 只指路退 1，version --json 自证 npm 通道退 0', (t) => {
   const dir = tmpdir(t);
-  const repo = path.join(dir, 'node_modules', 'dsh-center');
+  const repo = path.join(dir, 'node_modules', '@shendeguize', 'remote-dsh-center');
   fs.mkdirSync(repo, { recursive: true });
   fs.cpSync(fileURLToPath(new URL('../src', import.meta.url)), path.join(repo, 'src'), { recursive: true });
-  fs.writeFileSync(path.join(repo, 'package.json'), `${JSON.stringify({ name: 'dsh-center', version: '9.9.9' }, null, 2)}\n`);
+  fs.writeFileSync(path.join(repo, 'package.json'), `${JSON.stringify({ name: '@shendeguize/remote-dsh-center', version: '9.9.9' }, null, 2)}\n`);
   const cli = path.join(repo, 'src', 'cli.js');
   const env = { ...process.env, DSHC_HOME: path.join(dir, 'home') };
 
   const update = spawnSync(process.execPath, [cli, 'update'], { env, encoding: 'utf8' });
   assert.equal(update.status, 1, `stdout=${update.stdout} stderr=${update.stderr}`);
-  assert.match(update.stderr, /npm i -g dsh-center@latest/, '要指出 npm 的更新命令');
-  assert.match(update.stderr, /dsh-center@next/, '跟预发布的路也要指出来');
+  assert.match(update.stderr, /npm i -g @shendeguize\/remote-dsh-center@latest/, '要指出 npm 的更新命令');
+  assert.match(update.stderr, /@shendeguize\/remote-dsh-center@next/, '跟预发布的路也要指出来');
   assert.equal(update.stdout, '', '没执行操作就不该在 stdout 冒充成功');
 
   const version = spawnSync(process.execPath, [cli, 'version', '--json'], { env, encoding: 'utf8' });

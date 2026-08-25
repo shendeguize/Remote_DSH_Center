@@ -4,7 +4,8 @@
  * 三种安装通道，判据是落地物而不是猜：
  *   git      —— 仓库 clone（软链安装 / 开发机）：`<root>/.git` 在
  *   bundle   —— 自带 Node 运行时的发布包：`<root>/../BUNDLE_INFO.json` 在
- *   npm      —— `npm i -g dsh-center` 装出来的包：上级目录叫 `node_modules`
+ *   npm      —— `npm i -g @shendeguize/remote-dsh-center` 装出来的包：上级目录叫
+ *               `node_modules`，或上级是 `@scope` 且上上级叫 `node_modules`
  *               （npm / pnpm 全局与本地装置的共同形态）；更新归 npm 管，这里不代跑
  * 认不出通道时一律拒绝更新而不是挑一条试——猜错要么白跑，要么把用户的目录搞坏。
  *
@@ -69,8 +70,13 @@ export function resolveInstall(repoRoot = REPO_ROOT, deps = {}) {
     return { channel: 'git', root: repoRoot, repoRoot, bundleInfo: null, reason: null };
   }
 
-  // npm / pnpm 装置（全局或本地）的共同落地形态：包目录躺在 node_modules 下
-  if (path.basename(path.dirname(repoRoot)) === 'node_modules') {
+  // npm / pnpm 装置（全局或本地）的共同落地形态：包目录躺在 node_modules 下；
+  // scoped 包（@scope/name）中间多一层 @scope 目录
+  const parent = path.dirname(repoRoot);
+  const parentName = path.basename(parent);
+  const inNodeModules = parentName === 'node_modules'
+    || (parentName.startsWith('@') && path.basename(path.dirname(parent)) === 'node_modules');
+  if (inNodeModules) {
     return { channel: 'npm', root: repoRoot, repoRoot, bundleInfo: null, reason: null };
   }
 
@@ -80,7 +86,7 @@ export function resolveInstall(repoRoot = REPO_ROOT, deps = {}) {
     repoRoot,
     bundleInfo: null,
     reason: `${repoRoot} 既不是 git clone（没有 .git），不是发布包（上层没有 ${BUNDLE_INFO_FILE}），`
-      + '也不是 npm 装的包（上级目录不叫 node_modules）',
+      + '也不是 npm 装的包（不在 node_modules 下）',
   };
 }
 
@@ -150,7 +156,7 @@ export async function collectVersionInfo({
   } else if (install.channel === 'git') {
     channelDetail = git ? `git ${git.sha}（${git.ref}）` : 'git（取不到提交信息）';
   } else if (install.channel === 'npm') {
-    channelDetail = 'npm 全局包（更新走 npm i -g dsh-center@latest）';
+    channelDetail = 'npm 全局包（更新走 npm i -g @shendeguize/remote-dsh-center@latest）';
   } else {
     channelDetail = `认不出（${install.reason}）`;
   }

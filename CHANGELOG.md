@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 变更
+
+- npm 包更名为 **`@shendeguize/remote-dsh-center`**（scope 形态；安装
+  `npm i -g @shendeguize/remote-dsh-center`，预发布用 `@next`）。`dshc version` /
+  `dshc update` 的 npm 通道识别与指引同步换新名，并支持 scoped 包的落地形态
+  （`node_modules/@scope/包名`）。旧包 `dsh-center`（≤ 0.3.0）在 npm 标记
+  deprecated 并指向新名，不再更新；git 与 standalone 通道不受影响。
+
 ## [0.3.0] - 2026-08-24
 
 ### 变更
