@@ -1524,6 +1524,24 @@ test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边�
   assert.ok(plainContexts.includes('plugin'), 'plugin lane 是 required check（CONTRIBUTING §GitHub 侧配置）');
 });
 
+test('release ruleset 不设 required_status_checks（设了就永远推不动）', () => {
+  // required status check 是**按分支**算的：`release` 只做 `--ff-only` 快进，自己
+  // 不触发任何 CI，于是那两个 context 在 release 这个 ref 上永远不会出现——哪怕同一个
+  // commit 在 main 上已经全绿，推 release 也会被拒。真放这条规则，唯一的过法就是每次
+  // 发版临时把保护关掉，等于把「保护」训练成一个习惯性绕过的摆设。
+  //
+  // 保护并没有变弱：release 只从 main 快进，而 main 那边 required check 是设了的
+  // （上一条用例盯着）；deletion / non_fast_forward / linear history 三条仍在。
+  const ruleset = JSON.parse(fs.readFileSync(path.join(ROOT, '.github', 'rulesets', 'release.json'), 'utf8'));
+  const types = ruleset.rules.map((r) => r.type);
+  assert.ok(!types.includes('required_status_checks'), types.join(' / '));
+  for (const must of ['deletion', 'non_fast_forward', 'required_linear_history']) {
+    assert.ok(types.includes(must), `release 分支少了 ${must} 保护`);
+  }
+  assert.deepEqual(ruleset.bypass_actors, [], 'bypass_actors 恒空：规则对本人同样生效');
+  assert.equal(ruleset.enforcement, 'active');
+});
+
 test('workflow 里用 gh 的 job：要么有 checkout，要么显式给 GH_REPO', () => {
   const workflows = workflowRecords();
   assert.ok(workflows.length >= 2, `只找到 ${workflows.length} 个 workflow，判据恐怕在空转`);

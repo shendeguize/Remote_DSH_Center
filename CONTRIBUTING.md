@@ -260,6 +260,16 @@ gh api -X PUT repos/:owner/:repo/rulesets/<id> --input .github/rulesets/main.jso
 > `refs/tags/plugin-v*`——插件发版 tag 与 `v*` 同享禁删改保护。按上面的
 > `gh api -X PUT` 契约应用，并在对应 PR 留痕。
 
+> **变更记录（2026-08-26）**：`.github/rulesets/release.json` 去掉
+> `required_status_checks`。required check 是**按分支**算的，而 `release` 只做
+> `--ff-only` 快进、自己不触发任何 CI，那两个 context 在这个 ref 上永远不会出现
+> ——同一个 commit 在 main 上全绿也没用，推 `release` 照样被拒。这条规则的实际
+> 效果不是「多一道闸」，而是「每次发版都得先把保护关掉」，把绕过练成习惯。
+> 保护没有变弱：`release` 的内容只能从 main 快进，而 main 那边的 required check
+> 是设了的；`deletion` / `non_fast_forward` / `required_linear_history` 三条仍在。
+> `tests/tooling.test.js` 有一条用例把这个判断钉住，免得日后有人「顺手补严一点」
+> 又把发版堵死。按上面的 `gh api -X PUT` 契约应用。
+
 `bypass_actors` 恒空——规则对本人同样生效，防的就是自己的顺手误操作。确实需要
 绕过时把该 ruleset 的 `enforcement` 临时改 `disabled`，用完立刻恢复 `active`，
 并在相关 PR / issue 里留一句记录：
