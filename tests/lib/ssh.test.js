@@ -42,11 +42,36 @@ const ARGV_DUMP = shim('argv-dump.cjs', `
 process.stdout.write(JSON.stringify(process.argv.slice(2)));
 `);
 
+// 装好 SIGTERM 处理器之后落一个就绪标记：想验「TERM 被收到了」的用例必须等到这个
+// 标记出现才发信号。光「进程已 spawn」不够——node 启动到装上处理器之间有一段窗口，
+// 信号落在窗口里会走默认处置（静默杀掉），拿到的 stdout 就是空串。用固定 sleep 赌
+// 这段窗口，在并行跑满的机器上会偶发假红。
+const READY_DIR = path.join(dir, 'ready');
+fs.mkdirSync(READY_DIR, { recursive: true });
 const SLOW = shim('slow.cjs', `
 const fs = require('node:fs');
+const path = require('node:path');
 setTimeout(() => { fs.writeSync(1, 'late'); }, 60000);
 process.on('SIGTERM', () => { fs.writeSync(1, 'got-term'); process.exit(0); });
+fs.writeFileSync(path.join(${JSON.stringify(READY_DIR)}, String(process.pid)), '');
 `);
+
+/** 清掉上一个用例留下的标记——标记按 pid 命名，不清会把旧的算进这一轮。 */
+function resetSlowReady() {
+  fs.rmSync(READY_DIR, { recursive: true, force: true });
+  fs.mkdirSync(READY_DIR, { recursive: true });
+}
+
+/** 等到 READY_DIR 里出现 n 个标记——即 n 个 SLOW 子进程都已装好 SIGTERM 处理器。 */
+async function waitSlowReady(n, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const seen = fs.readdirSync(READY_DIR).length;
+    if (seen >= n) return;
+    assert.ok(Date.now() < deadline, `等了 ${timeoutMs}ms 只有 ${seen}/${n} 个子进程就绪`);
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+}
 
 const IGNORE_TERM = shim('ignore-term.cjs', `
 process.on('SIGTERM', () => {});
@@ -370,11 +395,12 @@ test('shutdownSsh：关停时把在飞的一次性 ssh 一并收走', async (t) 
   t.after(() => { delete process.env.DSHC_SSH_BIN; reopenSsh(); });
   process.env.DSHC_SSH_BIN = SLOW;
 
+  resetSlowReady();
   const inFlight = [
     sshExec('gpu-1', 'sleep', { timeoutMs: 60_000 }),
     sshExec('gpu-2', 'sleep', { timeoutMs: 60_000 }),
   ];
-  await new Promise((r) => { setTimeout(r, 200); }); // 等它们真的起来
+  await waitSlowReady(2); // 等它们真的装好 SIGTERM 处理器，不是等一个固定时长
   assert.equal(liveChildCount(), 2, '前提：两条 ssh 都在飞');
 
   shutdownSsh();
@@ -416,11 +442,12 @@ test('localExec 与 localCopy 遵从共享关停闩，reopen 后恢复', async (
   process.env.DSHC_LOCAL_SH_BIN = SLOW;
   process.env.DSHC_SSH_BIN = SLOW;
 
+  resetSlowReady();
   const pending = [
     sshExec('gpu-1', 'sleep', { timeoutMs: 60_000 }),
     localExec('sleep', { timeoutMs: 60_000 }),
   ];
-  await new Promise((resolve) => { setTimeout(resolve, 100); });
+  await waitSlowReady(2);
   assert.equal(liveChildCount(), 2);
   shutdownSsh();
   const stopped = await Promise.all(pending);

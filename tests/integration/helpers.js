@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 
 import { createHarness, newHostState } from '../harness/index.js';
@@ -30,10 +31,57 @@ const FAST_WAIT = (ms) => new Promise((r) => { const t = setTimeout(r, Math.min(
 
 /**
  * 端口分段：测试文件各自一个进程并行跑，若都从内核借临时端口（49152+）会互相撞——
- * 借到手与真正 bind 之间有窗口，且区间会重叠。改为按 pid 切出互不重叠的固定段：
+ * 借到手与真正 bind 之间有窗口，且区间会重叠。改为切出互不重叠的固定段：
  * 本机映射端口一段、假 dsh web 的「远端」端口另一段。
+ *
+ * 段号**必须真的互斥地占下来**，不能用 `pid % 槽数` 算。pid 取模只是「大概率不同」：
+ * 两个同时在跑的测试文件，pid 差正好是槽数的整数倍时就会算出同一段，然后抢同一批
+ * 本机端口，表现是某个用例偶发「端口已被占用 → 拉起失败」。文件越多、跑得越久，
+ * 撞上的机会越大——这类假红最费人，因为它只在满负载的整套跑里出现，单跑必绿。
  */
-const SLOT = process.pid % 380;
+const SLOT_COUNT = 380;
+const SLOT_DIR = path.join(os.tmpdir(), 'dshc-test-slots');
+
+/** 原子地占一个段号；进程退出时归还。占用者死了的段算空闲（防崩溃后泄漏）。 */
+function claimSlot() {
+  fs.mkdirSync(SLOT_DIR, { recursive: true });
+  const start = process.pid % SLOT_COUNT;
+  for (let i = 0; i < SLOT_COUNT; i += 1) {
+    const slot = (start + i) % SLOT_COUNT;
+    const file = path.join(SLOT_DIR, String(slot));
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); // wx = 原子占位
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (!ownerAlive(file)) {
+        fs.rmSync(file, { force: true }); // 前任崩了，回收后让下一轮重试这个段
+        i -= 1;
+      }
+      continue;
+    }
+    process.on('exit', () => fs.rmSync(file, { force: true }));
+    return slot;
+  }
+  throw new Error(`${SLOT_COUNT} 个测试端口段全被占着——是不是有一堆测试进程没退干净？`);
+}
+
+function ownerAlive(file) {
+  let pid;
+  try {
+    pid = Number.parseInt(fs.readFileSync(file, 'utf8'), 10);
+  } catch {
+    return false; // 读不到（刚被别人回收）就当空闲，下一轮会重新竞争
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0); // 只探活，不发信号
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM'; // 存在但不归我管，仍算活着
+  }
+}
+
+const SLOT = claimSlot();
 const LOCAL_BASE = 20_000 + SLOT * 50;
 const REMOTE_BASE = 40_000 + SLOT * 50;
 const LOCAL_RANGE_WIDTH = 45;
