@@ -69,6 +69,7 @@ async function waitSlowReady(n, timeoutMs = 10_000) {
     const seen = fs.readdirSync(READY_DIR).length;
     if (seen >= n) return;
     assert.ok(Date.now() < deadline, `等了 ${timeoutMs}ms 只有 ${seen}/${n} 个子进程就绪`);
+    // eslint-disable-next-line no-await-in-loop -- 就是轮询：等上一次歇完再看下一次
     await new Promise((resolve) => { setTimeout(resolve, 10); });
   }
 }
