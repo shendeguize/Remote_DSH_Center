@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-25
+
 ### 变更
 
 - npm 包更名为 **`@shendeguize/remote-dsh-center`**（scope 形态；安装
