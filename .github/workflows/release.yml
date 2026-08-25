@@ -65,9 +65,15 @@ jobs:
             --body-out "$RUNNER_TEMP/release-body.md" \
             --vars-out "$GITHUB_OUTPUT"
 
-      # tag 可能打在错的提交上，这一遍不省
+      # tag 可能打在错的提交上，这一遍不省。
+      #
+      # 墙钟那关降级为只报不挡：这个 job 跑在 ubuntu，而 tests/perf/BASELINE.json 是在
+      # macOS（产品唯一发布平台）上录的，跨平台比数字量的是「两个平台的机器差异」，
+      # 不是「这个 tag 有没有退化」。不降级的后果是发版被一次随机的 runner 慢抖动挡下来。
+      # 真正的性能判据是 tests/perf/invariants.test.js（调用次数 / 在飞峰值 / 落盘次数，
+      # 与机器快慢无关），它在上面的 tests 关里照常硬判。
       - name: 统一质量闸门
-        run: npm run check -- --require-browser
+        run: npm run check -- --require-browser --perf-advisory
 
       - name: 组装双架构发布包
         run: node scripts/build-bundle.mjs --out dist

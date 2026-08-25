@@ -1524,6 +1524,32 @@ test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边�
   assert.ok(plainContexts.includes('plugin'), 'plugin lane 是 required check（CONTRIBUTING §GitHub 侧配置）');
 });
 
+test('在 ubuntu 上跑 npm run check 的地方，墙钟那关必须降级为 advisory', () => {
+  // tests/perf/BASELINE.json 是在 macOS（产品唯一发布平台）上录的，跨平台比数字量的是
+  // 「两个平台的机器差异」而不是「这次改动的退化」。ci.yml 与 cron.yml 一开始就照做了，
+  // release.yml 漏了——代价是 v0.5.0 的发版被 proto-build ×2.53 挡下（同一轮里
+  // lcov-parse ×1.89、validate-config ×2.05，全体一起慢，典型的机器差异而非退化）。
+  // 加这条用例是因为「三个调用点、只改了两个」这种漏法，只靠人记是记不住的。
+  const problems = [];
+  let seen = 0;
+  for (const { name, text } of workflowRecords()) {
+    for (const { id, text: chunk } of workflowJobChunks(text)) {
+      // 只看真正的命令行：注释里提到 ubuntu 或 --perf-advisory 都不算数
+      const code = chunk.split('\n').filter((line) => !/^\s*#/.test(line));
+      const runsUbuntu = code.some((line) => /^\s*(runs-on|-?\s*os:|.*matrix\.os).*ubuntu/.test(line)
+        || /^\s*runs-on:.*ubuntu/.test(line));
+      for (const line of code.filter((l) => /npm run check/.test(l))) {
+        seen += 1;
+        if (!runsUbuntu) continue; // 只在 macOS 上跑的那格允许严格判红
+        if (/--perf-advisory/.test(line)) continue;
+        problems.push(`${name} 的 job「${id}」在 ubuntu 上跑 npm run check 却没带 --perf-advisory：\n    ${line.trim()}`);
+      }
+    }
+  }
+  assert.deepEqual(problems, [], problems.join('\n'));
+  assert.ok(seen >= 3, `只找到 ${seen} 处 npm run check 调用，判据恐怕在空转`);
+});
+
 test('release ruleset 不设 required_status_checks（设了就永远推不动）', () => {
   // required status check 是**按分支**算的：`release` 只做 `--ff-only` 快进，自己
   // 不触发任何 CI，于是那两个 context 在 release 这个 ref 上永远不会出现——哪怕同一个
