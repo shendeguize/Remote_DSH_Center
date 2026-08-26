@@ -198,7 +198,7 @@ const settingsChecksum = (bytes) => `cksum-v1:${posixCksum(bytes)}:${bytes.byteL
 
 function cloneInject(value) {
   return {
-    env: { ...(value?.env ?? {}) },
+    env: { ...value?.env },
     extraArgs: [...(value?.extraArgs ?? [])],
     patches: [...(value?.patches ?? [])],
   };
@@ -747,7 +747,9 @@ export function createFakeManager({
     }, timing.startingMs);
   }
 
-  function doStop(name, operationId, { action = 'stop', then = null } = {}) {
+  // 收尾回调别叫 then：带 then 的对象一旦被 await 就会被当成 thenable，JS 会拿
+  // (resolve, reject) 去调它，这里的回调不认这两个参数，await 就永远不落地。
+  function doStop(name, operationId, { action = 'stop', andThen = null } = {}) {
     const host = need(name);
     const myGen = bumpGen(name);
     const pid = host.web?.pid;
@@ -759,7 +761,7 @@ export function createFakeManager({
       host.mappedUrl = null;
       pushLog({ host: name, level: 'info', msg: `已关停远端进程 ${pid}（指纹校验通过）` });
       emitHost(name);
-      if (then) then();
+      if (andThen) andThen();
       else if (operationId) finish(operationId, { host: name, action });
     }, timing.stopMs);
   }
@@ -951,7 +953,7 @@ export function createFakeManager({
     } else {
       doStop(name, null, {
         action: 'restart',
-        then: () => timer(() => doStart(name, operationId, { action: 'restart' }), timing.restartGapMs),
+        andThen: () => timer(() => doStart(name, operationId, { action: 'restart' }), timing.restartGapMs),
       });
     }
     return body;

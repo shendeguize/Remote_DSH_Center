@@ -142,7 +142,7 @@ async function storeFixture(t, hosts = { 'gpu-1': null }) {
       localPort: null,
       remoteWebPort: null,
       inject: { env: {}, extraArgs: [], patches: [] },
-      ...(override ?? {}),
+      ...override,
     }])),
   }));
   t.mock.method(console, 'log', () => {});

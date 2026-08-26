@@ -5,8 +5,6 @@
  * 抓出「组件构造/渲染路径抛异常」「事件没接上」这类回归。渲染样式、布局一概不管。
  */
 
-const VOID_TAGS = new Set(['input', 'iframe']);
-
 class FakeNode {
   constructor() {
     this.childNodes = [];

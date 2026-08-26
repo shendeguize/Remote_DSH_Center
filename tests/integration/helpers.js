@@ -181,7 +181,7 @@ export async function bootServer(t, opts = {}) {
       remoteWebPort: await nextRemotePort(),
       workdir: null,
       inject: { env: {}, extraArgs: [], patches: [] },
-      ...(hostConfig[name] ?? {}),
+      ...hostConfig[name],
     };
   }
 
@@ -190,7 +190,7 @@ export async function bootServer(t, opts = {}) {
     setupCompleted,
     // 实际监听端口由 portOverride=0 决定（临时端口），此处只满足 schema
     manager: { port: 7788 },
-    defaults: { remoteWebPort: 8899, localPortRange: range, ...(opts.defaults ?? {}) },
+    defaults: { remoteWebPort: 8899, localPortRange: range, ...opts.defaults },
     hosts: cfgHosts,
   }, null, 2)}\n`);
 

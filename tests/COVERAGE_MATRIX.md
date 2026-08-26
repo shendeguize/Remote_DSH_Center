@@ -332,7 +332,7 @@
 | tests 关内含行为清单对账（覆盖率之后）：行为清单 ↔ §11 登记 ↔ 文件引用三方不一致即红 | `tests/architecture.test.js`（§11.5 判定用例），执行入口 `npm run matrix:gate` |
 | perf 关是软闸：墙钟中位数超基线 ×2.5 才判红，`--advisory` 只报不挡；PR CI 一律 advisory、cron 只在 macOS 严格 | `tests/architecture.test.js`（`perfVerdict` / `median` / 噪声地板 / 基线↔场景表同步）、`tests/tooling.test.js`（cron 那步的逐字契约），执行入口 `npm run perf:gate` |
 | `scripts/lint.mjs` 固定 oxlint 版本、平台资产与 Release URL；下载归档和缓存二进制均核对固定 SHA-256，tar 只提取指定普通文件 | `tests/tooling.test.js`（`oxlintDigests` / `cachedBinaryIsTrusted` / `extractOxlintFromTar`），执行入口 `npm run check -- --only lint` |
-| oxlint 告警完整显示并以当前 107 条基线为上限，新增告警即红 | `tests/tooling.test.js`（`OXLINT_MAX_WARNINGS` / `oxlintArgs`） |
+| oxlint 告警完整显示并以当前 84 条基线为上限，新增告警即红；余下 84 条只剩两类有意为之的（顺序 await ×70、防边迭代边改的快照展开 ×14），理由逐类写在 `lint.mjs` | `tests/tooling.test.js`（`OXLINT_MAX_WARNINGS` / `oxlintArgs`） |
 | 打包产物：该进的都在，`tests/`、`.local/` 不混进去 | 同上（`verifyPackFiles`），执行入口 `npm run check -- --only pack` |
 | Chrome 查找跨平台（显式指定优先，缺了可跳过） | 同上（`findChrome`） |
 | 递归扫描 `.github/workflows/**` 根目录与子目录的 `.yml` / `.yaml` active `uses` key：只允许 `actions/*`，且引用必须是 40 位 SHA + 可读版本注释；忽略完整注释与 sequence comment 后，在行内任意位置识别 plain/quoted `uses` mapping key，只有规范 block form 放行；冒号空格/tab、flow mapping、anchor/tag 前缀与通用 prefixed-flow 形态全部 fail closed，规范 key 下的 alias 也无法绕过白名单/pin | `tests/tooling.test.js`（目录/扩展名 fixture + `parseWorkflowUsesLine` block/flow/anchor/tag/quoted/alias fixture + `activeWorkflowUses`） |

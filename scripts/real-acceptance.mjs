@@ -109,10 +109,10 @@ class Rig {
   }
 
   async api(method, p, body = null) {
+    // 无 body 时连 key 都不放：GET 带 body 是非法的
     const res = await fetch(`http://127.0.0.1:${this.port}${p}`, {
       method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+      ...(body ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}),
     });
     const text = await res.text();
     return { status: res.status, json: text ? JSON.parse(text) : null };

@@ -22,7 +22,7 @@ const PREVIEW_TOKEN_KEY = randomBytes(32);
 
 function cloneInject(value) {
   return {
-    env: { ...(value?.env ?? {}) },
+    env: { ...value?.env },
     extraArgs: [...(value?.extraArgs ?? [])],
     patches: [...(value?.patches ?? [])],
   };

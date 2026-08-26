@@ -103,12 +103,13 @@ async function call(method, path, {
   let res;
   let text;
   try {
+    // 无 body 时连 key 都不放：GET/HEAD 带 body 是非法的，即便值是 undefined，
+    // 摆在那儿也会让人（和静态检查）以为这条路会给 GET 塞 body。
     res = await fetch(path, {
       method,
-      headers: body === undefined ? undefined : JSON_HEADERS,
-      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
       cache: 'no-store',
+      ...(body === undefined ? {} : { headers: JSON_HEADERS, body: JSON.stringify(body) }),
     });
     text = await res.text();
   } catch (err) {

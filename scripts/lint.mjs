@@ -22,7 +22,20 @@ import { isMainEntry } from '../src/lib/entry.js';
 
 export const OXLINT_VERSION = '1.79.0';
 export const OXLINT_PATHS = Object.freeze(['src', 'scripts', 'tests', 'site']);
-export const OXLINT_MAX_WARNINGS = 107;
+/**
+ * 基线只能减、不能增。当前 84 条全部是**有意为之**的两类，逐类说明留在这里，
+ * 免得后来人拿「按 lint 的建议改一改」当清理：
+ *
+ *  - 70 条 `no-await-in-loop`：顺序等待就是要的语义（轮询、逐台推进、按序重试）。
+ *    照建议改成 Promise.all 会把顺序执行变成并发，是行为变更而不是清理。
+ *  - 14 条 `no-useless-spread`：`for (const x of [...coll])` 里的展开是**快照**，
+ *    因为循环体会改这个集合（destroy 删 panes、kill 摘 inFlight、removeChild 改
+ *    childNodes、监听器在回调里退订）。按建议去掉展开＝边迭代边改，是真缺陷。
+ *    这一类是 lint 建议本身在这个代码库里是错的，别照做。
+ *
+ * 别的类别不该再出现在这张表里：出现了就是真该修，修完把这个数字调下来。
+ */
+export const OXLINT_MAX_WARNINGS = 84;
 export const OXLINT_MAX_REDIRECTS = 5;
 export const OXLINT_MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 

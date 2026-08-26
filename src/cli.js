@@ -11,7 +11,6 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 import * as daemon from './daemon.js';

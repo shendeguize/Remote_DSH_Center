@@ -216,7 +216,7 @@ function migrateConfig(raw) {
   cfg.defaults.localPortRange ??= factory.defaults.localPortRange;
   cfg.hosts ??= {};
   for (const [name, host] of Object.entries(cfg.hosts)) {
-    cfg.hosts[name] = { ...newHostConfig(), ...host, inject: { ...newHostConfig().inject, ...(host.inject ?? {}) } };
+    cfg.hosts[name] = { ...newHostConfig(), ...host, inject: { ...newHostConfig().inject, ...host.inject } };
   }
   return { config: cfg, migrated };
 }
@@ -473,7 +473,7 @@ export function saveConfigFromSetup(incoming) {
     draft.hosts[name] = {
       ...base,
       ...host,
-      inject: { ...base.inject, ...(host.inject ?? {}) },
+      inject: { ...base.inject, ...host.inject },
     };
   }
 

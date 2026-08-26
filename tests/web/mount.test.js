@@ -72,18 +72,18 @@ function workspaceHost(name = 'gpu-1', patch = {}) {
     config: {
       ...base.config,
       workdir,
-      ...(patch.config ?? {}),
+      ...patch.config,
     },
     web: patch.web === null ? null : {
       ...base.web,
       workdir,
       cwd: workdir,
-      ...(patch.web ?? {}),
+      ...patch.web,
     },
     tunnel: patch.tunnel === null ? null : {
       ...base.tunnel,
       connected: true,
-      ...(patch.tunnel ?? {}),
+      ...patch.tunnel,
     },
   };
 }

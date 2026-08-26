@@ -95,8 +95,9 @@ export function mountDemoBar({ manager, win = globalThis, fast = false } = {}) {
   const playBtn = mkBtn('▶ 自动演播', { primary: true, onClick: () => (playing ? stop('已停止演播。所有按钮仍然可用。') : play()) });
   const dropBtn = mkBtn('断开隧道', { onClick: () => inject('drop') });
   const crashBtn = mkBtn('杀掉远端进程', { onClick: () => inject('crash') });
-  const resetBtn = mkBtn('重置', { onClick: () => reset() });
-  const setupBtn = mkBtn('体验首启引导', {
+  // 这两个按钮建完就交给 mkBtn 挂进 actions，之后没人再碰，故不留引用
+  mkBtn('重置', { onClick: () => reset() });
+  mkBtn('体验首启引导', {
     title: '重新加载 demo 并进入未初始化状态',
     onClick: () => { win.location.href = `${win.location.pathname}?setup`; },
   });

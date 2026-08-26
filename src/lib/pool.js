@@ -64,7 +64,7 @@ export function createGate(limit) {
  * @returns {Promise<PromiseSettledResult<R>[]>}
  */
 export async function mapPool(items, fn, limit) {
-  const results = new Array(items.length);
+  const results = Array.from({ length: items.length });
   if (items.length === 0) return results;
 
   const width = limit > 0 ? Math.min(limit, items.length) : items.length;

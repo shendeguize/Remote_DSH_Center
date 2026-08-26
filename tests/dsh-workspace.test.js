@@ -23,9 +23,9 @@ function view(overrides = {}) {
   return {
     ...base,
     ...overrides,
-    config: { ...base.config, ...(overrides.config ?? {}) },
-    web: overrides.web === null ? null : { ...base.web, ...(overrides.web ?? {}) },
-    tunnel: overrides.tunnel === null ? null : { ...base.tunnel, ...(overrides.tunnel ?? {}) },
+    config: { ...base.config, ...overrides.config },
+    web: overrides.web === null ? null : { ...base.web, ...overrides.web },
+    tunnel: overrides.tunnel === null ? null : { ...base.tunnel, ...overrides.tunnel },
   };
 }
 

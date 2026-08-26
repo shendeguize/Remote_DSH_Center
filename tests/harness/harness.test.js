@@ -364,7 +364,7 @@ test('scp-fail 场景：整个同步快败', async (t) => {
 });
 
 test('探测发现手动实例（RUNNING_DSH_WEB 块 → manualInstances）', async (t) => {
-  const h = harnessFixture(t);
+  harnessFixture(t);
   const r = await runLaunchSequence('gpu-1', { port: 18909 });
 
   const result = await probeOnce('gpu-1');
@@ -461,7 +461,7 @@ test('账本每次调用记两行：begin 与 end 成对、id 一致、顺序即
 });
 
 test('隧道垫片：ssh -N -L 转发到假 dsh web，杀垫片即隧道断', async (t) => {
-  const h = harnessFixture(t);
+  harnessFixture(t);
   const { spawn } = await import('node:child_process');
   const r = await runLaunchSequence('gpu-1', { port: 18910 });
 

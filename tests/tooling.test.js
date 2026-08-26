@@ -421,13 +421,15 @@ test('oxlint 三个平台同时固定归档与二进制摘要', () => {
   }
 });
 
-test('oxlint 参数展示并严格限制当前 107 条警告', () => {
-  assert.equal(OXLINT_MAX_WARNINGS, 107);
+test('oxlint 参数展示并严格限制当前 84 条警告', () => {
+  // 84 = 70 条有意的顺序 await + 14 条有意的快照展开，理由逐类写在 lint.mjs 的
+  // OXLINT_MAX_WARNINGS 上方。这个数字只能往下走。
+  assert.equal(OXLINT_MAX_WARNINGS, 84);
   assert.deepEqual(
     oxlintArgs(),
-    ['--max-warnings=107', 'src', 'scripts', 'tests', 'site'],
+    ['--max-warnings=84', 'src', 'scripts', 'tests', 'site'],
   );
-  assert.deepEqual(oxlintArgs(['src']), ['--max-warnings=107', 'src']);
+  assert.deepEqual(oxlintArgs(['src']), ['--max-warnings=84', 'src']);
 });
 
 function tarEntry(name, body = Buffer.alloc(0), {
