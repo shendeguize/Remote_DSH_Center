@@ -465,6 +465,7 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | 闸门自查用例点名：静态数顶格声明数、从 TAP 读实跑数、逐文件对账点名（防某个用例自伤后整文件被报成通过） | `tests/tooling.test.js` |
 | 浏览器侧判据的等待语义：条件后来才成立也算过、超时把判据名带进错误（防 demo 冒烟这类「此刻」判据在慢机器上偶发红） | `tests/site-tooling.test.js` |
 | `manager.log` 封顶：没到顶一个字节不动；到顶原地截断（inode 不变、留尾巴、开头说明丢了多少、切在行边界）；文件不在/读不了都不抛；真进程上起来时截断且之后还能往同一个 fd 写 | `tests/lib/logfile.test.js`、`tests/integration/daemon.test.js` |
+| `dshc logs -f` 跟得过那次原地截断：`size < offset` 时 offset 归零，截断后新写的行照样出来、进程不崩（封顶与「跟得住截断」是一对，缺一不算数） | `tests/integration/daemon.test.js` |
 | 退避抖动：注入确定随机数时逐档等于 §5.4 上界、全 0 时等于半程；真随机下同一档会给出不同值且始终落在 [半程, 上界] | `tests/tunnel.test.js` |
 | 常驻扇出闸 `createGate`：同时在内不超上限、FIFO 不饿死、内部抛错也还名额、`limit<=0` 等于不设闸 | `tests/lib/pool.test.js` |
 | 16 条隧道同时断（≈合盖睡醒）：峰值并发不超跳板机额度、**每一台**都在预算内回到 running、重连时刻确实散得开（非挤在 200ms 内） | `tests/integration/wake.test.js` |

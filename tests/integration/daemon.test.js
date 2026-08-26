@@ -299,6 +299,47 @@ test('dshc logs 读 manager.log 尾部', async (t) => {
   assert.ok(res.stdout.length > 0, 'manager 启动应至少写一行日志');
 });
 
+/**
+ * 回归（issue #81 的后半截）：manager 现在会**原地**截断 manager.log，而 `dshc logs -f`
+ * 是拿 offset 轮询追加的。截断之后 size 会小于 offset——不处理的话 `Buffer.alloc(size -
+ * offset)` 拿到负数当场抛，跟着日志的那个终端直接死给你看；就算不抛，也会从此再不出
+ * 新行。封顶这件事只有和「跟得住截断」凑齐才算数，所以这条盯的是两者的接缝。
+ */
+test('dshc logs -f 跟得过原地截断：截断后新写的行照样出来（issue #81）', async (t) => {
+  const { harness } = await isolate(t);
+  const logFile = path.join(harness.homeDir, 'manager.log');
+  fs.writeFileSync(logFile, `${'旧行\n'.repeat(50)}`);
+
+  const child = spawn(process.execPath, [CLI, 'logs', '-f', '-n', '1'], {
+    env: { ...process.env, ...harness.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (c) => { stdout += c; });
+  t.after(() => child.kill('SIGKILL'));
+
+  /** 轮询间隔是 400ms，给足几拍再判定。 */
+  const waitFor = async (re, label) => {
+    for (let i = 0; i < 40; i += 1) {
+      if (re.test(stdout)) return;
+      // eslint-disable-next-line no-await-in-loop -- 顺序等待，就是轮询
+      await new Promise((r) => { setTimeout(r, 100).unref?.(); });
+    }
+    assert.fail(`${label}；到手的是：${JSON.stringify(stdout)}`);
+  };
+
+  fs.appendFileSync(logFile, '截断前写的\n');
+  await waitFor(/截断前写的/, '正常追加就该被 -f 打出来');
+
+  // 原地截断：同一个 inode 上覆盖成更短的内容，与 trimLogFile 的做法一致
+  fs.writeFileSync(logFile, '截断说明\n');
+  fs.appendFileSync(logFile, '截断后写的\n');
+
+  await waitFor(/截断后写的/, '截断后 -f 必须还跟得住（size < offset 要把 offset 归零）');
+  assert.equal(child.exitCode, null, '不许因为文件缩了就崩掉');
+});
+
 test('目录写不进时 dshc up 给人话不给栈（issue #87）', async (t) => {
   const { harness } = await isolate(t);
   // 磁盘满 / 卷转只读 / 目录被 sudo 跑过后属主变 root，都落到这同一条路上
