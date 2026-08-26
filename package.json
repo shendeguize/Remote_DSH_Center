@@ -1,6 +1,6 @@
 {
   "name": "@shendeguize/remote-dsh-center",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Local manager for remote dsh web instances: ssh tunnels, single-entry iframe shell, CLI lifecycle control",
   "type": "module",
   "engines": {
