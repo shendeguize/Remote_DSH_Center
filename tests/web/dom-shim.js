@@ -31,6 +31,28 @@ class FakeNode {
     }
   }
 
+  get nextSibling() {
+    const siblings = this.parentNode?.childNodes;
+    if (!siblings) return null;
+    return siblings[siblings.indexOf(this) + 1] ?? null;
+  }
+
+  /**
+   * `ref` 为 null 时等价于 append。注意：挪动一个**已经在树上**的节点，等于「摘下来
+   * 再插回去」，焦点会掉——这是真浏览器的行为，垫片照搬，别让复用节点的代码以为
+   * 随手重排是免费的。
+   */
+  insertBefore(node, ref) {
+    if (ref === null || ref === undefined) {
+      this.append(node);
+      return node;
+    }
+    node.parentNode?.removeChild(node);
+    node.parentNode = this;
+    this.childNodes.splice(this.childNodes.indexOf(ref), 0, node);
+    return node;
+  }
+
   removeChild(child) {
     const i = this.childNodes.indexOf(child);
     if (i !== -1) this.childNodes.splice(i, 1);

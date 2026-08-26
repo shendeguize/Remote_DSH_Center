@@ -243,6 +243,8 @@
 | 抽屉并发与移除：主机配置保存中锁定字段且不可关闭，迟到响应受 revision/reset epoch guard 约束，不覆盖后续输入、不复活已删除主机；强制移除会关闭确认框、把 settings 保存结果安全转为 toast，并将焦点落回仍连接的管理入口 | `tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/web/a11y.test.js` |
 | manager 当前监听端口与 configured port 分离；保存、跨标签更新、重连 snapshot 后「重启生效」提示均按两者真实差异派生 | `tests/web/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js`、`tests/integration/ui-live.test.js` |
 | 抽屉模态期间 toast 留在 aria-live 中但控件退出 Tab 环，确认框仍可操作；抽屉关闭恢复交互，toast 自动/手动关闭与 destroy 都清理定时器 | `tests/web/a11y.test.js`、`tests/web/toast-region.test.js` |
+| toast 关闭时序按档位派生：error 不自动关（`null` 表示不关，不再被 `??` 兜成 5 秒）、info/success 5s、warn 8s，调用方显式 `timeoutMs` 优先（issue #114） | `tests/web/toast-region.test.js` |
+| toast 区按 id 复用节点：新增一条、同一条重复计数、关掉中间一条都不重建幸存节点，`<details>` 展开状态与焦点留在原处（issue #114；dom-shim 照真浏览器把「移除含焦点的子树」判为焦点回落 body） | `tests/web/toast-region.test.js` |
 | iframe 首载：本机/远端 loading 在 `load` 后隐藏，切页 keep-alive 不重置；recreate/reload 重现 loading，后端 phase 遮罩优先且 starting 无 URL 时有可访问占位 | `tests/web/panes.test.js`、`tests/web/a11y.test.js`、`tests/web/ui-live.test.js`、`scripts/ui-smoke.mjs` S4h/S7b |
 | 无障碍：键盘链路 / `[hidden]` 不吃焦点 / 状态不只靠颜色 | `tests/web/a11y.test.js`、`tests/web/utils.test.js`；渲染观感见 UI-28 人工清单 |
 | 抽屉的 Esc 挂在 document 上（焦点在外也能关）、开着时后景 `inert`、关掉即放开 | `tests/web/a11y.test.js` |
