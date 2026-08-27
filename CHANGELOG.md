@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-28
+
 ### 新增
 
 - 新增两级真机验收入口：`acceptance:smoke` 用于快速闭环，`acceptance:real` 用于
