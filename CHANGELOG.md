@@ -4,7 +4,7 @@
 不记实现细节。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本语义见 [CONTRIBUTING.md](CONTRIBUTING.md#版本语义)。
 
-## [Unreleased]
+## [0.6.0] - 2026-08-27
 
 ### 新增
 
@@ -17,6 +17,8 @@
 - 使用手册新增 Agent Sidecar v0.7.0 下游集成契约：明确 C1–C5 清单、版本与远端
   Python 兼容边界、`no_dsh` 与远端零安装/零常驻行为，并声明该集成不提供远端注入；
   同时新增跨仓库 integration issue form，要求关联 Sidecar issue、双方版本、复现与期望行为。
+
+## [Unreleased]
 
 ## [0.5.2] - 2026-08-26
 
