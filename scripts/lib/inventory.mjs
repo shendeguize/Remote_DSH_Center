@@ -9,6 +9,7 @@
  *   EXIT  src/lib/proto.js 远端脚本占用的退出码
  *   ERR   src/lib/errors.js 的错误码表
  *   CLI   src/cli.js 的命令表
+ *   CLI_EXIT src/cli.js 的退出码契约
  *
  * 纯模块（能 import 的表就直接 import，只有嵌在模板/字面量里的才静态抽取），
  * 由 scripts/matrix-gate.mjs 与 tests/architecture.test.js 消费；src/ 不许引它。
@@ -20,9 +21,10 @@ import path from 'node:path';
 import { TRANSITIONS } from '../../src/lib/machine.js';
 import { ERROR_HTTP_STATUS } from '../../src/lib/errors.js';
 import { SCENARIOS } from '../../tests/harness/scenarios.js';
+import { COVERAGE_OVERRIDES } from '../acceptance-coverage.mjs';
 
 /** 清单面。顺序即报告顺序。 */
-export const SURFACES = Object.freeze(['API', 'FSM', 'SCN', 'EXIT', 'ERR', 'CLI']);
+export const SURFACES = Object.freeze(['API', 'FSM', 'SCN', 'EXIT', 'ERR', 'CLI', 'CLI_EXIT']);
 
 /**
  * 路由表抽取：`['GET', /^\/api\/hosts\/([^/]+)\/log$/, …]`。
@@ -84,6 +86,20 @@ export function cliCommandsFrom(source) {
   return out;
 }
 
+/**
+ * CLI 的退出码不是远端协议退出码，单独设面避免 `EXIT:1` 撞号。
+ * @param {string} source src/cli.js 正文
+ * @returns {number[]}
+ */
+export function cliExitCodesFrom(source) {
+  const match = /export\s+const\s+EXIT\s*=\s*\{([\s\S]*?)\};/u.exec(String(source));
+  if (!match) throw new Error('src/cli.js 里找不到 EXIT 表，CLI 退出码无法提取');
+  return [...match[1].matchAll(/:\s*(\d+)\b/gu)]
+    .map((item) => Number(item[1]))
+    .filter((code, index, all) => all.indexOf(code) === index)
+    .sort((a, b) => a - b);
+}
+
 /** FSM 迁移 id（`from→to`），自环只有出现在 TRANSITIONS 里才登记。 */
 export function fsmTransitions(transitions = TRANSITIONS) {
   const out = [];
@@ -98,7 +114,7 @@ const read = (root, rel) => fs.readFileSync(path.join(root, ...rel.split('/')), 
 /**
  * 汇总全部行为面。
  * @param {string} root 仓库根
- * @returns {{items: Array<{surface:string, id:string, key:string, origin:string}>,
+ * @returns {{items: Array<{surface:string, id:string, key:string, origin:string, coverage:string}>,
  *   bySurface: Record<string, string[]>}}
  */
 export function collectInventory(root) {
@@ -109,6 +125,7 @@ export function collectInventory(root) {
     EXIT: protoExitCodesFrom(read(root, 'src/lib/proto.js')).map(String),
     ERR: Object.keys(ERROR_HTTP_STATUS),
     CLI: cliCommandsFrom(read(root, 'src/cli.js')),
+    CLI_EXIT: cliExitCodesFrom(read(root, 'src/cli.js')).map(String),
   };
   const origin = {
     API: 'src/api.js',
@@ -117,6 +134,7 @@ export function collectInventory(root) {
     EXIT: 'src/lib/proto.js',
     ERR: 'src/lib/errors.js',
     CLI: 'src/cli.js',
+    CLI_EXIT: 'src/cli.js',
   };
   const items = [];
   for (const surface of SURFACES) {
@@ -126,7 +144,11 @@ export function collectInventory(root) {
       if (seen.has(id)) continue; // 同一行为登记一次就够（重复出现不是新行为）
       seen.add(id);
       items.push({
-        surface, id, key: `${surface}:${id}`, origin: origin[surface],
+        surface,
+        id,
+        key: `${surface}:${id}`,
+        origin: origin[surface],
+        coverage: COVERAGE_OVERRIDES[`${surface}:${id}`] ?? 'unit',
       });
     }
   }

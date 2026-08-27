@@ -492,12 +492,26 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | 标签栏方向键：落点纯函数（左右环绕、Home/End、焦点不在环上时从头算、空标签栏不算、ArrowDown/Enter 不许被抢）；挂载后左右真移焦点且不切页、Tab 落点收成一个并跟着选中标签走、没有游荡在 tablist 之外的 `role="tab"`；真浏览器里原生按键真派到焦点标签上、Enter 才切页（摘掉方向键即红） | `tests/web/tabbar.test.js`、`tests/web/a11y.test.js`、`scripts/ui-smoke.mjs`（S13） |
 | 收尾兜底：到点仍有句柄就报出句柄名（同名不重复念）并带原退出码硬退、保险自身已 unref（不许拖慢干净的收场）、问不出句柄名也照样退；CDP 应答到手即清超时定时器（不清则收尾空等 20s） | `tests/tooling.test.js` |
 
+### 10.2 可执行旅程锚点
+
+§§1–8 的功能行由 `scripts/acceptance-journeys.mjs` 定义旅程，再由下表保存
+可审计的章节锚点；`npm run journey:check` 会同时核对旅程和这些链接。
+
+| 功能章节 | 旅程 |
+|---|---|
+| §1 | `JOURNEY:center-first-run` |
+| §2 | `JOURNEY:remote-host-closed-loop` |
+| §3 | `JOURNEY:remote-resilience` |
+| §4 | `JOURNEY:configuration-and-safety` |
+| §5 | `JOURNEY:management-and-reload` |
+| §6–§8 | `JOURNEY:safe-failure-surfaces` |
+
 ## 11. 行为清单登记（机器核对）
 
 上面的章节是给人读的；这一节连同 §1 的 `FSM:` 与 §4 的 `SCN:` 是给机器对账的。
-`scripts/lib/inventory.mjs` 不看这份文档，直接从源码算出六个面的行为清单
+`scripts/lib/inventory.mjs` 不看这份文档，直接从源码算出七个面的行为清单
 （`API` 路由表、`FSM` 迁移表、`SCN` 场景表、`EXIT` 远端退出码、`ERR` 错误码、
-`CLI` 命令表），`npm run matrix:gate` 三方对账：
+`CLI` 命令表、`CLI_EXIT` CLI 退出码契约），`npm run matrix:gate` 三方对账：
 
 - 清单里有、这里没登记 → 红「新增行为未登记」（加了路由/场景/退出码却忘了写矩阵）；
 - 这里登记了、清单里没有 → 红「死行为」（代码删了，矩阵还留着）；
@@ -612,6 +626,18 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | `CLI:open` | `tests/integration/cli.test.js`（假 `open` 记账） |
 | `CLI:config` | `tests/cli.test.js`、`tests/integration/cli.test.js` |
 
+### 11.4.1 CLI 退出码契约（`CLI_EXIT:`）
+
+CLI 退出码与远端协议 `EXIT:` 分开登记，避免共享 `1` 造成行为碰撞。
+
+| ID | 语义 | 覆盖 |
+|---|---|---|
+| `CLI_EXIT:0` | 操作成功 | `tests/integration/cli.test.js` |
+| `CLI_EXIT:1` | 操作失败 | `tests/integration/cli.test.js` |
+| `CLI_EXIT:2` | 超时或通信失败 | `tests/integration/cli.test.js` |
+| `CLI_EXIT:3` | 用法错误 | `tests/cli.test.js`、`tests/integration/cli.test.js` |
+| `CLI_EXIT:130` | 等待期间被 Ctrl-C 打断 | `tests/integration/cli.test.js` |
+
 ### 11.5 harness 体系自身
 
 闸门自己也是代码，一样要有人盯（与 `scripts/coverage-gate.mjs` 同款待遇：判定逻辑
@@ -619,7 +645,7 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 
 | 面 | 覆盖 |
 |---|---|
-| 行为清单提取：路由表正则转可读路径、退出码静态抽取、`COMMANDS` 顶层键、`TRANSITIONS`/`SCENARIOS` 直读 | `tests/architecture.test.js`（`apiRoutesFrom` / `protoExitCodesFrom` / `cliCommandsFrom` / `collectInventory`） |
+| 行为清单提取：路由表正则转可读路径、远端/CLI 退出码静态抽取、`COMMANDS` 顶层键、`TRANSITIONS`/`SCENARIOS` 直读 | `tests/architecture.test.js`（`apiRoutesFrom` / `protoExitCodesFrom` / `cliExitCodesFrom` / `cliCommandsFrom` / `collectInventory`） |
 | 三方对账判定：未登记、死行为、引用悬空、豁免没写理由各自判红；glob 形态引用只要有一个命中就算落地 | `tests/architecture.test.js`（`matrixVerdict` / `parseRegistrations` / `parseFileRefs` / `globHasMatch`） |
 | 攻击语料库形状：id 唯一、surface 已知、payload 带 canary、expect 与 origin 必填 | `tests/adversarial/corpus.test.js` |
 | 金丝雀 oracle：canary 只许落在单引号词内，成为独立词/命令位/选项位都判逃逸；oracle 自身有正反算例 | `tests/adversarial/oracle.test.js` |
@@ -634,6 +660,8 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | 变异闸门自检：未变异的沙盒必须先全绿，否则整轮作废——挡的是「沙盒本来就红导致每个变异体都被判成杀死、kill 率虚假接近 100%」这种假杀 | `scripts/mutation-gate.mjs` 开跑前的自检步（日志里逐轮可见），演练记录见 §11.6 |
 | 变异豁免基线：每条都写清理由（占位符判红）、都指向真实存在的变异体、设卡档每个文件都有用例能到达 | `tests/mutation/ALLOWED_SURVIVORS.json` + `tests/architecture.test.js` |
 | 测试卫生：每个用例文件至少一处断言；`tests/adversarial/**`、`tests/perf/**`、`tests/fuzz/**` 只依赖 node 内置与本仓 src/tests/scripts；`scripts/lib/inventory.mjs` 不被 `src/` 引用 | `tests/architecture.test.js` |
+| 真机验收地基：每轮重扫 SSH 配置并互斥；结果写脱敏 JSON/Markdown；旧 PASS→新失败自动列为回归；旅程规格与生成清单必须一致 | `scripts/lib/acceptance.mjs`、`scripts/acceptance-journeys.mjs`、`scripts/journey-gate.mjs`、`tests/lib/acceptance.test.js`、`tests/journey-gate.test.js` |
+| 操作员 bootstrap 的 shell 语法、帮助和「只装 zstd/用户态 Sidecar」边界 | `scripts/bootstrap-remote.sh`、`tests/bootstrap-remote.test.js` |
 
 ### 11.6 可红性演练记录
 

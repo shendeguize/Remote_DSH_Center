@@ -490,6 +490,8 @@ npm run matrix:gate              # behavior inventory vs coverage matrix; -- --s
 npm run perf:gate                # wall-clock baseline (soft gate); -- --record re-records, -- --advisory warns only
 npm run mutation:gate            # mutation testing (weekly gate); -- --tier lib --only shq.js for a fast single file, -- --list to preview
 npm run ui:smoke                 # real-browser smoke in headless Chrome
+npm run journey:check            # executable journeys, behavior IDs, and generated checklist
+npm run journey:write            # regenerate tests/ACCEPTANCE_JOURNEYS.md from the spec
 ```
 
 Site and demo:
@@ -511,8 +513,17 @@ acceptance is an explicit operator action:
 
 ```bash
 npm run acceptance:real -- --host <ssh-host>                        # IT-01…13
+npm run acceptance:smoke -- --host <ssh-host>                       # shortest loop; unreachable is a warning
 npm run acceptance:real -- --host <ssh-host> --only IT-06,IT-09 --keep
 ```
+
+Every real-machine run rescans `~/.ssh/config` first and uses an exclusive lock for the target host.
+An unreachable host in smoke mode produces warning evidence without blocking; an unreachable host in
+the full tier blocks release. Results are sanitized JSON plus Markdown under `.local/evidence/` and
+are compared with the previous run. `scripts/bootstrap-remote.sh` is an operator script, not a
+Center product path: it may install only zstd and userland Sidecar when authorized, never dsh or
+Python. To verify the bootstrap itself, run `bash scripts/bootstrap-remote.sh --deep <ssh-host>`,
+then run the normal bootstrap and acceptance again.
 
 CI runs required `npm run check` on Ubuntu for pull requests and repeats it on macOS after a
 merge to main. Ubuntu includes Chrome, so the browser gate must run. macOS may skip it when

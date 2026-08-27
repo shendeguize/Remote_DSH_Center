@@ -130,7 +130,9 @@ export const STAGES = [
       // 行为清单对账排在覆盖率之后：先确认「行」够，再确认「行为面」没漏登记。
       const matrix = await node('matrix-gate.mjs');
       if (matrix.code !== 0) throw new Error('行为清单与矩阵不一致（详见上方输出）');
-      return '总闸 + 分档达标 + 行为清单对账';
+      const journeys = await node('journey-gate.mjs');
+      if (journeys.code !== 0) throw new Error('用户旅程规格或生成清单未通过（详见上方输出）');
+      return '总闸 + 分档达标 + 行为清单 + 用户旅程对账';
     },
   },
   {

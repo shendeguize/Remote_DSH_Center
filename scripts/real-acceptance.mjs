@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable no-await-in-loop */
 /**
  * 真机集成验收（ENG-25 / RMT-09，11 §8.2 的 IT-01…13）。
  *
@@ -20,6 +21,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { isMainEntry } from '../src/lib/entry.js';
+import { buildStopScript } from '../src/lib/proto.js';
+import { assertSafeHost, shq } from '../src/lib/shq.js';
+import {
+  acquireLock, evidenceId, readLatestEvidence, writeEvidence,
+} from './lib/acceptance.mjs';
+import { FLAKY_RETRIES } from './acceptance-flaky.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(REPO, 'src', 'cli.js');
@@ -29,13 +36,25 @@ const CLI = path.join(REPO, 'src', 'cli.js');
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 
 function parseArgs(argv) {
-  const out = { host: null, only: null, keep: false, unreachableHost: 'dshc-acceptance-nonexistent' };
+  const out = {
+    host: null,
+    only: null,
+    keep: false,
+    tier: 'full',
+    reportDir: path.join(REPO, '.local', 'evidence', 'real-acceptance'),
+    json: false,
+    unreachableHost: 'dshc-acceptance-nonexistent',
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--host') out.host = argv[++i];
     else if (a === '--only') out.only = argv[++i].split(',').map((s) => s.trim().toUpperCase());
     else if (a === '--keep') out.keep = true;
+    else if (a === '--tier') out.tier = argv[++i];
+    else if (a === '--report-dir') out.reportDir = path.resolve(argv[++i]);
+    else if (a === '--json') out.json = true;
   }
+  if (!['smoke', 'full'].includes(out.tier)) throw new Error(`未知验收级别：${out.tier}（可选 smoke/full）`);
   return out;
 }
 
@@ -72,6 +91,21 @@ function freePort() {
   });
 }
 
+async function rescanSshConfig(host) {
+  const helpersRoot = process.env.POD_INIT_SYNC_ROOT
+    ?? path.join(os.homedir(), 'Workspace', 'Helpers', 'skills', 'pod-init-sync');
+  const fleet = process.env.ACCEPTANCE_FLEET_SCRIPT ?? path.join(helpersRoot, 'scripts', 'fleet.py');
+  const scan = process.env.ACCEPTANCE_SCAN_SCRIPT ?? path.join(helpersRoot, 'scripts', 'scan.sh');
+  if (!fs.existsSync(fleet) || !fs.existsSync(scan)) {
+    throw new Error(`SSH 重扫工具不存在：${fleet} / ${scan}`);
+  }
+  const listed = await run('python3', [fleet, 'hosts', '--hosts', host], { timeoutMs: 30_000 });
+  if (listed.code !== 0) throw new Error(`SSH fleet 重扫未找到主机 ${host}：${listed.stderr.trim()}`);
+  const scanned = await run(scan, [host], { timeoutMs: 60_000 });
+  if (scanned.code !== 0) throw new Error(`SSH scan 失败：${scanned.stderr.trim()}`);
+  return { fleet, scan };
+}
+
 // ── 被测环境 ─────────────────────────────────────────────────────────────
 
 class Rig {
@@ -81,6 +115,9 @@ class Rig {
     this.home = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-accept-'));
     this.port = null;
     this.env = null;
+    this.trackedProcesses = new Map();
+    this.versions = { center: 'unknown', remoteDsh: 'unknown' };
+    this.drift = [];
   }
 
   async boot({ autoStart = false } = {}) {
@@ -108,6 +145,24 @@ class Rig {
     return run(process.execPath, [CLI, ...args], { env: this.env, ...opts });
   }
 
+  async preflight() {
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+    this.versions.center = pkg.version;
+    const localDsh = await run('dsh', ['--version'], { timeoutMs: 10_000 });
+    const remote = await this.ssh('printf "dsh=%s\\n" "$(dsh --version 2>/dev/null || echo missing)"');
+    const dshLine = remote.stdout.split('\n').find((line) => line.startsWith('dsh='));
+    this.versions.remoteDsh = dshLine?.slice(4).trim() || 'unknown';
+    if (remote.code !== 0 || this.versions.remoteDsh === 'missing') {
+      this.drift.push('远端 dsh 版本无法读取（功能用例仍会继续并按结果判定）');
+    }
+    if (localDsh.code !== 0) this.drift.push('本机未找到 dsh CLI（Center-only 用例不依赖本机 dsh）');
+    const expected = process.env.ACCEPTANCE_EXPECTED_DSH_VERSION;
+    if (expected && this.versions.remoteDsh !== expected) {
+      this.drift.push(`远端 dsh 漂移：期望 ${expected}，实际 ${this.versions.remoteDsh}`);
+    }
+    return { versions: this.versions, drift: this.drift };
+  }
+
   async api(method, p, body = null) {
     // 无 body 时连 key 都不放：GET 带 body 是非法的
     const res = await fetch(`http://127.0.0.1:${this.port}${p}`, {
@@ -121,6 +176,33 @@ class Rig {
   async hostView(name = this.host) {
     const res = await this.api('GET', '/api/hosts');
     return res.json.hosts.find((h) => h.name === name) ?? null;
+  }
+
+  trackView(view) {
+    const web = view?.web;
+    if (!web?.pid || !web.cmdFingerprint) return;
+    this.trackedProcesses.set(`${view.name}:${web.pid}`, {
+      name: view.name,
+      pid: web.pid,
+      fingerprint: web.cmdFingerprint,
+    });
+  }
+
+  async chooseRemotePort(preferred = 8899) {
+    const script = `import socket\nfor p in [${preferred}, *range(19000, 19100)]:\n s=socket.socket()\n try:\n  s.bind(('127.0.0.1',p)); print(p); break\n except OSError: pass\n finally: s.close()`;
+    const result = await this.ssh(`python3 -c ${shq(script)}`);
+    const port = Number(result.stdout.trim().split('\n').pop());
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`无法找到可用远端 web 端口：${result.stderr.trim() || result.stdout.trim()}`);
+    }
+    return port;
+  }
+
+  async setRemoteWebPort(port) {
+    const result = await this.api('PUT', `/api/hosts/${encodeURIComponent(this.host)}/config`, {
+      remoteWebPort: port,
+    });
+    assert.equal(result.status, 200, `设置远端 web 端口失败：${JSON.stringify(result.json)}`);
   }
 
   /** 等某台主机进入期望 phase（真机慢，默认给 90 秒）。 */
@@ -168,19 +250,47 @@ class Rig {
     return JSON.parse(fs.readFileSync(path.join(this.home, 'state.json'), 'utf8'));
   }
 
+  trackedPatchNames() {
+    try {
+      const files = this.state().hosts?.[this.host]?.patchSync?.files ?? {};
+      return Object.values(files)
+        .map((item) => item.remoteName)
+        .filter((name) => typeof name === 'string' && /^[A-Za-z0-9._-]+$/u.test(name));
+    } catch {
+      return [];
+    }
+  }
+
   async teardown({ keep = false } = {}) {
+    const patchNames = this.trackedPatchNames();
     try {
       await this.dshc(['stop', this.host], { timeoutMs: 60_000 });
     } catch { /* 尽力而为 */ }
     try {
       await this.dshc(['down']);
     } catch { /* 同上 */ }
-    // 远端别留孤儿：按指纹关掉本次起的进程
-    try {
-      // 真机命令行是 `node /usr/bin/dsh web [--patch …] --no-open --host … --port N`，
-      // 按 "dsh web" 匹配才收得干净（写死更长的前缀会随参数顺序失效）
-      await this.ssh('pkill -f "dsh web" || true');
-    } catch { /* 同上 */ }
+    // 远端别留本轮孤儿：不能用宽匹配 pkill，必须逐个按 PID + 完整指纹核对。
+    for (const tracked of this.trackedProcesses.values()) {
+      try {
+        const stop = await this.ssh(buildStopScript({
+          pid: tracked.pid,
+          fingerprint: tracked.fingerprint,
+        }));
+        const refused = /KILLED=no[\s\S]*REASON=fingerprint-mismatch/u.test(stop.stdout);
+        if (refused) {
+          process.stderr.write(`teardown: 拒绝停止 ${tracked.name} pid=${tracked.pid}（指纹不匹配）\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`teardown: 无法核验 ${tracked.name} pid=${tracked.pid}：${err.message}\n`);
+      }
+    }
+    // IT-09 的 patch 只允许落在 Center 专属目录；只删除 state 明确记录的本轮文件名。
+    if (patchNames.length > 0) {
+      try {
+        const paths = patchNames.map((name) => `"$HOME/.dsh_center_remote/patches/${name}"`).join(' ');
+        await this.ssh(`rm -f -- ${paths}`);
+      } catch { /* 同上 */ }
+    }
     if (!keep) fs.rmSync(this.home, { recursive: true, force: true });
     else process.stdout.write(`保留现场：${this.home}\n`);
   }
@@ -208,14 +318,14 @@ const CASES = [
     id: 'IT-02',
     title: '固定端口拉起 + 指纹入 state + 隧道可通',
     async run(rig) {
-      // 共享节点上 8899 可能被别人占着，那样降级是正确行为、本项无从判定——先说清楚
-      const busy = await rig.ssh('ss -ltn 2>/dev/null | grep ":8899 " || true');
-      assert.equal(busy.stdout.trim(), '', `远端 8899 已被占用，本项需要它空闲：${busy.stdout.trim()}`);
+      // 共享节点上的约定端口可能被别人占用；选择一个可用固定端口后仍验证固定端口语义。
+      const remotePort = await rig.chooseRemotePort();
+      await rig.setRemoteWebPort(remotePort);
 
       const res = await rig.api('POST', `/api/hosts/${encodeURIComponent(rig.host)}/start`);
       assert.equal(res.status, 202, `start 应受理：${JSON.stringify(res.json)}`);
       const host = await rig.waitPhase('running');
-      assert.equal(host.web.port, 8899, 'actualPort 应为约定的 8899');
+      assert.equal(host.web.port, remotePort, 'actualPort 应为本轮选定的约定端口');
       assert.equal(host.web.startedByUs, true);
       assert.ok(host.mappedUrl, '必须给出本机映射地址');
 
@@ -225,7 +335,7 @@ const CASES = [
 
       const probe = await fetch(host.mappedUrl, { redirect: 'manual' });
       assert.ok(probe.status < 500, `隧道应能取到 dsh web 响应（HTTP ${probe.status}）`);
-      return `pid ${host.web.pid} @ 8899 → ${host.mappedUrl}（HTTP ${probe.status}）`;
+      return `pid ${host.web.pid} @ ${remotePort} → ${host.mappedUrl}（HTTP ${probe.status}）`;
     },
   },
   {
@@ -406,7 +516,24 @@ const CASES = [
     async run(rig) {
       const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.dsh-center.manager.plist');
       const existed = fs.existsSync(plist);
-      assert.equal(existed, false, '本机已装过服务，跳过以免破坏现有配置');
+      if (existed) {
+        const text = fs.readFileSync(plist, 'utf8');
+        const home = /<key>DSHC_HOME<\/key><string>([^<]*)<\/string>/u.exec(text)?.[1];
+        const acceptanceTemp = path.resolve(os.tmpdir());
+        const ownedByAcceptance = home
+          && path.resolve(home).startsWith(`${acceptanceTemp}${path.sep}dshc-accept-`);
+        if (ownedByAcceptance) {
+          // 上一轮在 launchd 接管期间被中断时，先收掉自己的 plist；不碰用户服务。
+          const cleanup = await rig.dshc(['service', 'uninstall'], { timeoutMs: 60_000 });
+          assert.equal(cleanup.code, 0, `清理上一轮验收 launchd 失败：${cleanup.stdout}${cleanup.stderr}`);
+          assert.equal(fs.existsSync(plist), false, '清理上一轮验收后 plist 应消失');
+        } else {
+          return {
+            status: 'blocked',
+            note: '已有非验收 launchd plist，未触碰现有服务；请使用专用验收账号后重跑 IT-11',
+          };
+        }
+      }
 
       const install = await rig.dshc(['service', 'install'], { timeoutMs: 60_000 });
       assert.equal(install.code, 0, `${install.stdout}${install.stderr}`);
@@ -465,37 +592,130 @@ const EXEMPT = [
   ['IT-04', '两次拉起失败需要连 --port 0 也失败，真机无法构造；由假远端 bind-busy-twice 场景覆盖'],
   ['IT-10', 'AllowTcpForwarding=no 需改共享节点 sshd 配置并重启服务，不在验收范围内；由假远端 forward-disabled 场景覆盖'],
   ['IT-12', '页面向导需人工点击（UI-28 清单第 1 项）；CLI 侧向导由 tests/setup-wizard.test.js 脚本化覆盖'],
+  ['IT-14', '启动目录与真实 dsh 历史 Session 的兼容性需要专用真实存储和浏览器人工判定；Center 的 cd/state/UI/CLI 与假远端替身已覆盖'],
+  ['UI', '字号、对比度、留白与灰度可辨需要人眼判定；npm run ui:smoke 提供双宽度截图，结构性判据由自动化覆盖'],
 ];
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exitCode = 3;
+    return;
+  }
   if (!args.host) {
-    process.stdout.write('用法：node scripts/real-acceptance.mjs --host <ssh-host> [--only IT-02,IT-06] [--keep]\n');
+    process.stdout.write('用法：node scripts/real-acceptance.mjs --host <ssh-host> [--tier smoke|full] [--only IT-02,IT-06] [--keep] [--report-dir <dir>] [--json]\n');
+    process.exitCode = 3;
+    return;
+  }
+  try {
+    assertSafeHost(args.host);
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
     process.exitCode = 3;
     return;
   }
 
-  const selected = CASES.filter((c) => !args.only || args.only.includes(c.id));
+  const smoke = args.tier === 'smoke';
+  const selected = CASES.filter((c) => !args.only || args.only.includes(c.id))
+    .filter((c) => !smoke || c.id === 'IT-02');
+  const runId = evidenceId();
+  const startedAt = new Date().toISOString();
+  const pinCommand = process.env.ACCEPTANCE_PIN_COMMAND
+    ?? `ACCEPTANCE_EXPECTED_DSH_VERSION=<known> npm run acceptance:real -- --host ${args.host}`;
+  let releaseLock;
+  try {
+    releaseLock = acquireLock(path.join(os.tmpdir(), `dshc-acceptance-${args.host}.lock`), {
+      host: args.host,
+      tier: args.tier,
+      runId,
+    });
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
   const rig = new Rig(args);
   const results = [];
+  let preflight = null;
 
-  process.stdout.write(`真机验收开始：host=${args.host}，DSHC_HOME=${rig.home}\n`);
   try {
+    try {
+      await rescanSshConfig(args.host);
+      preflight = await rig.preflight();
+    } catch (err) {
+      const drift = [`前置校验失败：${err.message}`];
+      if (!smoke) {
+        const report = {
+          runId, tier: args.tier, host: args.host, startedAt,
+          finishedAt: new Date().toISOString(), ok: false, cases: [],
+          versions: rig.versions, drift, pinCommand,
+        };
+        const saved = writeEvidence(report, {
+          directory: args.reportDir,
+          hostAliases: [args.host],
+          previous: readLatestEvidence(args.reportDir),
+        });
+        process.stderr.write(`完整真机验收 BLOCK：${err.message}\n证据 JSON：${saved.jsonPath}\n`);
+        process.exitCode = 2;
+        releaseLock?.();
+        return;
+      }
+      preflight = { versions: rig.versions, drift };
+      process.stderr.write(`轻量冒烟告警：${err.message}\n`);
+      const saved = writeEvidence({
+        runId, tier: args.tier, host: args.host, startedAt,
+        finishedAt: new Date().toISOString(), ok: true, cases: [],
+        versions: rig.versions, drift: preflight.drift, pinCommand,
+      }, {
+        directory: args.reportDir,
+        hostAliases: [args.host],
+        previous: readLatestEvidence(args.reportDir),
+      });
+      process.stdout.write(`轻量冒烟未执行（告警，不阻断）：${saved.jsonPath}\n`);
+      process.exitCode = 0;
+      return;
+    }
+
+    process.stdout.write(`真机验收开始：tier=${args.tier}，host=${args.host}，DSHC_HOME=${rig.home}\n`);
     await rig.boot();
     for (const c of selected) {
       process.stdout.write(`\n▶ ${c.id} ${c.title}\n`);
-      const startedAt = Date.now();
-      try {
-        await rig.ensureManager();
-        if (c.id !== 'IT-01' && c.id !== 'IT-11') await rig.ensureReady();
-        const note = await c.run(rig);
-        results.push({ id: c.id, ok: true, note, ms: Date.now() - startedAt });
-        process.stdout.write(`  ✔ ${note}\n`);
-      } catch (err) {
-        results.push({ id: c.id, ok: false, note: err.message, ms: Date.now() - startedAt });
-        process.stdout.write(`  ✘ ${err.message}\n`);
+      const caseStartedAt = Date.now();
+      const maxRetries = FLAKY_RETRIES[c.id] ?? 0;
+      let retries = 0;
+      let completed = false;
+      while (!completed) {
+        try {
+          await rig.ensureManager();
+          if (c.id !== 'IT-01' && c.id !== 'IT-11') await rig.ensureReady();
+          const result = await c.run(rig);
+          const status = typeof result === 'object' ? result.status ?? 'pass' : 'pass';
+          const note = typeof result === 'object' ? result.note : result;
+          results.push({
+            id: c.id, ok: status === 'pass', status, note, retries, ms: Date.now() - caseStartedAt,
+          });
+          process.stdout.write(`  ${status === 'pass' ? '✔' : '·'} ${note}（重试 ${retries} 次）\n`);
+          completed = true;
+        } catch (err) {
+          if (retries < maxRetries) {
+            retries += 1;
+            process.stderr.write(`  ${c.id} 允许的有限重试 ${retries}/${maxRetries}：${err.message}\n`);
+            continue;
+          }
+          results.push({
+            id: c.id, ok: false, status: 'fail', note: err.message, retries, ms: Date.now() - caseStartedAt,
+          });
+          process.stdout.write(`  ✘ ${err.message}（重试 ${retries} 次）\n`);
+          completed = true;
+        }
       }
       // 每项之间回到干净起点：关停本机映射，避免相互干扰
+      try {
+        rig.trackView(await rig.hostView());
+      } catch { /* 失败已由用例本身记录 */ }
       try {
         await rig.dshc(['stop', args.host], { timeoutMs: 60_000 });
       } catch { /* 已是 ready */ }
@@ -504,15 +724,40 @@ async function main() {
     await rig.teardown({ keep: args.keep });
   }
 
-  process.stdout.write('\n结果汇总\n');
-  for (const r of results) process.stdout.write(`${r.ok ? '✔' : '✘'} ${r.id}  ${(r.ms / 1000).toFixed(1)}s  ${r.note}\n`);
-  for (const [id, why] of EXEMPT) process.stdout.write(`· ${id}  豁免：${why}\n`);
+  try {
+    process.stdout.write('\n结果汇总\n');
+    for (const r of results) process.stdout.write(`${r.ok ? '✔' : '✘'} ${r.id}  ${(r.ms / 1000).toFixed(1)}s  ${r.note}\n`);
+    for (const [id, why] of EXEMPT) process.stdout.write(`· ${id}  豁免：${why}\n`);
 
-  const failed = results.filter((r) => !r.ok);
-  process.stdout.write(`\n通过 ${results.length - failed.length}/${results.length}，豁免 ${EXEMPT.length}\n`);
-  process.exitCode = failed.length === 0 ? 0 : 1;
+    const failed = results.filter((r) => !r.ok);
+    const blocked = results.filter((r) => r.status === 'blocked');
+    process.stdout.write(`\n通过 ${results.length - failed.length - blocked.length}/${results.length}，阻断 ${blocked.length}，豁免 ${EXEMPT.length}\n`);
+    const report = {
+      runId,
+      tier: args.tier,
+      host: args.host,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      ok: failed.length === 0,
+      cases: results,
+      versions: preflight?.versions ?? rig.versions,
+      drift: preflight?.drift ?? rig.drift,
+      pinCommand,
+      retryCount: results.reduce((sum, item) => sum + (item.retries ?? 0), 0),
+    };
+    const saved = writeEvidence(report, {
+      directory: args.reportDir,
+      hostAliases: [args.host],
+      previous: readLatestEvidence(args.reportDir),
+    });
+    process.stdout.write(`证据 JSON：${saved.jsonPath}\n证据摘要：${saved.markdownPath}\n`);
+    if (args.json) process.stdout.write(`${JSON.stringify(saved.report)}\n`);
+    process.exitCode = failed.length === 0 ? 0 : 1;
+  } finally {
+    releaseLock?.();
+  }
 }
 
 if (isMainEntry(import.meta.url)) await main();
 
-export { CASES, EXEMPT, parseArgs };
+export { CASES, EXEMPT, Rig, parseArgs };

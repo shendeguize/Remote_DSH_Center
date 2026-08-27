@@ -449,6 +449,8 @@ npm run matrix:gate              # 行为清单 ↔ 覆盖矩阵对账；-- --su
 npm run perf:gate                # 墙钟基线（软闸）；-- --record 重录、-- --advisory 只报不挡
 npm run mutation:gate            # 变异测试（周检闸门）；-- --tier lib --only shq.js 单文件秒级、-- --list 只看清单
 npm run ui:smoke                 # 无头 Chrome 真浏览器冒烟
+npm run journey:check            # 可执行用户旅程规格、行为 ID 与生成清单
+npm run journey:write            # 从规格重新生成 tests/ACCEPTANCE_JOURNEYS.md
 ```
 
 站点与 demo：
@@ -469,8 +471,16 @@ npm run site:check    # 站点构建、demo 冒烟、双语 README 链接与命�
 
 ```bash
 npm run acceptance:real -- --host <ssh-host>                        # IT-01…13
+npm run acceptance:smoke -- --host <ssh-host>                       # 三分钟最短闭环；不可达只告警
 npm run acceptance:real -- --host <ssh-host> --only IT-06,IT-09 --keep
 ```
+
+每轮真机验收都会先重新扫描 `~/.ssh/config`，并以互斥锁防止同一主机并发运行。轻量冒烟不可达
+只生成告警证据、不阻断；完整验收不可达则阻断发版。结果写入 `.local/evidence/` 的脱敏
+JSON 与 markdown，并和上一轮自动比较。`scripts/bootstrap-remote.sh` 是操作员脚本，不是
+Center 产品路径；它只可按授权安装 zstd/用户态 Sidecar，绝不安装 dsh 或 Python。需要检查
+bootstrap 自身时使用 `bash scripts/bootstrap-remote.sh --deep <ssh-host>`，随后再执行一次普通
+bootstrap 和验收。
 
 CI 在 Ubuntu PR 上跑必需的 `npm run check`，合入 main 后在 macOS 复跑；Ubuntu 自带 Chrome，
 浏览器关必须真跑。macOS 未找到 Chrome 时该关可跳过；本机可用 `DSHC_CHROME=<路径>` 指定。

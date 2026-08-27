@@ -17,7 +17,7 @@ import {
   missingSourceFiles, parseLcov, sourceJsFiles, TIERS,
 } from '../scripts/coverage-gate.mjs';
 import {
-  apiRoutesFrom, cliCommandsFrom, collectInventory, protoExitCodesFrom, SURFACES,
+  apiRoutesFrom, cliCommandsFrom, cliExitCodesFrom, collectInventory, protoExitCodesFrom, SURFACES,
 } from '../scripts/lib/inventory.mjs';
 import {
   formatVerdict, globHasMatch, matrixVerdict, parseBadExemptions, parseFileRefs, parseRegistrations,
@@ -779,7 +779,13 @@ test('inventory 提取：COMMANDS 只取顶层键，嵌套对象与后续代码�
   assert.throws(() => cliCommandsFrom('const x = 1;'), /找不到 COMMANDS 表/);
 });
 
-test('inventory：六个面都有内容，且 key 全库唯一', () => {
+test('inventory 提取：CLI 退出码独立于远端协议退出码', () => {
+  const source = 'export const EXIT = { ok: 0, failed: 1, comm: 2, usage: 3, interrupted: 130 };';
+  assert.deepEqual(cliExitCodesFrom(source), [0, 1, 2, 3, 130]);
+  assert.throws(() => cliExitCodesFrom('const x = 1;'), /找不到 EXIT 表/);
+});
+
+test('inventory：所有行为面都有内容，且 key 全库唯一', () => {
   const inventory = collectInventory(ROOT);
   const keys = inventory.items.map((item) => item.key);
   assert.equal(new Set(keys).size, keys.length, 'key 撞号会让某个行为的登记被另一个吃掉');
@@ -790,6 +796,9 @@ test('inventory：六个面都有内容，且 key 全库唯一', () => {
     );
   }
   assert.ok(keys.includes('FSM:running→degraded'));
+  assert.ok(keys.includes('CLI_EXIT:130'));
+  assert.equal(inventory.items.find((item) => item.key === 'CLI:start')?.coverage, 'e2e');
+  assert.equal(inventory.items.find((item) => item.key === 'ERR:INTERNAL')?.coverage, 'unit');
   assert.ok(keys.includes('SCN:pid-reuse') === false, '场景表里没有的 id 不该凭空出现');
 });
 
