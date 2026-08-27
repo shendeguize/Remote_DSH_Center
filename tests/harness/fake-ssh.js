@@ -240,6 +240,12 @@ function replyProbe(name, body) {
   if (h.dshInstalled) out(`DSH_VERSION=${h.dshVersion}\n`);
   out(`DSH_HOME=${h.dshHome}\n`);
   out(`PROFILE_WEB=${h.profileWeb ? 'yes' : 'no'}\n`);
+  out(`PROBE_PATH=${h.probePath}\n`);
+  out('DSH_SNIFF<<EOF\n');
+  for (const p of h.dshSniffPaths ?? []) out(`${p}\n`);
+  out('EOF\n');
+  out(`DSH_SNIFF_LOGIN=${h.dshLoginPath ?? ''}\n`);
+  if (h.dshSniffVersion) out(`DSH_SNIFF_VERSION=${h.dshSniffVersion}\n`);
   out('RUNNING_DSH_WEB<<EOF\n');
   for (const r of psMatches(h, body)) {
     out(`${String(r.pid).padStart(6, ' ')} ${r.args}\n`);

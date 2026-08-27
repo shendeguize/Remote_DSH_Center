@@ -1,0 +1,116 @@
+name: Cross-repo integration
+description: Report a reproducible DSH Center and Agent Sidecar compatibility issue
+title: "[Integration] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for the DSH Center ↔ Agent Sidecar downstream integration.
+        Read the [integration contract](https://github.com/shendeguize/Remote_DSH_Center/blob/main/HANDBOOK.md#agent-sidecar-集成)
+        and open or link the matching Sidecar issue before submitting.
+
+        This integration is observation-only. Do not include remote message injection,
+        resume, `send`, credentials, tokens, raw transcripts, or unsanitized SSH data.
+        Suspected security vulnerabilities must use the relevant private reporting channel,
+        not a public issue.
+
+  - type: input
+    id: counterpart_issue_url
+    attributes:
+      label: Agent Sidecar counterpart issue
+      description: Link the corresponding issue in the Agent Sidecar repository, or explain why no counterpart is needed.
+      placeholder: "https://github.com/shendeguize/AgentSideCar/issues/123"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: compatibility_commitments
+    attributes:
+      label: C1–C5 compatibility commitments
+      description: Confirm which compatibility contract the report covers. Leave a checked item checked.
+      options:
+        - label: "C1 — Inventory and identity: `dshc ls --json`, strict config/state fallback, and host eligibility are preserved."
+          required: true
+        - label: "C2 — Versions and Python: local Python ≥ 3.9, v0.7.0 remote Python ≥ 3.8, and explicit interpreter pins fail closed."
+          required: true
+        - label: "C3 — Transport and installation: remote payload transfer is bounded and temporary; no remote Sidecar install or daemon is required."
+          required: true
+        - label: "C4 — Observation semantics: remote list/status/watch behavior, host provenance, partial failure, and no automatic watch retry are covered."
+          required: true
+        - label: "C5 — Failures and change handling: `no_dsh`, stable error reporting, and cross-repository release handling are covered."
+          required: true
+
+  - type: input
+    id: dsh_center_version
+    attributes:
+      label: DSH Center version
+      description: Use `dshc version`, or provide the exact commit/tag.
+      placeholder: "0.5.2 or commit SHA"
+    validations:
+      required: true
+
+  - type: input
+    id: sidecar_version
+    attributes:
+      label: Agent Sidecar version
+      description: Use `agent-sidecar --version`, or provide the exact commit/tag. The integration anchor is v0.7.0.
+      placeholder: "0.7.0 or commit SHA"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment_versions
+    attributes:
+      label: Runtime and host versions
+      description: Include local OS/architecture, local Python, remote OS/architecture, remote Python, and relevant dsh version. Redact hostnames and paths.
+      placeholder: |
+        Local: macOS <version>, arm64, Python 3.13.x
+        Remote: Linux <version>, x86_64, Python 3.8.x, dsh <version>
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give the smallest sanitized command and numbered steps. State whether the daemon, HTTP, remote mode, and `no_dsh` are involved.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe the contractually expected result, including the expected stable error code when applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      description: Describe what happened, including exit code, stable error code, and affected C1–C5 commitment.
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized_diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include only inspected and redacted JSON, stderr, or logs. Remove tokens, credentials, paths, session/request IDs, transcript/message content, and SSH inventory.
+      render: shell
+
+  - type: checkboxes
+    id: boundary_confirmation
+    attributes:
+      label: Boundary and redaction confirmation
+      options:
+        - label: This report stays within the observation-only integration boundary and does not request or claim remote injection, resume, or `send`.
+          required: true
+        - label: I removed credentials, tokens, private paths, session/request identifiers, transcript/message content, and SSH host or inventory details.
+          required: true

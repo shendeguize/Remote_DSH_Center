@@ -40,7 +40,74 @@
 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`。
 
 任一目标缺少 `dsh` 或 web profile 时，探测会明确标为“未安装/未配置”，不会假装可用，
-也不会代为安装。
+也不会代为安装；Center 会展示可复制的安装/配置指引。若 dsh 只在 login shell 可见，
+还会报告嗅探到的路径与非交互 SSH PATH，帮助修正环境。
+
+## Agent Sidecar 集成
+
+[Agent Sidecar](https://github.com/shendeguize/AgentSideCar) 是 DSH Center 的下游观察消费者。
+两库联合验收以 Agent Sidecar **v0.7.0** 与本仓库当前版本为锚；Sidecar 的
+[版本说明](https://github.com/shendeguize/AgentSideCar/releases/tag/v0.7.0)、
+[安全策略](https://github.com/shendeguize/AgentSideCar/blob/main/SECURITY.md) 与其仓库的
+[Security and reporting](https://github.com/shendeguize/AgentSideCar#security-and-reporting)
+章节是 Sidecar 一侧的权威约束。
+
+### C1–C5 兼容承诺
+
+这是跨仓库集成的最小兼容契约。改动任一边的字段、筛选、运输或错误语义，都要在双方
+仓库开 issue 留痕并更新版本说明；没有明确迁移说明，不得把兼容行为当成实现细节。
+
+- **C1：清单与身份。** Sidecar 优先读取 `dshc ls --json`，不可用时严格回退到
+  `DSHC_HOME` 或 `~/.dsh_center` 下的配置/状态文件。它只查询启用、非本机、非孤儿且处于
+  `ready` 或 `no_dsh` 的远端；本机行仍保留在本地结果中，远端结果带 DSH Center 提供的
+  `host` 别名。Center 不改变这些字段的含义，也不要求 Sidecar 反向写入 Center。
+- **C2：版本与 Python。** Sidecar 本机安装和工具链要求 Python ≥ 3.9；**v0.7.0 的
+  远端观察 payload 接受 SSH 目标上的 Python ≥ 3.8**。远端解释器按
+  `--remote-python` → `AGENT_SIDECAR_REMOTE_PYTHON` → 有界候选序列选择；显式路径无效、
+  缺失、不可执行或低于 3.8 时该主机 fail closed，不回退到其他解释器。Center 自身仍要求
+  Node ≥ 22，主体运行时零 npm 依赖。
+- **C3：运输与安装。** Sidecar 的普通 `--remote` 观察把有界 zipapp 经非交互 SSH
+  流入目标，写入私有临时文件，执行后清理；该观察路径不在远端安装 Sidecar、不安装
+  第三方 Python 包、不启动 Sidecar 常驻守护进程，也不改变 Center 的远端零安装、零常驻
+  承诺。任务内的 `bootstrap-remote.sh` 是用户显式调用的独立编排脚本，才会把已验证的
+  Sidecar zipapp 放入远端用户态路径；它不属于 Center manager/CLI，也不改变上述观察路径。
+  每次普通远端调用重新探测，不依赖远端缓存。
+- **C4：观察语义。** 支持 `list --remote`、`status --remote` 与
+  `watch --all --remote`；远端 JSON 行带 `host`，人类输出带主机列。远端观察按主机隔离
+  失败，允许部分成功；watch 不自动重连，失败后必须保留“可能丢事件”的警告。远端
+  `send`、按会话前缀 watch 与远端消息投递不属于本集成。
+- **C5：失败与变更。** `no_dsh` 是 Center 的真实探测结果，不是安装请求：Center 不会
+  代装 `dsh`；普通 Sidecar 远端观察也不会借此安装 `dsh` 或 Sidecar。满足远端 Python 与
+  SSH 条件时，`no_dsh` 主机仍可作为 Sidecar 的观察候选；不满足时按主机报告稳定失败码，
+  不伪造空成功。独立 bootstrap 的用户态 Sidecar 安装与 dsh 缺失提醒分别回显、可幂等重跑。
+  远端问题须附两边版本、目标主机的脱敏别名、最小复现、期望/实际行为及稳定错误码，
+  不附凭据、路径、会话内容或原始 SSH 数据。
+
+### 安装与远端边界
+
+Sidecar 按其 [安装说明](https://github.com/shendeguize/AgentSideCar#installation) 在**本机**
+安装；推荐下载、检查并执行受保护 `main` 上的安装脚本，或使用已验证的 v0.7.0 Release
+zipapp。不要把 `pipx install agent-sidecar` 当作 PyPI 发布承诺。Sidecar 的普通远端模式只
+借用 Center 的既有清单与 SSH 配置，一次性传输并清理 payload，不在目标机留下安装物或
+守护进程。若远端 dsh web profile 需要用户态 Sidecar 安装，使用任务内独立的
+`bootstrap-remote.sh`；它不属于 Center manager/CLI，不安装 dsh，也不打开远端注入。
+
+**远端不注入。** DSH Center 与 Sidecar 的这条下游集成只有观测面：不会向远端会话发送消息、
+启动 resume、调用 `send`，也不会通过 `no_dsh` 状态触发安装或任务。Agent Sidecar 的
+`send` 是独立的本机、显式授权写路径；Sidecar 的 DSH 注入也只存在于其可选 DSH 插件，
+不由本仓库的远端清单集成提供。验收远端链路只允许 hello-world 级别的非注入检查。
+
+### 报告与跨仓库迭代
+
+- DSH Center 侧请使用
+  [Cross-repo integration issue form](https://github.com/shendeguize/Remote_DSH_Center/issues/new?template=integration.yml)，
+  填写对应的 Sidecar issue URL、C1–C5、两边版本、复现与期望行为。
+- Sidecar 的普通缺陷与功能请求走其
+  [issue forms](https://github.com/shendeguize/AgentSideCar/issues/new/choose)；
+  报告前先看 [Security and reporting](https://github.com/shendeguize/AgentSideCar#security-and-reporting)。
+- 疑似安全漏洞不要公开创建 issue；按 Sidecar 的
+  [private vulnerability reporting](https://github.com/shendeguize/AgentSideCar/security/advisories/new)
+  流程提交，并在双方 issue 中只留下脱敏的关联信息。
 
 ## 安装
 
@@ -265,7 +332,8 @@ Center 把文件视为不透明 UTF-8 文本，不解析或改写 YAML，因此�
 时可自行写 systemd unit 指向 `dshc up --foreground`。
 
 **本机或远端没有 dsh 会怎样？** 探测标为“未安装/未配置”并区分缺二进制与缺 web profile；
-不会安装，也不会允许误点拉起。
+会给出安装/配置指引，但不会代为安装，也不会允许误点拉起。若 login shell 能找到 dsh 而
+非交互 SSH 找不到，详情会显示该诊断。
 
 **别人手动启动的 `dsh web` 会被关掉吗？** 不会。手动实例显示为“🔒 手动”、只读，
 `stop` 与 `restart` 会被拒绝；指纹不一致永远不杀。

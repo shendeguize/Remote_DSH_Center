@@ -201,6 +201,30 @@ test('dshc probe 无参触发全量探测', async (t) => {
   await waitPhase(ctx, 'cpu-1', ['ready']);
 });
 
+test('dshc probe no_dsh：打印嗅探事实与完整安装指引', async (t) => {
+  const ctx = await bootServer(t);
+  ctx.harness.scenario('gpu-1', 'no-dsh-unusual-path');
+
+  const res = await dshc(ctx, ['probe', 'gpu-1']);
+  assert.equal(res.code, 0, `stderr=${res.stderr}`);
+  assert.match(res.stdout, /\/root\/\.canon\/node\/bin\/dsh/);
+  assert.match(res.stdout, /非交互 PATH/);
+  assert.match(res.stdout, /官方|PATH/);
+  assert.match(res.stdout, /dshc probe gpu-1/);
+});
+
+test('dshc start no_dsh：拒绝时只给 probe 指引入口', async (t) => {
+  const ctx = await bootServer(t);
+  ctx.harness.scenario('gpu-1', 'no-dsh-missing-bin');
+  await ctx.api('POST', '/api/hosts/probe');
+  await waitPhase(ctx, 'gpu-1', ['no_dsh']);
+
+  const res = await dshc(ctx, ['start', 'gpu-1']);
+  assert.equal(res.code, 1);
+  assert.match(res.stderr, /错误|要求/);
+  assert.match(res.stderr, /查看安装指引：dshc probe gpu-1/);
+});
+
 test('dshc log 透传远端日志尾部', async (t) => {
   const ctx = await bootServer(t);
   await ctx.api('POST', '/api/hosts/probe');

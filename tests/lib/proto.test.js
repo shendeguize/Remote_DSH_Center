@@ -95,12 +95,12 @@ test('parseLaunchUrl 精析并校验端口范围', () => {
 
 const noRawNewline = (s, label) => assert.ok(!s.includes('\n'), `${label} 产物应为单行`);
 
-test('§1.1 探测模板逐字一致', () => {
+test('§1.1 探测模板逐字一致（含非交互 PATH 与 login-shell 嗅探）', () => {
   const s = buildProbeScript();
   noRawNewline(s, 'probe');
   assert.equal(
     s,
-    'echo "DSH_BIN=$(command -v dsh || echo MISSING)"; if command -v dsh >/dev/null 2>&1; then echo "DSH_VERSION=$(dsh --version 2>/dev/null | head -n 1)"; fi; H="${DSH_HOME:-$HOME/.dsh}"; printf \'DSH_HOME=%s\\n\' "$H"; if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi; echo "RUNNING_DSH_WEB<<EOF"; ps -eo pid,args | grep "[d]sh.*web" | grep -v "^ *$$ " || true; echo "EOF"; echo "PROBE_DONE=yes"',
+    'echo "DSH_BIN=$(command -v dsh || echo MISSING)"; if command -v dsh >/dev/null 2>&1; then echo "DSH_VERSION=$(dsh --version 2>/dev/null | head -n 1)"; fi; H="${DSH_HOME:-$HOME/.dsh}"; printf \'DSH_HOME=%s\\n\' "$H"; if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi; printf \'PROBE_PATH=%s\\n\' "$PATH"; SNIFF_PATH=; echo "DSH_SNIFF<<EOF"; for D in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /opt/homebrew/bin /snap/bin; do if [ -x "$D/dsh" ]; then printf "%s\\n" "$D/dsh"; if [ -z "$SNIFF_PATH" ]; then SNIFF_PATH="$D/dsh"; fi; fi; done; echo "EOF"; LOGIN_DSH=; if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then LOGIN_DSH=$(timeout 5 bash -lc \'command -v dsh\' 2>/dev/null | head -n 1); fi; printf "DSH_SNIFF_LOGIN=%s\\n" "$LOGIN_DSH"; if [ -z "$SNIFF_PATH" ] && [ -n "$LOGIN_DSH" ]; then SNIFF_PATH="$LOGIN_DSH"; fi; if command -v timeout >/dev/null 2>&1 && [ -n "$SNIFF_PATH" ]; then DSH_SNIFF_VERSION=$(timeout 5 "$SNIFF_PATH" --version 2>/dev/null | head -n 1); printf "DSH_SNIFF_VERSION=%s\\n" "$DSH_SNIFF_VERSION"; fi; echo "RUNNING_DSH_WEB<<EOF"; ps -eo pid,args | grep "[d]sh.*web" | grep -v "^ *$$ " || true; echo "EOF"; echo "PROBE_DONE=yes"',
   );
 });
 

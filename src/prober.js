@@ -14,6 +14,7 @@ import * as store from './store.js';
 /**
  * @typedef {{ok:boolean, phase:'ready'|'no_dsh'|'unreachable', dshPath:string|null,
  *   version:string|null, dshHome:string|null, profileWeb:boolean, runningRaw:string,
+ *   sniff:{paths:string[], loginPath:string|null, version:string|null, probePath:string|null},
  *   noDshReason:'missing-bin'|'no-web-profile'|null, stderr:string,
  *   manualInstances:{pid:number,args:string}[]}} ProbeResult
  */
@@ -27,6 +28,14 @@ export function parseRunningBlock(raw) {
     out.push({ pid: Number(m[1]), args: m[2] });
   }
   return out;
+}
+
+/** 嗅探块按行收集，空行只表示没有命中。 */
+export function parseSniffPaths(raw) {
+  return String(raw ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
 }
 
 /**
@@ -54,6 +63,12 @@ export function interpretProbe(res, { local = false } = {}) {
     dshHome: null,
     profileWeb: false,
     runningRaw: '',
+    sniff: {
+      paths: [],
+      loginPath: null,
+      version: null,
+      probePath: null,
+    },
     noDshReason: null,
     stderr: failureStderr,
     manualInstances: [],
@@ -75,6 +90,12 @@ export function interpretProbe(res, { local = false } = {}) {
   const manualInstances = parseRunningBlock(runningRaw);
   const dshHome = kvOne(out, 'DSH_HOME');
   const profileWeb = kvOne(out, 'PROFILE_WEB') === 'yes';
+  const sniff = {
+    paths: parseSniffPaths(out.blocks.DSH_SNIFF),
+    loginPath: kvOne(out, 'DSH_SNIFF_LOGIN') || null,
+    version: kvOne(out, 'DSH_SNIFF_VERSION') || null,
+    probePath: kvOne(out, 'PROBE_PATH') || null,
+  };
 
   if (!bin || bin === 'MISSING') {
     return {
@@ -84,6 +105,7 @@ export function interpretProbe(res, { local = false } = {}) {
       dshHome,
       runningRaw,
       manualInstances,
+      sniff,
       stderr: '',
     };
   }
@@ -96,6 +118,7 @@ export function interpretProbe(res, { local = false } = {}) {
     profileWeb,
     runningRaw,
     manualInstances,
+    sniff,
     stderr: '',
   };
 
@@ -156,6 +179,7 @@ export function applyProbe(name, result) {
       version: result.version,
       dshHome: result.dshHome,
       profileWeb: result.profileWeb,
+      sniff: result.sniff,
       noDshReason: result.noDshReason,
       at: new Date().toISOString(),
       errorSummary: result.phase === 'unreachable' ? summarize(result.stderr) : null,

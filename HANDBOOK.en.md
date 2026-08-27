@@ -42,7 +42,89 @@ target account's `~/.dsh_center_remote/`. The one exception is an explicit user 
 resolved `${DSH_HOME:-$HOME/.dsh}/settings.yaml`.
 
 If a target lacks `dsh` or its web profile, probing labels it "not installed / not configured"
-instead of pretending it is usable. Center never installs it.
+instead of pretending it is usable. Center never installs it, but it shows actionable
+installation/configuration guidance. If dsh is visible only to a login shell, probing also
+reports the discovered path and non-interactive SSH PATH to help repair the environment.
+
+## Agent Sidecar integration
+
+[Agent Sidecar](https://github.com/shendeguize/AgentSideCar) is a downstream observation consumer
+of DSH Center. Cross-repository acceptance is anchored on Agent Sidecar **v0.7.0** and the
+current version of this repository. Sidecar's
+[release notes](https://github.com/shendeguize/AgentSideCar/releases/tag/v0.7.0),
+[security policy](https://github.com/shendeguize/AgentSideCar/blob/main/SECURITY.md), and
+[Security and reporting](https://github.com/shendeguize/AgentSideCar#security-and-reporting)
+section are authoritative for the Sidecar side.
+
+### C1–C5 compatibility commitments
+
+These are the minimum cross-repository compatibility commitments. A field, filter, transport, or
+error-semantic change on either side must be recorded in issues in both repositories and reflected
+in release documentation; compatibility behavior must not change silently.
+
+- **C1: Inventory and identity.** Sidecar first reads `dshc ls --json`, then strictly falls back
+  to the config/state files under `DSHC_HOME` or `~/.dsh_center`. It queries only enabled,
+  non-local, non-orphaned remotes in `ready` or `no_dsh`; local rows remain in the local result,
+  and remote rows carry the `host` alias supplied by DSH Center. Center does not change the
+  meaning of these fields or require Sidecar to write back to Center.
+- **C2: Versions and Python.** Local Sidecar installation and tooling require Python ≥ 3.9;
+  **the v0.7.0 remote observation payload accepts Python ≥ 3.8 on SSH targets**. Remote
+  interpreter precedence is `--remote-python` → `AGENT_SIDECAR_REMOTE_PYTHON` → the bounded
+  candidate sequence. An invalid, missing, non-executable, or pre-3.8 explicit path fails closed
+  for that host without trying another interpreter. Center itself continues to require Node ≥ 22
+  and has zero runtime npm dependencies.
+- **C3: Transport and installation.** Ordinary Sidecar `--remote` observation streams a bounded
+  zipapp over noninteractive SSH, writes it to a private temporary file, runs it, and cleans it
+  up. That observation path does not install Sidecar remotely, install third-party Python
+  packages, or start a resident Sidecar daemon, preserving Center's remote zero-install,
+  zero-resident-process contract. The task-local `bootstrap-remote.sh` is a separate, explicitly
+  user-invoked orchestrator; it may place the verified Sidecar zipapp in the remote userland
+  path, but is not part of the Center manager/CLI and does not change the observation path.
+  Every ordinary invocation probes afresh and uses no remote cache.
+- **C4: Observation semantics.** The supported commands are `list --remote`, `status --remote`,
+  and `watch --all --remote`; remote JSON rows carry `host`, and human output has a host column.
+  Remote failures are isolated per host and partial fleet success is allowed. Remote watch does
+  not reconnect automatically; a failure must retain its warning that events may have been
+  missed. Remote `send`, prefix-based remote watch, and remote message delivery are outside this
+  integration.
+- **C5: Failures and change handling.** `no_dsh` is Center's real probe result, not an install
+  request: Center does not install `dsh`, and ordinary Sidecar remote observation does not use
+  this integration to install `dsh` or Sidecar. When remote Python and SSH prerequisites are met,
+  a `no_dsh` host may still be an observation candidate for Sidecar; otherwise it reports a stable
+  per-host failure rather than a fabricated empty success. The independent bootstrap reports its
+  userland Sidecar installation and dsh absence separately and is safe to rerun. Remote reports
+  must include both versions, a sanitized host alias, the smallest reproduction, expected/actual
+  behavior, and stable error codes—never credentials, paths, session content, or raw SSH data.
+
+### Installation and remote boundary
+
+Install Sidecar on the **local machine** using its
+[installation guide](https://github.com/shendeguize/AgentSideCar#installation). Prefer downloading,
+inspecting, and then running the installer from protected `main`, or use the verified v0.7.0
+Release zipapp. Do not treat `pipx install agent-sidecar` as a PyPI publication guarantee. Sidecar
+remote mode borrows Center's existing inventory and SSH configuration, transfers and cleans up a
+one-shot payload, and leaves no installation or daemon on the target. The task-local
+`bootstrap-remote.sh` is the separately documented user-invoked path when a remote dsh profile
+needs a userland Sidecar installation; it never installs dsh or enables remote injection.
+
+**No remote injection.** This downstream integration is observation-only: DSH Center and Sidecar
+do not send messages to remote sessions, start a resume, invoke `send`, or turn a `no_dsh` result
+into an installation or task. Agent Sidecar's `send` is a separate, explicitly authorized,
+local-only write path; Sidecar's DSH injection exists only in its optional DSH plugin and is not
+provided by this repository's remote inventory integration. Remote acceptance may use only a
+hello-world-level non-injection check.
+
+### Reporting and cross-repository iteration
+
+- On the DSH Center side, use the
+  [cross-repo integration issue form](https://github.com/shendeguize/Remote_DSH_Center/issues/new?template=integration.yml)
+  with the counterpart Sidecar issue URL, C1–C5, both versions, reproduction, and expected behavior.
+- File ordinary Sidecar defects and feature requests through its
+  [issue forms](https://github.com/shendeguize/AgentSideCar/issues/new/choose), after reading
+  [Security and reporting](https://github.com/shendeguize/AgentSideCar#security-and-reporting).
+- Do not publicly file a suspected vulnerability. Use Sidecar's
+  [private vulnerability reporting](https://github.com/shendeguize/AgentSideCar/security/advisories/new)
+  process, and leave only sanitized linkage in cross-repository issues.
 
 ## Installation
 
@@ -285,8 +367,9 @@ bundle. `dshc service` is unavailable because it requires macOS launchd; for aut
 write a systemd unit pointing at `dshc up --foreground`.
 
 **What if a local or remote target has no dsh?** Probe labels it "not installed / not configured"
-and distinguishes a missing binary from a missing web profile. It installs nothing and will not
-allow an accidental start.
+and distinguishes a missing binary from a missing web profile. It shows installation/configuration
+guidance but installs nothing and will not allow an accidental start. If a login shell can find dsh
+while non-interactive SSH cannot, the diagnostic appears in the details.
 
 **Will it stop a `dsh web` that someone started manually?** No. Manual instances are shown as
 "🔒 manual" and read-only; `stop` and `restart` are refused. A fingerprint mismatch never kills.

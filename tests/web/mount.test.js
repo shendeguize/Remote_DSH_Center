@@ -242,6 +242,43 @@ test('本机抽屉 badge 复用共享文案，不渗入 SSH/远端措辞', async
   assert.doesNotMatch(drawer.textContent, /SSH|远端/);
 });
 
+test('no_dsh 抽屉展示完整嗅探事实与安装指引，ready 后隐藏指引', async (t) => {
+  const unavailable = hostView('gpu-1', {
+    phase: 'no_dsh',
+    probe: {
+      ...hostView('gpu-1').probe,
+      dshPath: null,
+      version: null,
+      profileWeb: false,
+      noDshReason: 'missing-bin',
+      sniff: {
+        paths: ['/root/.canon/node/bin/dsh'],
+        loginPath: '/root/.canon/node/bin/dsh',
+        version: 'dsh 0.1.1-rc.2',
+        probePath: '/usr/bin:/bin',
+      },
+    },
+  });
+  const { dom, es } = await mount(t, { hosts: [unavailable] });
+  dom.app.querySelector('.host-table tbody tr').click();
+  await flush();
+
+  const drawer = dom.app.querySelector('.host-drawer');
+  assert.equal(drawerDetail(drawer, '检测到的 dsh'), '/root/.canon/node/bin/dsh');
+  assert.equal(drawerDetail(drawer, 'login shell 检测'), '/root/.canon/node/bin/dsh');
+  const guide = drawer.querySelector('.install-guide');
+  assert.equal(guide.hidden, false);
+  assert.match(guide.textContent, /非交互环境/);
+  assert.match(guide.textContent, /dshc probe gpu-1/);
+
+  es().send('host-changed', {
+    revision: 2,
+    host: hostView('gpu-1', { phase: 'ready' }),
+  });
+  await flush();
+  assert.equal(guide.hidden, true);
+});
+
 test('本机抽屉映射只在 URL 与 tunnel.localPort 齐全时展示 URL', async (t) => {
   const missingPort = localHostView('workstation', {
     phase: 'running',

@@ -1,0 +1,186 @@
+[
+  {
+    "name": "workstation",
+    "local": true,
+    "sshInfo": null,
+    "orphaned": false,
+    "config": {
+      "local": true,
+      "enabled": true,
+      "autoStart": false,
+      "localPort": null,
+      "remoteWebPort": null,
+      "workdir": null,
+      "inject": {
+        "env": {},
+        "extraArgs": [],
+        "patches": []
+      }
+    },
+    "phase": "ready",
+    "effectiveRemotePort": 8899,
+    "mappedUrl": null,
+    "probe": {
+      "dshPath": "/usr/local/bin/dsh",
+      "version": "0.6.0",
+      "dshHome": "/Users/example/.dsh",
+      "profileWeb": true,
+      "noDshReason": null,
+      "sniff": {
+        "paths": ["/usr/local/bin/dsh"],
+        "loginPath": null,
+        "version": null,
+        "probePath": "/usr/local/bin:/usr/bin:/bin"
+      },
+      "at": "2026-08-27T04:00:00.000Z",
+      "errorSummary": null
+    },
+    "web": null,
+    "tunnel": null,
+    "patchSync": {
+      "files": {}
+    },
+    "manualInstances": []
+  },
+  {
+    "name": "remote-no-dsh",
+    "local": false,
+    "sshInfo": {
+      "hostName": "no-dsh.example",
+      "user": "runner",
+      "port": 22
+    },
+    "orphaned": false,
+    "config": {
+      "local": false,
+      "enabled": true,
+      "autoStart": false,
+      "localPort": 17702,
+      "remoteWebPort": null,
+      "workdir": null,
+      "inject": {
+        "env": {},
+        "extraArgs": [],
+        "patches": []
+      }
+    },
+    "phase": "no_dsh",
+    "effectiveRemotePort": 8899,
+    "mappedUrl": null,
+    "probe": {
+      "dshPath": null,
+      "version": null,
+      "dshHome": null,
+      "profileWeb": false,
+      "noDshReason": "missing-bin",
+      "sniff": {
+        "paths": [],
+        "loginPath": null,
+        "version": null,
+        "probePath": "/usr/local/bin:/usr/bin:/bin"
+      },
+      "at": "2026-08-27T04:00:00.000Z",
+      "errorSummary": null
+    },
+    "web": null,
+    "tunnel": null,
+    "patchSync": {
+      "files": {}
+    },
+    "manualInstances": []
+  },
+  {
+    "name": "remote-orphaned",
+    "local": false,
+    "sshInfo": {
+      "hostName": "orphaned.example",
+      "user": "runner",
+      "port": 22
+    },
+    "orphaned": true,
+    "config": {
+      "local": false,
+      "enabled": true,
+      "autoStart": false,
+      "localPort": 17703,
+      "remoteWebPort": null,
+      "workdir": null,
+      "inject": {
+        "env": {},
+        "extraArgs": [],
+        "patches": []
+      }
+    },
+    "phase": "ready",
+    "effectiveRemotePort": 8899,
+    "mappedUrl": null,
+    "probe": {
+      "dshPath": "/usr/bin/dsh",
+      "version": "0.6.0",
+      "dshHome": "/home/runner/.dsh",
+      "profileWeb": true,
+      "noDshReason": null,
+      "sniff": {
+        "paths": ["/usr/bin/dsh"],
+        "loginPath": null,
+        "version": null,
+        "probePath": "/usr/local/bin:/usr/bin:/bin"
+      },
+      "at": "2026-08-27T04:00:00.000Z",
+      "errorSummary": null
+    },
+    "web": null,
+    "tunnel": null,
+    "patchSync": {
+      "files": {}
+    },
+    "manualInstances": []
+  },
+  {
+    "name": "remote-ready",
+    "local": false,
+    "sshInfo": {
+      "hostName": "ready.example",
+      "user": "runner",
+      "port": 22
+    },
+    "orphaned": false,
+    "config": {
+      "local": false,
+      "enabled": true,
+      "autoStart": false,
+      "localPort": null,
+      "remoteWebPort": 8899,
+      "workdir": null,
+      "inject": {
+        "env": {},
+        "extraArgs": [],
+        "patches": []
+      }
+    },
+    "phase": "ready",
+    "effectiveRemotePort": 8899,
+    "mappedUrl": null,
+    "probe": {
+      "dshPath": "/usr/bin/dsh",
+      "version": "0.6.0",
+      "dshHome": "/home/runner/.dsh",
+      "profileWeb": true,
+      "noDshReason": null,
+      "sniff": {
+        "paths": ["/usr/bin/dsh"],
+        "loginPath": null,
+        "version": null,
+        "probePath": "/usr/local/bin:/usr/bin:/bin"
+      },
+      "at": "2026-08-27T04:00:00.000Z",
+      "errorSummary": null
+    },
+    "web": null,
+    "tunnel": null,
+    "patchSync": {
+      "files": {}
+    },
+    "manualInstances": []
+  }
+]

@@ -522,7 +522,19 @@ body {
 .config-section { display: flex; flex-direction: column; gap: 8px; }
 .config-section h3 { margin: 0; font-size: 13px; color: var(--text-dim); font-weight: 600; }
 .drawer-actions { display: flex; gap: 10px; }
-.probe-detail h3, .dsh-settings-editor h3, .remote-log h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); font-weight: 600; }
+.probe-detail h3, .install-guide h3, .dsh-settings-editor h3, .remote-log h3 { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); font-weight: 600; }
+.install-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.install-guide-summary, .install-guide-steps { margin: 0; font-size: 12px; }
+.install-guide-steps { padding-left: 20px; }
+.install-guide-steps li { padding-left: 2px; overflow-wrap: anywhere; }
 .dsh-settings-editor {
   display: flex;
   min-width: 0;

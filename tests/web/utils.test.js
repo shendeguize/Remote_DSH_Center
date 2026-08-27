@@ -40,6 +40,13 @@ test('phaseBadge 兼容 phase 字符串与展示 meta', (t) => {
 
 test('phaseHint 呈现缺失原因与挂起原因', () => {
   assert.equal(phaseHint({ phase: 'no_dsh', probe: { noDshReason: 'missing-bin' } }), '远端未安装 dsh');
+  assert.equal(
+    phaseHint({
+      phase: 'no_dsh',
+      probe: { noDshReason: 'missing-bin', sniff: { paths: ['/root/.canon/node/bin/dsh'] } },
+    }),
+    '已检测到 dsh（不在非交互 PATH）',
+  );
   assert.equal(phaseHint({ phase: 'no_dsh', probe: { noDshReason: 'no-web-profile' } }), 'dsh 缺 web profile');
   assert.equal(phaseHint({ phase: 'unreachable', probe: { errorSummary: 'Host key verification failed' } }), 'Host key verification failed');
   assert.equal(phaseHint({ phase: 'degraded', tunnel: { suspendedReason: 'forward-disabled' } }), '远端禁止端口转发，已暂停重连');

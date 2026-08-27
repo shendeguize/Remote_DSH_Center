@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 主机探测新增非交互 PATH、常见用户态目录与受限 login shell 的 dsh 嗅探信息；
+  `dshc probe <host>` 和管理台 no_dsh 详情会给出场景化安装/配置指南。嗅探只用于诊断展示，
+  Center 仍不代装 dsh、web profile 或插件。
+
+### 文档
+
+- 使用手册新增 Agent Sidecar v0.7.0 下游集成契约：明确 C1–C5 清单、版本与远端
+  Python 兼容边界、`no_dsh` 与远端零安装/零常驻行为，并声明该集成不提供远端注入；
+  同时新增跨仓库 integration issue form，要求关联 Sidecar issue、双方版本、复现与期望行为。
+
 ## [0.5.2] - 2026-08-26
 
 ### 修复

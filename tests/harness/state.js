@@ -48,6 +48,10 @@ export function newHostState(overrides = {}) {
     dshVersion: '0.1.0-rc.7',
     dshHome: '/root/.dsh',
     profileWeb: true,
+    probePath: '/usr/local/bin:/usr/bin:/bin',
+    dshSniffPaths: [],
+    dshLoginPath: null,
+    dshSniffVersion: null,
     reachable: true,
     /** 最近一次 LAUNCH 收到的启动目录；null = 脚本里没有 cd 段。 */
     workdir: null,

@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import * as store from '../src/store.js';
 import {
-  applyProbe, interpretProbe, parseRunningBlock, probeHost, probeOnce,
+  applyProbe, interpretProbe, parseRunningBlock, parseSniffPaths, probeHost, probeOnce,
 } from '../src/prober.js';
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { _resetForTest } from '../src/lib/bus.js';
@@ -21,6 +21,13 @@ const READY_SAMPLE = [
   'DSH_VERSION=0.1.0-rc.7',
   'DSH_HOME=/root/.dsh',
   'PROFILE_WEB=yes',
+  'PROBE_PATH=/usr/local/bin:/usr/bin',
+  'DSH_SNIFF<<EOF',
+  '/home/test/.local/bin/dsh',
+  '/usr/local/bin/dsh',
+  'EOF',
+  'DSH_SNIFF_LOGIN=/home/test/.local/bin/dsh',
+  'DSH_SNIFF_VERSION=dsh 0.1.0-rc.7 (build abc)',
   'RUNNING_DSH_WEB<<EOF',
   ' 60768 dsh web --no-open --host 127.0.0.1 --port 8899',
   'EOF',
@@ -37,19 +44,34 @@ test('interpretProbe：ready 全字段', () => {
   assert.equal(r.dshHome, '/root/.dsh');
   assert.equal(r.profileWeb, true);
   assert.equal(r.noDshReason, null);
+  assert.deepEqual(r.sniff, {
+    paths: ['/home/test/.local/bin/dsh', '/usr/local/bin/dsh'],
+    loginPath: '/home/test/.local/bin/dsh',
+    version: 'dsh 0.1.0-rc.7 (build abc)',
+    probePath: '/usr/local/bin:/usr/bin',
+  });
   assert.deepEqual(r.manualInstances, [{ pid: 60768, args: 'dsh web --no-open --host 127.0.0.1 --port 8899' }]);
 });
 
 test('interpretProbe：no_dsh 两种原因可区分', () => {
-  const missing = interpretProbe(ok('DSH_BIN=MISSING\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
+  const missing = interpretProbe(ok('DSH_BIN=MISSING\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nDSH_SNIFF<<EOF\n/root/.canon/node/bin/dsh\nEOF\nDSH_SNIFF_LOGIN=/root/.canon/node/bin/dsh\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
   assert.equal(missing.phase, 'no_dsh');
   assert.equal(missing.noDshReason, 'missing-bin');
   assert.equal(missing.dshPath, null);
+  assert.deepEqual(missing.sniff.paths, ['/root/.canon/node/bin/dsh']);
+  assert.equal(missing.sniff.loginPath, '/root/.canon/node/bin/dsh');
 
   const noProfile = interpretProbe(ok('DSH_BIN=/usr/bin/dsh\nDSH_VERSION=0.1.0\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
   assert.equal(noProfile.phase, 'no_dsh');
   assert.equal(noProfile.noDshReason, 'no-web-profile');
   assert.equal(noProfile.dshPath, '/usr/bin/dsh', 'dsh 在，只是 profile 缺');
+});
+
+test('interpretProbe：旧版 PROBE 输出缺嗅探键时回退为空', () => {
+  const r = interpretProbe(ok('DSH_BIN=MISSING\nDSH_HOME=/root/.dsh\nPROFILE_WEB=no\nRUNNING_DSH_WEB<<EOF\nEOF\nPROBE_DONE=yes\n'));
+  assert.deepEqual(r.sniff, {
+    paths: [], loginPath: null, version: null, probePath: null,
+  });
 });
 
 test('interpretProbe：ssh 失败/超时 → unreachable，stderr 保留', () => {
@@ -82,6 +104,14 @@ test('parseRunningBlock：ps 行解析、忽略噪声行', () => {
   );
   assert.deepEqual(parseRunningBlock(''), []);
   assert.deepEqual(parseRunningBlock(null), []);
+});
+
+test('parseSniffPaths：按行收集命中路径并忽略空行', () => {
+  assert.deepEqual(
+    parseSniffPaths('\n /usr/local/bin/dsh \n\n/home/me/.local/bin/dsh\n'),
+    ['/usr/local/bin/dsh', '/home/me/.local/bin/dsh'],
+  );
+  assert.deepEqual(parseSniffPaths(null), []);
 });
 
 test('probeOnce：同一 PROBE 模板按 local 显式选择本机或 ssh 运输', async (t) => {
@@ -162,6 +192,12 @@ test('applyProbe：三分类正确写 phase 与 probe 详情', async (t) => {
   assert.equal(store.getPhase('gpu-1'), 'ready');
   const probe = store.getHostState('gpu-1').probe;
   assert.equal(probe.version, '0.1.0-rc.7');
+  assert.deepEqual(probe.sniff, {
+    paths: ['/home/test/.local/bin/dsh', '/usr/local/bin/dsh'],
+    loginPath: '/home/test/.local/bin/dsh',
+    version: 'dsh 0.1.0-rc.7 (build abc)',
+    probePath: '/usr/local/bin:/usr/bin',
+  });
   assert.equal(probe.errorSummary, null);
   assert.match(probe.at, /^\d{4}-/);
 

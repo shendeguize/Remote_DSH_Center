@@ -8,10 +8,34 @@ import test from 'node:test';
 
 import {
   COMMANDS, EXIT, TERMINAL, UsageError, assertCliSetupLocalIdentities, buildDefaultsPatchFor, buildHostPatchFor,
-  classifyConfigFile, coerceConfigValue, createSseParser, exitCodeFor, formatTable, parseArgv, parseSseFrame,
+  classifyConfigFile, coerceConfigValue, createSseParser, exitCodeFor, formatTable, installGuideLines, parseArgv, parseSseFrame,
   persistSetup, resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
 } from '../src/cli.js';
 import { newFactoryConfig, newHostConfig } from '../src/defaults.js';
+
+test('installGuideLines：probe 展开嗅探事实，其他动作只给单行入口', () => {
+  const host = {
+    name: 'gpu-1',
+    local: false,
+    phase: 'no_dsh',
+    probe: {
+      noDshReason: 'missing-bin',
+      sniff: {
+        paths: ['/root/.canon/node/bin/dsh'],
+        loginPath: '/root/.canon/node/bin/dsh',
+        version: 'dsh 0.1.1-rc.2',
+        probePath: '/usr/bin',
+      },
+    },
+  };
+
+  const full = installGuideLines(host);
+  assert.match(full[0], /安装指引/);
+  assert.match(full.join('\n'), /\/root\/\.canon\/node\/bin\/dsh/);
+  assert.match(full.join('\n'), /dshc probe gpu-1/);
+  assert.deepEqual(installGuideLines(host, { full: false }), ['查看安装指引：dshc probe gpu-1']);
+  assert.deepEqual(installGuideLines({ ...host, phase: 'ready' }), []);
+});
 
 test('update 的「已是最新」：跟着 rc 的人得看到新 rc，装正式版的人不受打扰', () => {
   assert.deepEqual(upToDateLines({ from: '0.1.0' }), ['已是最新：v0.1.0。']);

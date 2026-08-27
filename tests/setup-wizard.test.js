@@ -163,6 +163,20 @@ test('一路回车 = 出厂默认 + 全部纳管 + ready 自启', async () => {
   assert.equal(script.left, 0, '不该有多余提问');
 });
 
+test('向导探测到 no_dsh 时只打印安装指引入口', async () => {
+  const script = scriptedAsk(['', '', '', '', '', '']);
+  const lines = [];
+  await runSetupWizard({
+    ask: script.ask,
+    print: (line) => lines.push(line ?? ''),
+    current: newFactoryConfig(),
+    sshHosts: ['b-nodsh'],
+    probeHost: async () => ({ phase: 'no_dsh' }),
+  });
+
+  assert.ok(lines.includes('    查看安装指引：dshc probe b-nodsh'));
+});
+
 test('CLI init 候选把本机身份传给探测，并生成 local:true/localPort:null', async () => {
   const script = scriptedAsk(['', '', '', '', '', '']);
   const probed = {};

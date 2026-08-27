@@ -92,6 +92,18 @@ test('PROBE 三分类：ready / no_dsh(两种原因) / unreachable', async (t) =
   assert.match(badkey.stderr, /Host key verification failed/);
 });
 
+test('PROBE：非常规 login 路径仍进入 display-only 嗅探，不改变 no_dsh 判据', async (t) => {
+  const h = harnessFixture(t);
+  h.scenario('unusual', 'no-dsh-unusual-path');
+
+  const result = await probeOnce('unusual');
+  assert.equal(result.phase, 'no_dsh');
+  assert.equal(result.noDshReason, 'missing-bin');
+  assert.deepEqual(result.sniff.paths, ['/root/.canon/node/bin/dsh']);
+  assert.equal(result.sniff.loginPath, '/root/.canon/node/bin/dsh');
+  assert.equal(result.sniff.version, 'dsh 0.1.1-rc.2');
+});
+
 test('conn-timeout 场景触发 sshExec 强杀链', async (t) => {
   const h = harnessFixture(t);
   h.scenario('gpu-1', 'conn-timeout', 30_000);

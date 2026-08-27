@@ -65,6 +65,12 @@ test('hostPhaseHint 保留远端语义并细分本机失败原因', () => {
     '本机未安装 dsh',
   );
   assert.equal(
+    hostPhaseHint(host(true, 'no_dsh', {
+      probe: { noDshReason: 'missing-bin', sniff: { loginPath: '/root/.canon/node/bin/dsh' } },
+    })),
+    '本机已检测到 dsh（不在非交互 PATH）',
+  );
+  assert.equal(
     hostPhaseHint(host(true, 'no_dsh', { probe: { noDshReason: 'no-web-profile' } })),
     '本机 dsh 未配置 web profile',
   );

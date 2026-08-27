@@ -27,6 +27,7 @@ import { canonicalSetupLocalName } from './store.js';
 import {
   SETUP_STEPS, buildConfigFromAnswers, defaultAnswers, getByPath, normalizeHostCandidates, previewJson, setByPath,
 } from './web/setup-schema.js';
+import { buildInstallGuide } from './web/install-guide.js';
 
 // interrupted=130 是 shell 惯例（128+SIGINT）：脚本里要能把「我自己按了 Ctrl-C」
 // 和「这事真失败了」分开（issue #108）
@@ -429,6 +430,35 @@ function out(line = '') {
 
 function errOut(line) {
   process.stderr.write(`${line}\n`);
+}
+
+/**
+ * 为 no_dsh 主机生成 CLI 安装指引行。嗅探事实只进入展示，不改变 phase 或动作判据。
+ * @param {{name?:string,local?:boolean,phase?:string,probe?:object}} host
+ * @param {{full?:boolean}} [opts]
+ * @returns {string[]}
+ */
+export function installGuideLines(host, { full = true } = {}) {
+  if (host?.phase !== 'no_dsh') return [];
+  const name = host.name ?? '<host>';
+  if (!full) return [`查看安装指引：dshc probe ${name}`];
+
+  const probe = host.probe ?? {};
+  const guide = buildInstallGuide({
+    local: host.local === true,
+    noDshReason: probe.noDshReason,
+    sniff: probe.sniff,
+    dshHome: probe.dshHome,
+  });
+  const lines = [`安装指引：${guide.summary}`];
+  if (probe.sniff?.probePath) lines.push(`  非交互 PATH：${probe.sniff.probePath}`);
+  if (Array.isArray(probe.sniff?.paths) && probe.sniff.paths.length > 0) {
+    lines.push(`  检测到的 dsh：${probe.sniff.paths.join('、')}`);
+  }
+  if (probe.sniff?.loginPath) lines.push(`  login shell dsh：${probe.sniff.loginPath}`);
+  if (probe.sniff?.version) lines.push(`  嗅探版本：${probe.sniff.version}`);
+  lines.push(...guide.steps.map((step, i) => `  ${i + 1}. ${step.replaceAll('dshc probe <host>', `dshc probe ${name}`)}`));
+  return lines;
 }
 
 /** 等宽表格：中文按两格宽计，避免列错位。 */
@@ -887,7 +917,12 @@ async function cmdProbe(parsed) {
     }
     const picked = await pickHost(port, parsed.positionals[0]);
     if (!picked.ok) return picked.code;
-    return runAction(port, picked.name, 'probe', parsed);
+    const code = await runAction(port, picked.name, 'probe', parsed);
+    if (code === EXIT.ok) {
+      const host = (await fetchHosts(port)).find((item) => item.name === picked.name);
+      for (const line of installGuideLines(host)) out(line);
+    }
+    return code;
   });
 }
 
@@ -897,7 +932,16 @@ async function cmdHostAction(action, parsed) {
     if (!input) throw new UsageError(`dshc ${action} <host>`);
     const picked = await pickHost(port, input);
     if (!picked.ok) return picked.code;
-    return runAction(port, picked.name, action, parsed);
+    try {
+      return await runAction(port, picked.name, action, parsed);
+    } catch (err) {
+      if (action === 'start') {
+        const current = await fetchHosts(port).catch(() => []);
+        const host = current.find((item) => item.name === picked.name);
+        for (const line of installGuideLines(host, { full: false })) errOut(line);
+      }
+      throw err;
+    }
   });
 }
 
@@ -1172,6 +1216,9 @@ export async function runSetupWizard({
         const r = await probeHost(name, candidate);
         probeResults[name] = r;
         print(`  ${r.phase === 'ready' ? '✔' : '✘'} ${name}${candidate.local ? '（本机）' : ''}：${PHASE_LABEL[r.phase] ?? r.phase}`);
+        if (r.phase === 'no_dsh') {
+          print(`    查看安装指引：dshc probe ${name}`);
+        }
       } catch (err) {
         probeResults[name] = { phase: 'unreachable' };
         print(`  ✘ ${name}${candidate.local ? '（本机）' : ''}：探测失败（${err.message}）`);

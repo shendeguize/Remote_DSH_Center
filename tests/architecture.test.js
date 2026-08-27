@@ -222,6 +222,11 @@ test('setup-schema 是双侧共用的纯模块：零 import', () => {
   assert.deepEqual(importsOf(file), [], 'CLI 与页面都要能直接吃它，不能带任何依赖');
 });
 
+test('install-guide 是双侧共用的纯模块：零 import', () => {
+  const file = path.join(SRC, 'web', 'install-guide.js');
+  assert.deepEqual(importsOf(file), [], 'CLI 与页面都要能直接吃安装指引，不能带任何依赖');
+});
+
 // ── plugin 例外边界：plugin/ 是零依赖底线的唯一例外，边界钉死在这四条里 ──────
 
 /** plugin 闸门要跨 .mjs 与 package.json，与上面只收 .js 的 walk 分开。 */

@@ -105,6 +105,14 @@ export const SCENARIOS = {
   /** dsh 未安装 → no_dsh(missing-bin)。 */
   'no-dsh-missing-bin': () => newHostState({ dshInstalled: false }),
 
+  /** dsh 只在非常规 login PATH 中 → no_dsh，但嗅探应发现它。 */
+  'no-dsh-unusual-path': () => newHostState({
+    dshInstalled: false,
+    dshSniffPaths: ['/root/.canon/node/bin/dsh'],
+    dshLoginPath: '/root/.canon/node/bin/dsh',
+    dshSniffVersion: 'dsh 0.1.1-rc.2',
+  }),
+
   /** dsh 在但 web profile 未配置 → no_dsh(no-web-profile)。 */
   'no-dsh-no-profile': () => newHostState({ profileWeb: false }),
 

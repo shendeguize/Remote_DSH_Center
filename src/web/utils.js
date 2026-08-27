@@ -23,10 +23,19 @@ export function phaseMeta(phase) {
 
 const NO_DSH_REASON = { 'missing-bin': '远端未安装 dsh', 'no-web-profile': 'dsh 缺 web profile' };
 
+function hasSniffedDsh(host) {
+  return host?.probe?.noDshReason === 'missing-bin'
+    && (host.probe.sniff?.loginPath
+      || (Array.isArray(host.probe.sniff?.paths) && host.probe.sniff.paths.length > 0));
+}
+
 /** 状态徽章下方的一行补充说明（缺失原因、挂起原因、orphaned…）。 */
 export function phaseHint(host) {
   if (!host) return '';
-  if (host.phase === 'no_dsh') return NO_DSH_REASON[host.probe?.noDshReason] ?? '';
+  if (host.phase === 'no_dsh') {
+    if (hasSniffedDsh(host)) return '已检测到 dsh（不在非交互 PATH）';
+    return NO_DSH_REASON[host.probe?.noDshReason] ?? '';
+  }
   if (host.phase === 'unreachable') return host.probe?.errorSummary ?? '';
   if (host.tunnel?.suspendedReason === 'forward-disabled') return '远端禁止端口转发，已暂停重连';
   if (host.tunnel?.suspendedReason === 'local-port-busy') return '本机端口被占，已暂停重连';

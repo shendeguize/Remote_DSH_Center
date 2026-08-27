@@ -69,9 +69,15 @@ export const hostView = V.obj({
     dshHome: V.nullable(V.str()),
     profileWeb: V.bool(),
     noDshReason: V.nullable(V.enum_(['missing-bin', 'no-web-profile'])),
+    sniff: V.obj({
+      paths: V.arr(V.str()),
+      loginPath: V.nullable(V.str()),
+      version: V.nullable(V.str()),
+      probePath: V.nullable(V.str()),
+    }),
     at: iso,
     errorSummary: V.nullable(V.str()),
-  })),
+  }, { optional: ['sniff'] })),
   web: V.nullable(V.obj({
     pid: V.int({ min: 1 }),
     port,

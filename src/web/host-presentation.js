@@ -22,6 +22,12 @@ const LOCAL_NO_DSH_HINT = Object.freeze({
   'no-web-profile': '本机 dsh 未配置 web profile',
 });
 
+function hasSniffedDsh(host) {
+  return host?.probe?.noDshReason === 'missing-bin'
+    && (host.probe.sniff?.loginPath
+      || (Array.isArray(host.probe.sniff?.paths) && host.probe.sniff.paths.length > 0));
+}
+
 function frozenCopy(value) {
   return Object.freeze({ ...value });
 }
@@ -40,6 +46,7 @@ export function hostPhaseMeta(host) {
 export function hostPhaseHint(host) {
   if (!isLocalHost(host)) return phaseHint(host);
   if (host?.phase === 'no_dsh') {
+    if (hasSniffedDsh(host)) return '本机已检测到 dsh（不在非交互 PATH）';
     return LOCAL_NO_DSH_HINT[host.probe?.noDshReason] ?? '';
   }
   if (host?.phase === 'unreachable') {

@@ -22,6 +22,7 @@ import {
 } from '../form.js';
 import { HOST_WEB_RESTART_NOTICE } from '../actions.js';
 import { hostMappingSummary, hostPhaseMeta } from '../host-presentation.js';
+import { buildInstallGuide } from '../install-guide.js';
 
 const LOG_LINES = 200;
 const REMOTE_CONFIG_NOTE = 'dsh Web 在目标主机运行；没有桌面环境也不影响内嵌页面。需要编辑 settings.yaml 时可直接使用下方“dsh 配置文件”编辑器，无需通过 SSH。';
@@ -262,6 +263,13 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   const probeDl = el('dl.kv');
   const probeTitle = el('h3', { text: '探测详情' });
+  const probeGuideSummary = el('p.install-guide-summary');
+  const probeGuideSteps = el('ol.install-guide-steps');
+  const probeGuide = el('section.install-guide', { hidden: true }, [
+    el('h3', { text: '安装与配置指引' }),
+    probeGuideSummary,
+    probeGuideSteps,
+  ]);
 
   const settingsTextareaId = 'drawer-dsh-settings-content';
   const settingsTextarea = el('textarea.dsh-settings-content', {
@@ -396,6 +404,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     conflict,
     form,
     el('section.probe-detail', {}, [probeTitle, probeDl]),
+    probeGuide,
     settingsSection,
     el('section.remote-log', {}, [
       logTitle,
@@ -914,6 +923,12 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       ['版本', text(probe?.version)],
       ['web profile', probe ? String(probe.profileWeb) : DASH],
       ['DSH_HOME', text(probe?.dshHome)],
+      ['非交互 PATH', text(probe?.sniff?.probePath)],
+      ['检测到的 dsh', Array.isArray(probe?.sniff?.paths) && probe.sniff.paths.length > 0
+        ? probe.sniff.paths.join('\n')
+        : DASH],
+      ['login shell 检测', text(probe?.sniff?.loginPath)],
+      ['嗅探版本', text(probe?.sniff?.version)],
       ['最近探测', probe?.at ? fmtAgo(probe.at) : DASH],
       [copy.effectivePortLabel, text(host.effectiveRemotePort)],
       ['本机映射', hostMappingSummary(host).url ?? DASH],
@@ -923,6 +938,27 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
     ];
     if (probe?.errorSummary) rows.push(['探测错误', probe.errorSummary]);
     for (const [k, v] of rows) probeDl.append(el('dt', { text: k }), el('dd', { text: v }));
+
+    if (host.phase === 'no_dsh') {
+      const guide = buildInstallGuide({
+        local: host.local === true,
+        noDshReason: probe?.noDshReason,
+        sniff: probe?.sniff,
+        dshHome: probe?.dshHome,
+      });
+      probeGuideSummary.textContent = guide.summary;
+      clear(probeGuideSteps);
+      for (const step of guide.steps) {
+        probeGuideSteps.append(el('li', {
+          text: step.replaceAll('dshc probe <host>', `dshc probe ${host.name}`),
+        }));
+      }
+      probeGuide.hidden = false;
+    } else {
+      probeGuide.hidden = true;
+      clear(probeGuideSteps);
+      probeGuideSummary.textContent = '';
+    }
   }
 
   // ── 日志 ─────────────────────────────────────────────────────────────

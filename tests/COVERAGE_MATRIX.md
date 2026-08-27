@@ -41,8 +41,9 @@
 | 协议 / 分支 | 覆盖 |
 |---|---|
 | PROBE 模板逐字一致 | `tests/lib/proto.test.js` §1.1 |
-| PROBE → ready（dsh 路径/版本/web profile） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-01 |
-| PROBE → no_dsh（缺二进制 / 缺 web profile 两种原因） | `tests/harness/harness.test.js`、`tests/prober.test.js` |
+| PROBE → ready（dsh 路径/版本/web profile/嗅探字段） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-01 |
+| PROBE → no_dsh（缺二进制 / 缺 web profile 两种原因 + 非交互 PATH 嗅探） | `tests/harness/harness.test.js`、`tests/prober.test.js` |
+| PROBE 嗅探结果只作诊断，旧输出回退为空 | `tests/prober.test.js`、`tests/web/install-guide.test.js` |
 | PROBE → unreachable（ssh 失败 / 超时 / 输出截断缺哨兵） | `tests/lib/ssh.test.js`、`tests/prober.test.js`、IT-01 |
 | PROBE 发现手动实例（RUNNING_DSH_WEB → manualInstances） | `tests/harness/harness.test.js`、`tests/prober.test.js`、IT-05（拒杀演练） |
 | PROBE 不把自己那层 `sh -c` 记成手动实例（`$$` 排除；假 `ps` 一并回放调用方自身那行，否则测不出自匹配） | `tests/harness/harness.test.js`（ready 与 no_dsh 两态）、`tests/lib/proto.test.js` §1.1 |
@@ -140,6 +141,7 @@
 | `SCN:settings-write-unknown` | `tests/integration/settings.test.js`（兼容 unknown-after-commit 场景名） |
 | `SCN:settings-change-before-second-cas` | `tests/integration/settings.test.js`（backup 后外部改写，二次 CAS 拒绝覆盖） |
 | `SCN:no-dsh-missing-bin` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
+| `SCN:no-dsh-unusual-path` | `tests/harness/harness.test.js`、`tests/integration/cli.test.js` |
 | `SCN:no-dsh-no-profile` | 同上 |
 | `SCN:unreachable` | 同上 + IT-01 |
 | `SCN:hostkey-fail` | `tests/harness/harness.test.js` |
@@ -160,6 +162,7 @@
 |---|---|
 | 全部 REST 响应逐一过 schema 校验 | `tests/contract/schemas.js` 接入 `tests/integration/*.test.js` |
 | 契约漂移检测（改名 / 多键 / 枚举越界 / null 语义 / 时间戳形态） | `tests/contract/schemas.test.js` |
+| DSH Center → Agent Sidecar C2 字段/类型、C3 资格语义、C4 config/state 最小回退结构 | `tests/contract/agent-sidecar-consumer.test.js`、`tests/contract/fixtures/ls-json.v1.json` |
 | 202 受理体（accepted + operationId uuid v4） | `tests/contract/schemas.test.js`、`tests/integration/flows.test.js` |
 | SSE snapshot 首帧 / 心跳 / 断开摘除 / debounce 合并 | `tests/api.test.js`、`tests/integration/sse.test.js` |
 | SSE revision 单调 + 帧类型白名单 | `tests/integration/sse.test.js`、`tests/contract/schemas.test.js` |
