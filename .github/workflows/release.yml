@@ -299,7 +299,7 @@ jobs:
   npm-smoke:
     needs: [build, publish]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
 
@@ -307,27 +307,39 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
 
-      # registry 传播有延迟：装不上不等于没发上，循环重试后仍装不上才红
-      - name: 从 registry 装回来（≤10 次、每次隔 30s）
+      # 先查精确版本元数据，再安装；短间隔起步、有限退避，避免固定 30s
+      # 把正常传播等待浪费掉，同时给 npm registry 足够的最终一致性时间。
+      - name: 等待 registry 可见精确版本（≤12 次，有界退避）
         env:
+          PACKAGE: '@shendeguize/remote-dsh-center'
+          REGISTRY: 'https://registry.npmjs.org'
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          for attempt in $(seq 1 10); do
-            if npm i -g "@shendeguize/remote-dsh-center@$VERSION"; then
-              echo "第 $attempt 次尝试装上 @shendeguize/remote-dsh-center@$VERSION"
-              exit 0
+          set -euo pipefail
+          delays=(5 10 20 30 45 60 60 60 60 60 60 60)
+          for attempt in "${!delays[@]}"; do
+            version="$(npm view --prefer-online --registry "$REGISTRY" "$PACKAGE@$VERSION" version 2>/dev/null || true)"
+            if [ "$version" = "$VERSION" ]; then
+              echo "registry 已可见 $PACKAGE@$VERSION（第 $((attempt + 1)) 次查询）"
+              break
             fi
-            echo "registry 还没有 @shendeguize/remote-dsh-center@$VERSION（第 $attempt/10 次），30s 后再试"
-            sleep 30
+            echo "registry 还没有 $PACKAGE@$VERSION（第 $((attempt + 1))/${#delays[@]} 次），${delays[$attempt]}s 后再查"
+            sleep "${delays[$attempt]}"
           done
-          echo "::error::重试 10 次仍装不到 @shendeguize/remote-dsh-center@$VERSION——发布没生效或传播异常"
-          exit 1
+          test "$version" = "$VERSION" || {
+            echo "::error::registry 在等待窗口内仍没有 $PACKAGE@$VERSION——发布没生效或传播异常"
+            exit 1
+          }
 
       - name: 冒烟断言：dshc version --json 自证 npm 通道
         env:
+          PACKAGE: '@shendeguize/remote-dsh-center'
+          REGISTRY: 'https://registry.npmjs.org'
           VERSION: ${{ needs.build.outputs.version }}
         run: |
+          npm install --global --prefer-online --registry "$REGISTRY" "$PACKAGE@$VERSION"
           dshc version --json > "$RUNNER_TEMP/version.json"
           cat "$RUNNER_TEMP/version.json"
 

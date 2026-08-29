@@ -1482,6 +1482,26 @@ test('Release 在发布 tar.gz 前生成 GitHub 构建溯源证明', () => {
   assert.match(chunk, /^ {6}attestations:\s*write\s*$/m, message);
 });
 
+test('npm 发布冒烟先轮询精确版本，再从固定 registry 安装验证', () => {
+  const release = workflowRecords().find(({ name }) => name === '.github/workflows/release.yml');
+  assert.ok(release, '缺少主体 release workflow');
+  const smoke = workflowJobChunks(release.text).find(({ id }) => id === 'npm-smoke');
+  assert.ok(smoke, 'release workflow 缺少 npm-smoke job');
+  assert.match(smoke.text, /^\s{4}timeout-minutes:\s*15\s*$/m);
+  assert.match(smoke.text, /registry-url:\s*'https:\/\/registry\.npmjs\.org'/);
+
+  const steps = workflowStepChunks(smoke.text);
+  const waitAt = steps.findIndex((step) => workflowStepRun(step).includes('npm view'));
+  const installAt = steps.findIndex((step) => workflowStepRun(step).includes('npm install --global'));
+  assert.ok(waitAt >= 0, 'npm-smoke 必须先查询 registry 元数据');
+  assert.ok(installAt > waitAt, '必须在精确版本可见后再安装');
+  const waitScript = workflowStepRun(steps[waitAt]);
+  assert.match(waitScript, /--prefer-online/);
+  assert.match(waitScript, /delays=\(5 10 20 30 45 60 60 60 60 60 60 60\)/);
+  assert.match(waitScript, /test "\$version" = "\$VERSION"/);
+  assert.match(workflowStepRun(steps[installAt]), /--registry "\$REGISTRY"/);
+});
+
 test('required check 与 PR 上真会跑的矩阵一致（改一边忘另一边就红）', () => {
   const ruleset = JSON.parse(fs.readFileSync(path.join(ROOT, '.github', 'rulesets', 'main.json'), 'utf8'));
   const checks = ruleset.rules.find((r) => r.type === 'required_status_checks');
