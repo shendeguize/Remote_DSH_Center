@@ -97,6 +97,24 @@ zipapp。不要把 `pipx install agent-sidecar` 当作 PyPI 发布承诺。Sidec
 `send` 是独立的本机、显式授权写路径；Sidecar 的 DSH 注入也只存在于其可选 DSH 插件，
 不由本仓库的远端清单集成提供。验收远端链路只允许 hello-world 级别的非注入检查。
 
+### Pod 本地 E2E 插件拓扑（显式操作路径）
+
+若用户另行部署 AgentSideCar 的 E2E 脚本，远端可以形成
+`dsh web + AgentSideCar daemon + agent-sidecar DSH plugin` 的组合。此时：
+
+- Center 仍只负责一次性 SSH 控制、`dsh web` 启停和 `ssh -L` 页面隧道；
+- 插件通过 pod 本地 Unix socket 观察 daemon，并在 pod 本地执行经过确认的
+  `inject.prepare` / `inject.execute`；消息不会经 Center 或本机转发；
+- Center 的 host `inject.env` 只能为 `dsh web` 提供启动环境（例如 PATH），
+  不代表会话注入授权，也不应放置密钥；
+- `scripts/deploy-to-pod.sh` 属于 AgentSideCar 的操作员路径，不是 Center
+  安装器；它负责 rsync、插件构建、daemon readiness 以及受保护的 Copilot
+  子进程环境包装。
+
+因此“Center 远端不注入”与“pod 上用户显式开启的 Sidecar 插件可本地注入”
+是两个不冲突的契约。需要复现该组合时，应同时记录 Center 映射状态和插件
+二阶段回执，不能把 Center 的 launch inject 当成 agent session inject。
+
 ### 报告与跨仓库迭代
 
 - DSH Center 侧请使用
