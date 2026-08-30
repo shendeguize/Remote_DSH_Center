@@ -114,6 +114,27 @@ local-only write path; Sidecar's DSH injection exists only in its optional DSH p
 provided by this repository's remote inventory integration. Remote acceptance may use only a
 hello-world-level non-injection check.
 
+### Pod-local E2E plugin topology (explicit operator path)
+
+If an operator separately deploys AgentSideCar's E2E tooling, the remote host can run the
+combination `dsh web + AgentSideCar daemon + agent-sidecar DSH plugin`. In that topology:
+
+- Center still only performs one-shot SSH control, starts/stops `dsh web`, and carries the page
+  over an `ssh -L` tunnel.
+- The plugin observes the daemon over the pod-local Unix socket and performs confirmed
+  `inject.prepare` / `inject.execute` actions locally on the pod; messages do not pass through
+  Center or the local workstation.
+- Center's host `inject.env` only supplies startup environment to `dsh web` (for example PATH);
+  it is not session-injection authorization and must not contain secrets.
+- `scripts/deploy-to-pod.sh` belongs to AgentSideCar's operator workflow, not the Center
+  installer. It handles rsync, plugin builds, daemon readiness, and the protected Copilot
+  child-process environment wrapper.
+
+Therefore, “Center does not inject remotely” and “a user-explicitly enabled Sidecar plugin can
+inject locally on the pod” are separate, compatible contracts. To reproduce this topology,
+record both the Center mapping state and the plugin's two-phase receipt; do not describe
+Center's launch `inject` as agent-session injection.
+
 ### Reporting and cross-repository iteration
 
 - On the DSH Center side, use the

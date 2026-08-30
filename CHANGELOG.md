@@ -4,21 +4,13 @@
 不记实现细节。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本语义见 [CONTRIBUTING.md](CONTRIBUTING.md#版本语义)。
 
-## [0.6.0] - 2026-08-27
-
-### 新增
-
-- 主机探测新增非交互 PATH、常见用户态目录与受限 login shell 的 dsh 嗅探信息；
-  `dshc probe <host>` 和管理台 no_dsh 详情会给出场景化安装/配置指南。嗅探只用于诊断展示，
-  Center 仍不代装 dsh、web profile 或插件。
+## [Unreleased]
 
 ### 文档
 
-- 使用手册新增 Agent Sidecar v0.7.0 下游集成契约：明确 C1–C5 清单、版本与远端
-  Python 兼容边界、`no_dsh` 与远端零安装/零常驻行为，并声明该集成不提供远端注入；
-  同时新增跨仓库 integration issue form，要求关联 Sidecar issue、双方版本、复现与期望行为。
-
-## [Unreleased]
+- 补齐英文手册的 “Pod-local E2E plugin topology (explicit operator path)” 节，
+  与中文手册对齐，明确 Center 的 SSH/tunnel 控制面、pod 本地 Sidecar 插件注入面
+  和 `scripts/deploy-to-pod.sh` 的归属边界。
 
 ## [0.7.1] - 2026-08-29
 
@@ -44,6 +36,20 @@
 - 真机验收收尾不再使用宽匹配 `pkill -f "dsh web"`，改为按本轮 PID 与完整命令行指纹
   逐字核对后停止，指纹不符时拒杀并记证。
 - 修复真机验收在共享节点端口占用、已有 launchd plist 或 patch 残留时无法安全重跑的路径。
+
+## [0.6.0] - 2026-08-27
+
+### 新增
+
+- 主机探测新增非交互 PATH、常见用户态目录与受限 login shell 的 dsh 嗅探信息；
+  `dshc probe <host>` 和管理台 no_dsh 详情会给出场景化安装/配置指南。嗅探只用于诊断展示，
+  Center 仍不代装 dsh、web profile 或插件。
+
+### 文档
+
+- 使用手册新增 Agent Sidecar v0.7.0 下游集成契约：明确 C1–C5 清单、版本与远端
+  Python 兼容边界、`no_dsh` 与远端零安装/零常驻行为，并声明该集成不提供远端注入；
+  同时新增跨仓库 integration issue form，要求关联 Sidecar issue、双方版本、复现与期望行为。
 
 ## [0.5.2] - 2026-08-26
 
