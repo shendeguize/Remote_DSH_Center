@@ -255,6 +255,10 @@ body {
 
 .table-scroll { overflow-x: auto; }
 .host-table { width: 100%; border-collapse: collapse; }
+.host-group-row { cursor: default !important; }
+.host-group-row td { padding: 4px 10px; background: var(--surface-2); }
+.host-group-row[data-collapsed="true"] td { opacity: 0.75; }
+.host-group-toggle { min-width: 132px; text-align: left; }
 .host-table th, .host-table td {
   text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
 }
@@ -263,10 +267,12 @@ body {
 .host-table tbody tr:hover { background: var(--surface-2); }
 .host-table tbody tr:focus-visible { outline: 2px solid var(--ready); outline-offset: -2px; }
 .host-table small { display: block; color: var(--text-dim); font-size: 11px; }
+.host-sort-button { color: inherit; font-weight: inherit; }
 .host-cell strong { font-weight: 600; }
 .dsh-cell, .mapping-cell, .pid-cell { font-family: var(--mono); font-size: 12px; }
 .mono-link { font-family: var(--mono); color: var(--ready); }
 .row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.host-table .row-actions { flex-wrap: nowrap; min-width: 260px; white-space: nowrap; }
 
 .tag {
   display: inline-block; margin-top: 2px; padding: 0 5px;
@@ -534,6 +540,16 @@ body {
 .install-guide-summary, .install-guide-steps { margin: 0; font-size: 12px; }
 .install-guide-steps { padding-left: 20px; }
 .install-guide-steps li { padding-left: 2px; overflow-wrap: anywhere; }
+.install-guide-checklist { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.install-guide-check { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; }
+.install-guide-check > div:first-child { display: grid; grid-template-columns: max-content max-content 1fr; gap: 6px; align-items: baseline; }
+.install-guide-check small { grid-column: 1 / -1; color: var(--text-dim); }
+.install-guide-check-status { color: var(--degraded); font-size: 11px; }
+.install-guide-check[data-status="pass"] .install-guide-check-status { color: var(--running); }
+.install-guide-check[data-status="optional"] .install-guide-check-status { color: var(--text-dim); }
+.install-guide-command { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.install-guide-command code { flex: 1; min-width: 0; padding: 2px 4px; overflow-wrap: anywhere; background: var(--surface); font: 11px var(--mono); }
+.install-guide-copy { flex: none; }
 .dsh-settings-editor {
   display: flex;
   min-width: 0;

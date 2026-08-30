@@ -656,7 +656,15 @@ export function setTunnelStatusProvider(fn) {
 // ── state 读写 ──────────────────────────────────────────────────────────
 
 function ensureHostState(name) {
-  state.hosts[name] ??= { phase: 'unknown', probe: null, web: null, tunnel: null, patchSync: { files: {} }, manualInstances: [] };
+  state.hosts[name] ??= {
+    phase: 'unknown',
+    dshPath: null,
+    probe: null,
+    web: null,
+    tunnel: null,
+    patchSync: { files: {} },
+    manualInstances: [],
+  };
   return state.hosts[name];
 }
 
@@ -746,6 +754,7 @@ export function getHostView(name) {
       local,
       enabled: hostConfig.enabled,
       autoStart: hostConfig.autoStart,
+      dshPath: hostConfig.dshPath ?? null,
       localPort: hostConfig.localPort,
       remoteWebPort: hostConfig.remoteWebPort,
       // 下次拉起生效值；本次实例的实际值在 web.workdir，两者不等即「重启后生效」
@@ -759,7 +768,7 @@ export function getHostView(name) {
     phase,
     effectiveRemotePort: effectiveRemotePort(name),
     mappedUrl: tunnelUsable ? `http://127.0.0.1:${localPort}/` : null,
-    probe: st.probe ?? null,
+    probe: st.probe ? { ...st.probe, dshPath: st.dshPath ?? st.probe.dshPath ?? null } : null,
     // workdir/cwd 补 null：上一代 manager 写的 state 里没有这两个键（补丁 01 §5.2）
     web: st.web ? { ...st.web, workdir: st.web.workdir ?? null, cwd: st.web.cwd ?? null } : null,
     tunnel: tunnelRuntime

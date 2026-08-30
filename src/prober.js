@@ -15,6 +15,7 @@ import * as store from './store.js';
  * @typedef {{ok:boolean, phase:'ready'|'no_dsh'|'unreachable', dshPath:string|null,
  *   version:string|null, dshHome:string|null, profileWeb:boolean, runningRaw:string,
  *   sniff:{paths:string[], loginPath:string|null, version:string|null, probePath:string|null},
+ *   dependencies:{binary:boolean, webProfile:boolean, bash:boolean, timeout:boolean},
  *   noDshReason:'missing-bin'|'no-web-profile'|null, stderr:string,
  *   manualInstances:{pid:number,args:string}[]}} ProbeResult
  */
@@ -69,6 +70,12 @@ export function interpretProbe(res, { local = false } = {}) {
       version: null,
       probePath: null,
     },
+    dependencies: {
+      binary: false,
+      webProfile: false,
+      bash: false,
+      timeout: false,
+    },
     noDshReason: null,
     stderr: failureStderr,
     manualInstances: [],
@@ -90,6 +97,12 @@ export function interpretProbe(res, { local = false } = {}) {
   const manualInstances = parseRunningBlock(runningRaw);
   const dshHome = kvOne(out, 'DSH_HOME');
   const profileWeb = kvOne(out, 'PROFILE_WEB') === 'yes';
+  const dependencies = {
+    binary: Boolean(bin && bin !== 'MISSING'),
+    webProfile: profileWeb,
+    bash: kvOne(out, 'HAS_BASH') === 'yes',
+    timeout: kvOne(out, 'HAS_TIMEOUT') === 'yes',
+  };
   const sniff = {
     paths: parseSniffPaths(out.blocks.DSH_SNIFF),
     loginPath: kvOne(out, 'DSH_SNIFF_LOGIN') || null,
@@ -105,6 +118,7 @@ export function interpretProbe(res, { local = false } = {}) {
       dshHome,
       runningRaw,
       manualInstances,
+      dependencies,
       sniff,
       stderr: '',
     };
@@ -118,6 +132,7 @@ export function interpretProbe(res, { local = false } = {}) {
     profileWeb,
     runningRaw,
     manualInstances,
+    dependencies,
     sniff,
     stderr: '',
   };
@@ -133,8 +148,11 @@ export function interpretProbe(res, { local = false } = {}) {
  * 「操作收敛到 server」的前提不成立，见 11 §1.3 例外条款）。
  * @returns {Promise<ProbeResult>}
  */
-export async function probeOnce(host, { local = false, timeoutMs, signal } = {}) {
-  const command = buildProbeScript();
+export async function probeOnce(host, { local = false, timeoutMs, signal, dshPath } = {}) {
+  const configuredPath = dshPath === undefined
+    ? (store.getHostView(host)?.config?.dshPath ?? null)
+    : dshPath;
+  const command = buildProbeScript({ dshPath: configuredPath });
   const res = local
     ? await localExec(command, { timeoutMs, signal })
     : await sshExec(host, command, { timeoutMs, signal });
@@ -185,10 +203,12 @@ export function applyProbe(name, result) {
       dshHome: result.dshHome,
       profileWeb: result.profileWeb,
       sniff: result.sniff,
+      dependencies: result.dependencies,
       noDshReason: result.noDshReason,
       at: new Date().toISOString(),
       errorSummary: result.phase === 'unreachable' ? summarize(result.stderr) : null,
     };
+    entry.dshPath = result.dshPath;
     entry.manualInstances = manual;
   });
 
@@ -205,7 +225,11 @@ export function applyProbe(name, result) {
  */
 export function probeAll(names = null) {
   const targets = (names ?? store.listHostNames())
-    .filter((name) => !store.getHostView(name)?.orphaned || store.getHostView(name)?.local);
+    .filter((name) => {
+      const view = store.getHostView(name);
+      return view?.config?.enabled !== false
+        && (!view?.orphaned || view?.local);
+    });
   // 有闸：主机一多，无闸的扇出会把共用跳板机的 MaxStartups 打爆（issue #85）
   return mapPool(targets, (name) => probeHost(name).catch((err) => {
     const e = asDshError(err);

@@ -263,7 +263,7 @@ async function tailQuiet(host, logName, signal, local) {
  * S0–S5 全路径。S0（patch 同步）由调用方在此之前完成。
  *
  * @param {string} host
- * @param {{port:number, env?:Record<string,string>, extraArgs?:string[], patchRemoteNames?:string[],
+ * @param {{port:number, dshPath:string, env?:Record<string,string>, extraArgs?:string[], patchRemoteNames?:string[],
  *          workdir?:string|null}} spec workdir=null 表示不注入 cd（远端 $HOME 启动）
  * @returns {Promise<{pid:number, actualPort:number, logName:string, fingerprint:string, cwd:string|null}>}
  * @throws {DshError} LAUNCH_FAILED（detail 含一到两份日志尾）
@@ -434,6 +434,10 @@ export function start(name) {
 
       launched = await runLaunchSequence(name, {
         port: remotePort,
+        dshPath: view.config.dshPath
+          ?? view.probe?.dshPath
+          ?? store.getHostState(name)?.dshPath
+          ?? '/usr/bin/dsh',
         env: view.config.inject.env,
         extraArgs: view.config.inject.extraArgs,
         patchRemoteNames: sync.remoteNames,

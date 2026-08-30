@@ -157,7 +157,7 @@ test('键盘激活 ready 标签后，starting 状态一到就接管焦点', asyn
 test('键盘链路：表格行回车进主机 → Esc 关抽屉 → 焦点回到触发处', async (t) => {
   const { dom } = await mount(t, { hosts: [running('gpu-1'), hostView('gpu-2')] });
 
-  const row = dom.app.querySelector('.host-table tbody tr');
+  const row = dom.app.querySelector('.host-table tbody tr[data-host]');
   assert.equal(row.getAttribute('tabindex'), '0', '行必须可聚焦');
   row.focus();
   key(row, 'Enter');
@@ -175,7 +175,7 @@ test('键盘链路：表格行回车进主机 → Esc 关抽屉 → 焦点回到
 
 test('抽屉注入配置内的 dsh Workspace 使用 h4 子标题层级', async (t) => {
   const { dom } = await mount(t, { hosts: [running('gpu-1')] });
-  dom.app.querySelector('.host-table tbody tr').click();
+  dom.app.querySelector('.host-table tbody tr[data-host]').click();
   await flush();
 
   const drawer = dom.app.querySelector('.host-drawer');
@@ -199,7 +199,7 @@ test('抽屉注入配置内的 dsh Workspace 使用 h4 子标题层级', async (
  */
 test('焦点在抽屉外时 Esc 也能关抽屉', async (t) => {
   const { dom } = await mount(t, { hosts: [running('gpu-1')] });
-  const row = dom.app.querySelector('.host-table tbody tr');
+  const row = dom.app.querySelector('.host-table tbody tr[data-host]');
   row.focus();
   key(row, 'Enter');
   await flush();
@@ -222,7 +222,7 @@ test('焦点在抽屉外时 Esc 也能关抽屉', async (t) => {
  */
 test('有改动时的 Esc：摘掉原生默认动作，框开着时不再插手', async (t) => {
   const { dom } = await mount(t);
-  dom.app.querySelector('.host-table tbody tr').click();
+  dom.app.querySelector('.host-table tbody tr[data-host]').click();
   await flush();
 
   const drawer = dom.app.querySelector('.host-drawer');
@@ -259,7 +259,7 @@ test('抽屉开着时后景 inert，关掉后恢复可交互', async (t) => {
   });
   assert.equal(background.some((n) => Boolean(n.inert)), false);
 
-  const row = dom.app.querySelector('.host-table tbody tr');
+  const row = dom.app.querySelector('.host-table tbody tr[data-host]');
   row.focus();
   key(row, 'Enter');
   await flush();
@@ -294,7 +294,7 @@ test('抽屉/确认框模态期间 Center toast 仍可关闭和复制', async (t
   assert.ok(controls().length >= 3, '带详情 toast 应有展开、复制与关闭控件');
   assert.equal(controls().some((node) => node.disabled), false);
 
-  dom.app.querySelector('.host-table tbody tr').click();
+  dom.app.querySelector('.host-table tbody tr[data-host]').click();
   await flush();
   const drawer = dom.app.querySelector('.host-drawer');
   assert.equal(Boolean(region.inert), false, '模态期间仍须保留 aria-live 通知');
@@ -355,7 +355,7 @@ test('状态更新不许把表内焦点甩掉：同一控件还在就留在它�
   });
   await flush();
 
-  const rowOf = (name) => dom.app.querySelectorAll('.host-table tbody tr').find((r) => r.dataset.host === name);
+  const rowOf = (name) => dom.app.querySelectorAll('.host-table tbody tr[data-host]').find((r) => r.dataset.host === name);
   const btnOf = (name, label) => rowOf(name).querySelectorAll('button').find((b) => b.textContent === label);
 
   // 焦点在 gpu-2 的行上，更新的是 gpu-1——凭什么动我
@@ -384,7 +384,7 @@ test('触发控件在更新后消失时，焦点退到它所在的那一行', as
   });
   await flush();
 
-  const row = () => dom.app.querySelector('.host-table tbody tr');
+  const row = () => dom.app.querySelector('.host-table tbody tr[data-host]');
   const stop = row().querySelectorAll('button').find((b) => b.textContent === '关停');
   assert.ok(stop, '运行中的主机该有关停键');
   stop.focus();
@@ -407,7 +407,7 @@ test('同名控件还在但已禁用时，焦点退到那一行而不是白焦�
   });
   await flush();
 
-  const row = () => dom.app.querySelector('.host-table tbody tr');
+  const row = () => dom.app.querySelector('.host-table tbody tr[data-host]');
   const probe = row().querySelectorAll('button').find((b) => b.textContent === '探测');
   probe.focus();
 

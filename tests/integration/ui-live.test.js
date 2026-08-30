@@ -613,7 +613,7 @@ test('#/manage 批量同步：真 preview 不落盘，apply 经 SSE/REST/store �
         inject: { env: { OLD: 'yes' }, extraArgs: ['--old'], patches: ['old.patch'] },
       },
       'target-b': {
-        remoteWebPort: 19_901,
+        remoteWebPort: 19_903,
         workdir: '~/source-workdir',
         inject: sharedInject,
       },
@@ -637,7 +637,8 @@ test('#/manage 批量同步：真 preview 不落盘，apply 经 SSE/REST/store �
   entry.click();
   const dialog = dom.app.querySelector('.config-sync-dialog');
   assert.equal(dialog.open, true);
-  for (const name of ['target-a', 'target-b']) {
+  assert.equal(dialog.querySelector('[data-host="target-a"]'), null, '批量同步不得展示禁用目标');
+  for (const name of ['target-b']) {
     const target = dialog.querySelector(`[data-host="${name}"]`);
     target.checked = true;
     target.dispatchEvent({ type: 'change' });
@@ -652,12 +653,11 @@ test('#/manage 批量同步：真 preview 不落盘，apply 经 SSE/REST/store �
   const previewRequest = requests.find((request) => request.path === '/api/hosts/sync-config');
   assert.deepEqual(JSON.parse(previewRequest.body), {
     source: 'source',
-    targets: ['target-a', 'target-b'],
+    targets: ['target-b'],
     dryRun: true,
   });
   assert.deepEqual((await ctx.get('/api/config')).json, before, 'preview 必须完全只读');
-  assert.match(dialog.querySelector('.config-sync-results').textContent, /target-a.*将变更/s);
-  assert.match(dialog.querySelector('.config-sync-results').textContent, /target-b.*无需变更/s);
+  assert.match(dialog.querySelector('.config-sync-results').textContent, /target-b.*将变更/s);
   assert.doesNotMatch(dialog.textContent, /server-only-value|--source|source\.patch/,
     '预览只能显示字段名，不能泄漏配置值');
 
@@ -675,22 +675,24 @@ test('#/manage 批量同步：真 preview 不落盘，apply 经 SSE/REST/store �
     dryRun: applyBody.dryRun,
   }, {
     source: 'source',
-    targets: ['target-a', 'target-b'],
+    targets: ['target-b'],
     dryRun: false,
   });
   assert.match(applyBody.previewToken, /^v1\.[A-Za-z0-9_-]+$/, 'apply 必须带 preview 返回的 opaque token');
   const changedFrame = await events.wait((frame) => frame.type === 'host-changed'
-    && frame.data.host.name === 'target-a'
+    && frame.data.host.name === 'target-b'
     && frame.data.host.config.workdir === '~/source-workdir');
   const after = (await ctx.get('/api/config')).json;
-  assert.deepEqual(after.hosts['target-a'].inject, sharedInject);
-  assert.equal(after.hosts['target-a'].remoteWebPort, 19_901);
-  assert.equal(after.hosts['target-a'].workdir, '~/source-workdir');
+  assert.deepEqual(after.hosts['target-b'].inject, sharedInject);
+  assert.equal(after.hosts['target-b'].remoteWebPort, 19_901);
+  assert.equal(after.hosts['target-b'].workdir, '~/source-workdir');
+  assert.equal(after.hosts['target-a'].remoteWebPort, 19_902);
+  assert.equal(after.hosts['target-a'].workdir, '~/old-workdir');
   assert.equal(after.hosts['target-a'].enabled, false);
   assert.equal(after.hosts['target-a'].autoStart, true);
   assert.equal(after.hosts['target-a'].localPort, 17_777);
   assert.deepEqual(changedFrame.data.host.config.inject, sharedInject);
-  assert.deepEqual(app.store.getHost('target-a').config.inject, sharedInject);
+  assert.deepEqual(app.store.getHost('target-b').config.inject, sharedInject);
   assert.match(dom.app.querySelector('.toast-success').textContent, /已同步 1 台主机配置/);
   assert.equal(dialog.querySelector('.config-sync-apply').disabled, true);
 

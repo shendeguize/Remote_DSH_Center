@@ -222,7 +222,7 @@ test('settings 不受 ready/no_dsh/disabled/crashed 限制，且旧 PROBE 分类
   const expectedPhases = {
     ready: 'ready',
     'no-dsh': 'no_dsh',
-    disabled: 'ready',
+    disabled: 'unknown',
     crashed: 'crashed',
   };
   for (const name of Object.keys(expectedPhases)) {
@@ -248,8 +248,8 @@ test('settings 不受 ready/no_dsh/disabled/crashed 限制，且旧 PROBE 分类
   }
 
   const calls = ctx.harness.transportCalls();
-  assert.deepEqual(calls.slice(0, 4).map((call) => call.kind), ['probe', 'probe', 'probe', 'probe']);
-  assert.deepEqual(calls.slice(4).map((call) => call.kind), [
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.kind), ['probe', 'probe', 'probe']);
+  assert.deepEqual(calls.slice(3).map((call) => call.kind), [
     'settings-read',
     'settings-write',
     'settings-read',

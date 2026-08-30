@@ -14,6 +14,7 @@ import {
 } from './router.js';
 import { button, clear, el } from './utils.js';
 import { hostPhaseMeta } from './host-presentation.js';
+import { isHostEnabled } from './host-rules.js';
 import { createConfirmDialog } from './components/confirm-dialog.js';
 import { createConfigSyncDialog } from './components/config-sync-dialog.js';
 import { createDefaultsCard } from './components/defaults-card.js';
@@ -175,7 +176,9 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     const writable = store.canWrite();
     probeAllBtn.disabled = !writable || store.isPending('probe-all');
     reloadBtn.disabled = !writable || store.isPending('config:reload');
-    configSyncBtn.disabled = !writable || store.listHosts().length < 2 || store.isPending('config:sync');
+    configSyncBtn.disabled = !writable
+      || store.listHosts().filter(isHostEnabled).length < 2
+      || store.isPending('config:sync');
   };
   store.on('connection:changed', syncConnection);
   store.on('pending:changed', syncConnection);

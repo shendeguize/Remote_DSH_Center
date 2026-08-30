@@ -150,6 +150,18 @@ test('configSchema：workdir 可缺省（旧 config 兼容），给了就必须�
   }
 });
 
+test('configSchema：dshPath 可选但只能是绝对路径', () => {
+  const valid = goodConfig();
+  valid.hosts['gpu-1'].dshPath = '/opt/dsh/bin/dsh';
+  assert.equal(validate(configSchema, valid).ok, true);
+
+  for (const value of ['dsh', './dsh', 'relative/path', '/tmp/dsh\n--bad']) {
+    const invalid = goodConfig();
+    invalid.hosts['gpu-1'].dshPath = value;
+    assert.match(validate(configSchema, invalid).errors.join(), /dshPath/);
+  }
+});
+
 test('stateSchema 宽松模式：允许 12 §4.4 的增补字段', () => {
   const state = {
     hosts: {

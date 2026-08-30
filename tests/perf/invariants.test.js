@@ -46,7 +46,9 @@ const RTT_MS = 120;
  * @param {string[]} names
  * @param {{faults?:object, state?:object}} [opts]
  */
-async function fixture(t, names, { faults = { slowReplyMs: RTT_MS }, state = null } = {}) {
+async function fixture(t, names, {
+  faults = { slowReplyMs: RTT_MS }, state = null, disabledNames = [],
+} = {}) {
   const hosts = Object.fromEntries(names.map((n) => [n, newHostState({ faults })]));
   const harness = createHarness({ hosts });
   const restore = harness.activate();
@@ -58,7 +60,7 @@ async function fixture(t, names, { faults = { slowReplyMs: RTT_MS }, state = nul
     defaults: { remoteWebPort: 8899, localPortRange: [17701, 17799] },
     hosts: Object.fromEntries(names.map((n, i) => [n, {
       local: false,
-      enabled: true,
+      enabled: !disabledNames.includes(n),
       autoStart: false,
       localPort: null,
       remoteWebPort: 8899 + i,
@@ -164,6 +166,16 @@ test(`probeAll 30 台：ssh 恰好 30 次，在飞峰值 ≤ ${FANOUT_CAP}`, asy
     `在飞峰值 ${stats.peak} 超过扇出闸 ${FANOUT_CAP}——真机上这些连接会被跳板机随机掐断`
     + `\n在飞序列：${stats.sequence.join(',')}`,
   );
+});
+
+test('probeAll 跳过禁用主机，手动 probeHost 仍可探测', async (t) => {
+  const names = ['disabled', 'enabled'];
+  const harness = await fixture(t, names, { disabledNames: ['disabled'] });
+
+  const settled = await probeAll(names);
+  assert.equal(settled.length, 1);
+  assert.equal(harness.transportCalls().filter((event) => event.kind === 'probe').length, 1);
+  assert.equal(harness.transportCalls().find((event) => event.kind === 'probe').host, 'enabled');
 });
 
 test('mapPool 的峰值就是 limit：不多不少，且结果按入参顺序', async () => {

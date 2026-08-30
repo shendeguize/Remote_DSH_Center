@@ -5,7 +5,7 @@
  * 只在 config 真变了时给冲突提示（UI-26）。
  */
 
-import { DASH, button, clear, el, fmtAgo, phaseBadge, text } from '../utils.js';
+import { DASH, button, clear, copyText, el, fmtAgo, phaseBadge, text } from '../utils.js';
 import {
   buildHostPatch,
   deepEqual,
@@ -14,6 +14,7 @@ import {
   formatEnvLines,
   formatLines,
   input,
+  parseDshPath,
   parseEnvLines,
   parseLines,
   parsePort,
@@ -26,7 +27,7 @@ import { buildInstallGuide } from '../install-guide.js';
 
 const LOG_LINES = 200;
 const REMOTE_CONFIG_NOTE = 'dsh Web 在目标主机运行；没有桌面环境也不影响内嵌页面。需要编辑 settings.yaml 时可直接使用下方“dsh 配置文件”编辑器，无需通过 SSH。';
-const DRAFT_FIELDS = ['enabled', 'remoteWebPort', 'workdir', 'env', 'extraArgs', 'patches'];
+const DRAFT_FIELDS = ['enabled', 'dshPath', 'remoteWebPort', 'workdir', 'env', 'extraArgs', 'patches'];
 const SETTINGS_UNKNOWN_CODES = new Set([
   'SSH_TIMEOUT',
   'SSH_UNREACHABLE',
@@ -38,6 +39,7 @@ const SETTINGS_UNKNOWN_CODES = new Set([
 ]);
 const DRAFT_FIELD_LABELS = {
   enabled: '纳管状态',
+  dshPath: 'dsh 路径',
   remoteWebPort: 'web 端口',
   workdir: '启动目录',
   env: '环境变量',
@@ -54,6 +56,7 @@ const DRAFT_FIELD_LABELS = {
 export function draftOf(config) {
   return {
     enabled: Boolean(config?.enabled),
+    dshPath: config?.dshPath ?? '',
     remoteWebPort: config?.remoteWebPort == null ? '' : String(config.remoteWebPort),
     workdir: config?.workdir ?? '',
     env: formatEnvLines(config?.inject?.env),
@@ -140,6 +143,10 @@ export function workspaceRegistrationState(host, {
 
 function comparableField(draft, key) {
   if (key === 'enabled') return Boolean(draft.enabled);
+  if (key === 'dshPath') {
+    const parsed = parseDshPath(draft.dshPath);
+    return parsed.ok ? parsed.value : draft.dshPath;
+  }
   if (key === 'remoteWebPort') {
     const parsed = parsePort(draft.remoteWebPort, { allowEmpty: true });
     return parsed.ok ? parsed.value : draft.remoteWebPort;
@@ -223,6 +230,11 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const conflict = el('p.card-notice', { hidden: true });
 
   const enabled = field('纳管此主机', input('checkbox', false));
+  const dshPath = field(
+    'dsh 路径（可选）',
+    input('text', '', { placeholder: '留空按探测优先级自动解析', spellcheck: 'false' }),
+    { hint: '须为绝对路径；优先级高于非交互 PATH、常见目录嗅探和 login shell。' },
+  );
   const remotePort = field('远端 web 端口', input('number', '', { min: '1', max: '65535', placeholder: '留空 = 用全局默认' }));
   const workdir = field(
     '启动目录（进程 CWD）',
@@ -256,7 +268,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const env = field('环境变量（每行 KEY=VALUE）', input('textarea', '', { rows: '4', spellcheck: 'false' }));
   const extraArgs = field('追加参数（每行一项，不做 shell 拆词）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
   const patches = field('Patch 文件（每行一个本机绝对路径）', input('textarea', '', { rows: '3', spellcheck: 'false' }));
-  const fields = [enabled, remotePort, workdir, env, extraArgs, patches];
+  const fields = [enabled, dshPath, remotePort, workdir, env, extraArgs, patches];
 
   const saveBtn = button('保存', { variant: 'primary', compact: false, onClick: submit });
   const cancelBtn = button('放弃修改', { compact: false, onClick: () => resetDraft() });
@@ -265,9 +277,12 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   const probeTitle = el('h3', { text: '探测详情' });
   const probeGuideSummary = el('p.install-guide-summary');
   const probeGuideSteps = el('ol.install-guide-steps');
+  const probeGuideChecks = el('ul.install-guide-checklist');
   const probeGuide = el('section.install-guide', { hidden: true }, [
     el('h3', { text: '安装与配置指引' }),
     probeGuideSummary,
+    el('p.section-note', { text: '以下是基于本次探测的依赖清单。命令仅可复制，不会由 Center 执行安装。' }),
+    probeGuideChecks,
     probeGuideSteps,
   ]);
 
@@ -341,7 +356,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   // 有校验器的字段（键名对齐 buildHostPatch 的 errors）
   const validated = {
-    remoteWebPort: remotePort, workdir, env, patches,
+    dshPath, remoteWebPort: remotePort, workdir, env, patches,
   };
 
   // 离开字段就把它自己的校验结果说出来，不必等到点保存（issue #30）。
@@ -374,6 +389,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       el('p.section-note', { text: '本区改动保存后在下次拉起时生效，不影响正在跑的实例。' }),
       remoteConfigNote,
       workdir.root,
+      dshPath.root,
       workspaceSection,
       env.root,
       extraArgs.root,
@@ -430,6 +446,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
   function readForm() {
     return {
       enabled: enabled.input.checked,
+      dshPath: dshPath.input.value,
       remoteWebPort: remotePort.input.value,
       workdir: workdir.input.value,
       env: env.input.value,
@@ -440,6 +457,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
 
   function writeForm(draft) {
     enabled.input.checked = draft.enabled;
+    dshPath.input.value = draft.dshPath ?? '';
     remotePort.input.value = draft.remoteWebPort === null ? '' : String(draft.remoteWebPort);
     workdir.input.value = draft.workdir ?? '';
     env.input.value = draft.env;
@@ -945,8 +963,34 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
         noDshReason: probe?.noDshReason,
         sniff: probe?.sniff,
         dshHome: probe?.dshHome,
+        dependencies: probe?.dependencies,
       });
       probeGuideSummary.textContent = guide.summary;
+      clear(probeGuideChecks);
+      for (const check of guide.checks ?? []) {
+        const commandNodes = (check.commands ?? []).map((command) => {
+          const copy = button('复制', {
+            onClick: async () => {
+              if (await copyText(command)) copy.textContent = '已复制';
+            },
+          });
+          copy.classList.add('install-guide-copy');
+          return el('div.install-guide-command', {}, [
+            el('code', { text: command }),
+            copy,
+          ]);
+        });
+        probeGuideChecks.append(el('li.install-guide-check', { dataset: { status: check.status } }, [
+          el('div', {}, [
+            el('strong', { text: check.label }),
+            el('span.install-guide-check-status', {
+              text: check.status === 'pass' ? '通过' : check.status === 'optional' ? '可选' : '待处理',
+            }),
+            el('small', { text: check.detail }),
+          ]),
+          ...commandNodes,
+        ]));
+      }
       clear(probeGuideSteps);
       for (const step of guide.steps) {
         probeGuideSteps.append(el('li', {
@@ -956,6 +1000,7 @@ export function createHostDrawer({ store, actions, confirm, setBackgroundInert =
       probeGuide.hidden = false;
     } else {
       probeGuide.hidden = true;
+      clear(probeGuideChecks);
       clear(probeGuideSteps);
       probeGuideSummary.textContent = '';
     }
