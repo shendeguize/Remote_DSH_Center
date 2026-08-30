@@ -500,6 +500,23 @@ Center 产品路径；它只可按授权安装 zstd/用户态 Sidecar，绝不�
 bootstrap 自身时使用 `bash scripts/bootstrap-remote.sh --deep <ssh-host>`，随后再执行一次普通
 bootstrap 和验收。
 
+五 agent 的 Sidecar/plugin 矩阵使用独立操作员入口，不会被普通 `npm test` 自动触发：
+
+```bash
+npm run acceptance:matrix -- --host <ssh-host> --timeout 180000 --parallel 2
+npm run acceptance:matrix -- --fixture
+npm run acceptance:matrix -- --dry-run
+```
+
+矩阵默认覆盖 `claude,codex,copilot,kimi,dsh`，会在真实运行前 fresh scan SSH
+配置，复用 Center 隧道读取 pod 本地插件状态，并按 `inject.prepare` →
+`inject.execute` 核对真实回执。`--parallel`、`--timeout`、`--remote-dir` 和
+`--report-dir` 均有界；证据只保留 agent、脱敏 session hash、状态、delivery、
+outcome 和 error code，不保存消息、confirm token、凭据、完整 session ID 或原始
+路径。Kimi `delivery=unknown` 是不可重试的合同结果；DSH persisted preset 的
+`dsh_preset_unsupported`/HTTP 409 同样只记录为结果，不会被伪造为成功。`--fixture`
+和 `--dry-run` 只验证编排，不计入真实通过。
+
 CI 在 Ubuntu PR 上跑必需的 `npm run check`，合入 main 后在 macOS 复跑；Ubuntu 自带 Chrome，
 浏览器关必须真跑。macOS 未找到 Chrome 时该关可跳过；本机可用 `DSHC_CHROME=<路径>` 指定。
 

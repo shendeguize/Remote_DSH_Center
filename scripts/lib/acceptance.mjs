@@ -79,6 +79,44 @@ export function compareEvidence(previous, current) {
 }
 
 export function renderEvidenceMarkdown(report) {
+  if (report.matrix) {
+    const lines = [
+      `# 五 agent Sidecar/plugin 矩阵 — ${report.tier ?? 'full'}`,
+      '',
+      `- run: \`${report.runId}\``,
+      `- started: ${report.startedAt}`,
+      `- finished: ${report.finishedAt ?? '未结束'}`,
+      `- host: \`${report.host}\``,
+      `- result: **${report.ok ? 'PASS' : 'BLOCK/FAIL'}**`,
+      `- remote dir: \`${report.remoteDir ?? 'unknown'}\``,
+      '',
+      '## 环境',
+      '',
+      '| 项 | 值 |',
+      '|---|---|',
+      `| Center | ${report.versions?.center ?? 'unknown'} |`,
+      `| dsh | ${report.versions?.remoteDsh ?? 'unknown'} |`,
+      `| 重试总数 | ${report.retryCount ?? 0} |`,
+      '',
+      '## Agent 结果',
+      '',
+      '| Agent | 模式 | session hash | prepare | execute | delivery | outcome | error |',
+      '|---|---|---|---:|---:|---|---|---|',
+    ];
+    for (const item of report.cases ?? []) {
+      lines.push(`| ${item.agent} | ${item.mode} | ${item.sessionSha12 ?? 'none'} | ${item.prepare} | ${item.execute} | ${item.delivery} | ${item.outcome} | ${item.errorCode ?? ''} |`);
+    }
+    lines.push('', '## 漂移告警', '');
+    if (report.drift?.length) {
+      for (const item of report.drift) lines.push(`- ${item}`);
+    } else {
+      lines.push('- 无');
+    }
+    lines.push('', '## 合同结果', '');
+    lines.push('- Kimi `delivery=unknown` 是终态，不自动重试。');
+    lines.push('- DSH persisted preset 的 HTTP 409 / `dsh_preset_unsupported` 是 fail-closed 合同结果。');
+    return `${lines.join('\n')}\n`;
+  }
   const lines = [
     `# 真机验收报告 — ${report.tier ?? 'full'}`,
     '',

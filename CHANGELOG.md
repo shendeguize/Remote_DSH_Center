@@ -12,6 +12,15 @@
   与中文手册对齐，明确 Center 的 SSH/tunnel 控制面、pod 本地 Sidecar 插件注入面
   和 `scripts/deploy-to-pod.sh` 的归属边界。
 
+### 新增
+
+- 新增 `acceptance:matrix` 五 agent 操作员验收入口，默认覆盖
+  `claude`、`codex`、`copilot`、`kimi` 和 `dsh`，提供有界并行/超时、fresh SSH
+  scan、两阶段插件注入回执和脱敏 JSON/Markdown 证据；fixture/dry-run 不计入真实通过。
+- 矩阵会在缺少 DSH 会话时通过官方 `session.create` / `session.prompt` 创建测试
+  会话，并将 persisted preset 导致的 `dsh_preset_unsupported` / HTTP 409 作为
+  fail-closed 合同结果保留，不自动清除 preset 或重试。
+
 ## [0.7.1] - 2026-08-29
 
 ### 修复
