@@ -546,13 +546,17 @@ function diffPaths(a, b, prefix = '') {
  * 启动/reload 时并入 ssh config 清单：新主机以 hostDefaults 写入 config；
  * config 有而 ssh config 无 → 内存标记 orphaned（不持久化，不删配置）。
  * @param {{name:string, hostName?:string, user?:string, port?:number}[]} sshHosts
+ * @param {{skipAdding?:Iterable<string}} [options] names explicitly removed by this reload
  */
-export function mergeSshHosts(sshHosts) {
+export function mergeSshHosts(sshHosts, { skipAdding = [] } = {}) {
   const nextSshInfo = new Map(sshHosts.map((h) => [h.name, h]));
+  const skipped = new Set(skipAdding);
   assertNoLocalSshConflict(config, nextSshInfo);
   sshInfoByName = nextSshInfo;
 
-  const added = sshHosts.filter((h) => !Object.hasOwn(config.hosts, h.name)).map((h) => h.name);
+  const added = sshHosts
+    .filter((h) => !skipped.has(h.name) && !Object.hasOwn(config.hosts, h.name))
+    .map((h) => h.name);
   if (added.length > 0) {
     updateConfig((draft) => {
       draft.hosts = {
@@ -566,6 +570,34 @@ export function mergeSshHosts(sshHosts) {
     .filter((n) => config.hosts[n]?.local !== true && !sshInfoByName.has(n)));
   for (const name of orphaned) emitHostChanged(name);
   return { added, orphaned: [...orphaned] };
+}
+
+/**
+ * 删除当前 SSH 配置中已经消失的主机。
+ *
+ * 名单在同一个同步调用里拍快照，并在 mutator 内再次按 orphaned 集合筛选，
+ * 因此本接口不会把新出现的 SSH 主机或仍在配置里的正常主机误删。
+ * @returns {string[]} 实际删除的主机名
+ */
+export function clearOrphanedHosts() {
+  const names = [...orphaned].filter((name) => Object.hasOwn(config?.hosts ?? {}, name));
+  if (names.length === 0) return [];
+
+  const namesSet = new Set(names);
+  updateConfig((draft) => {
+    for (const name of namesSet) {
+      if (orphaned.has(name)) delete draft.hosts[name];
+    }
+  });
+  for (const name of names) {
+    dropHostState(name);
+    orphaned.delete(name);
+  }
+  return names;
+}
+
+export function listOrphanedHostNames() {
+  return [...orphaned].sort();
 }
 
 /**

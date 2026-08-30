@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import * as store from '../src/store.js';
-import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
+import { CONFIG_VERSION, newHostConfig, resolvePaths } from '../src/defaults.js';
 import { bus, _resetForTest } from '../src/lib/bus.js';
 
 function fixture(t, { config, state } = {}) {
@@ -391,6 +391,25 @@ test('mergeSshHosts：新主机进 config，消失的标 orphaned 但不删配�
   assert.deepEqual(r2.orphaned, ['gpu-2']);
   assert.ok('gpu-2' in store.getConfig().hosts, 'orphaned 不删配置');
   assert.equal(store.getHostView('gpu-2').orphaned, true);
+});
+
+test('clearOrphanedHosts：原子删除配置、调用 state 清理且不影响本机主机', async (t) => {
+  const { paths } = fixture(t, { config: fullConfig() });
+  await store.init({ pathsOverride: paths });
+  store.mergeSshHosts([{ name: 'gpu-1' }]);
+  store.updateConfig((draft) => {
+    draft.hosts.local = { ...newHostConfig(), local: true, localPort: null };
+  });
+  store.mutateHostState('gpu-1', (entry) => { entry.marker = 'orphan-state'; });
+  store.mergeSshHosts([]);
+
+  assert.deepEqual(store.listOrphanedHostNames(), ['gpu-1']);
+  assert.deepEqual(store.clearOrphanedHosts(), ['gpu-1']);
+  assert.equal(store.getConfig().hosts['gpu-1'], undefined);
+  assert.equal(store.getHostState('gpu-1'), null);
+  assert.ok(store.getHostView('local')?.local);
+  assert.deepEqual(store.listOrphanedHostNames(), []);
+  assert.equal(JSON.parse(fs.readFileSync(paths.config, 'utf8')).hosts['gpu-1'], undefined);
 });
 
 test('reloadConfig 重读外部改动并给出 changed 清单', async (t) => {

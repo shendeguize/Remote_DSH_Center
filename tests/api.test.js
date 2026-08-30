@@ -35,6 +35,7 @@ import {
   assertShape,
   hostConfigPutResponse,
   localHostCreateResponse,
+  orphanedClearResponse,
   settingsReadResponse,
   settingsWriteResponse,
   syncConfigResponse,
@@ -1166,4 +1167,62 @@ test('dispose 后不再收总线事件（防测试间串味与内存泄漏）', 
   logEvent(null, 'info', 'dispose 之后');
   await new Promise((r) => { setTimeout(r, 10); });
   assert.equal(c.frames().length, before);
+});
+
+test('orphaned 主机拒绝远程动作，但允许读取主机清单与本地配置', async (t) => {
+  const ctx = await bootServer(t, {
+    skipBoot: true,
+    hosts: { source: newHostState(), target: newHostState() },
+  });
+  store.mergeSshHosts([]);
+
+  for (const [method, pathName, body] of [
+    ['POST', '/api/hosts/source/start', {}],
+    ['POST', '/api/hosts/source/probe', {}],
+    ['POST', '/api/hosts/source/stop', {}],
+    ['POST', '/api/hosts/source/restart', {}],
+    ['POST', '/api/hosts/source/reconnect', {}],
+    ['GET', '/api/hosts/source/log', undefined],
+    ['GET', '/api/hosts/source/dsh-settings', undefined],
+    ['POST', '/api/hosts/source/dsh-workspace', {}],
+  ]) {
+    // eslint-disable-next-line no-await-in-loop -- 每个远程动作都须独立验证硬闸
+    const res = await ctx.api(method, pathName, body);
+    assert.equal(res.status, 409, `${method} ${pathName}: ${res.text}`);
+    assert.equal(res.json.code, 'NOT_ALLOWED');
+    assert.match(res.json.error, /ssh config 已消失/u);
+  }
+
+  const patch = await ctx.api('PUT', '/api/hosts/source/config', { enabled: false });
+  assert.equal(patch.status, 200, patch.text);
+  const hosts = await ctx.get('/api/hosts');
+  assert.equal(hosts.status, 200);
+  assert.ok(hosts.json.hosts.some((host) => host.name === 'source' && host.orphaned));
+});
+
+test('orphaned 清理只删除当前 orphaned，调用 state 清理并保留 local 主机', async (t) => {
+  const ctx = await bootServer(t, { skipBoot: true });
+  const local = await ctx.api('POST', '/api/hosts/local', { name: 'workstation' });
+  assert.equal(local.status, 201, local.text);
+  store.mutateHostState('gpu-1', (entry) => { entry.marker = 'must-drop'; });
+  store.mergeSshHosts([]);
+
+  const res = await ctx.api('POST', '/api/hosts/clear-orphaned');
+  assertRest(res, { status: 200, schema: orphanedClearResponse, label: 'POST clear-orphaned' });
+  assert.deepEqual(res.json.removed, ['gpu-1']);
+  assert.equal(store.getHostState('gpu-1'), null);
+  assert.equal(store.getHostView('gpu-1'), null);
+  assert.ok(store.getHostView('workstation')?.local);
+  assert.ok((await ctx.get('/api/config')).json.hosts.workstation.local);
+});
+
+test('POST /api/reload 重新读取 SSH 配置并返回刷新后的 orphaned 集合', async (t) => {
+  const ctx = await bootServer(t, { skipBoot: true });
+  fs.writeFileSync(ctx.harness.sshConfigPath, '');
+
+  const res = await ctx.api('POST', '/api/reload');
+  assert.equal(res.status, 200, res.text);
+  assert.ok(Array.isArray(res.json.orphaned));
+  assert.deepEqual(res.json.orphaned, ['gpu-1']);
+  assert.equal((await ctx.get('/api/config')).json.hosts['gpu-1'] !== undefined, true);
 });

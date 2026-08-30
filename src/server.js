@@ -178,7 +178,10 @@ async function postSetupBoot() {
 
 /** state 里 running/degraded 的主机各自队列内并行复核（§3.1 第 4–5 步）。 */
 async function recoverState() {
-  const targets = store.listHostNames().filter((n) => ['running', 'degraded'].includes(store.getPhase(n)));
+  const targets = store.listHostNames().filter((n) => (
+    !store.getHostView(n)?.orphaned
+    && ['running', 'degraded'].includes(store.getPhase(n))
+  ));
   if (targets.length === 0) return [];
   logEvent(null, 'info', `恢复复核 ${targets.length} 台主机`);
   const results = await mapPool(targets, (n) => launcher.recoverOne(n), SSH_FANOUT_LIMIT);
@@ -193,7 +196,8 @@ export async function runAutoStart() {
   const cfg = store.getConfig();
   const targets = store.listHostNames().filter((n) => {
     const host = cfg.hosts[n];
-    return host?.enabled && host?.autoStart && store.getPhase(n) === 'ready';
+    return !store.getHostView(n)?.orphaned
+      && host?.enabled && host?.autoStart && store.getPhase(n) === 'ready';
   });
   if (targets.length === 0) return [];
   logEvent(null, 'info', `autoStart：${targets.join(', ')}`);

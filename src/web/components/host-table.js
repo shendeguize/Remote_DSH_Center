@@ -29,11 +29,18 @@ export function createHostTable({ store, actions }) {
   });
   addLocalButton.dataset.act = 'add-local';
   addLocalButton.setAttribute('aria-label', '添加本机');
+  const clearOrphanedButton = button('清空 orphaned', {
+    variant: 'danger',
+    onClick: () => actions.clearOrphaned(),
+  });
+  clearOrphanedButton.classList.add('clear-orphaned');
+  clearOrphanedButton.dataset.act = 'clear-orphaned';
+  clearOrphanedButton.setAttribute('aria-label', '清空 orphaned 主机');
 
   const root = el('section.card.host-table-card', {}, [
     el('header.card-header', {}, [
       el('h2', { text: '主机' }),
-      el('div.row-actions', {}, [countLabel, localName.root, addLocalButton]),
+      el('div.row-actions', {}, [countLabel, clearOrphanedButton, localName.root, addLocalButton]),
     ]),
     el('div.table-scroll', {}, [
       el('table.host-table', {}, [
@@ -54,6 +61,13 @@ export function createHostTable({ store, actions }) {
     const showAddLocal = loaded && !hasLocal;
     const addLocalDisabled = !showAddLocal || !store.canWrite() || store.isPending('local:create');
     countLabel.textContent = hosts.length > 0 ? `${hosts.length} 台` : '';
+    const orphanedCount = hosts.filter((host) => !host.local && host.orphaned).length;
+    clearOrphanedButton.disabled = orphanedCount === 0
+      || !store.canWrite()
+      || store.isPending('orphaned:clear');
+    clearOrphanedButton.title = orphanedCount === 0
+      ? '没有需要清空的 orphaned 主机'
+      : (!store.canWrite() ? '与 manager 失联，写操作已暂停' : '删除配置中的 orphaned 条目并清理运行记录');
     localName.root.hidden = !showAddLocal;
     localName.input.disabled = addLocalDisabled;
     addLocalButton.hidden = !showAddLocal;
@@ -188,7 +202,11 @@ export function createHostTable({ store, actions }) {
       if (action === 'open') {
         return markAct('open', button(ACTION_LABEL.open, {
           variant: 'primary',
-          // 「打开」是读操作：断线与 pending 都不禁用（10 §3.2）
+          disabled: !writable || (!host.local && host.orphaned),
+          title: !writable
+            ? '与 manager 失联，写操作已暂停'
+            : ((!host.local && host.orphaned) ? 'ssh config 已消失，远程主机不可打开' : null),
+          // 「打开」通常是读操作；orphaned 没有可验证的远端身份，不能打开旧映射。
           onClick: (e) => {
             e.stopPropagation();
             actions.openHost(host.name);
@@ -197,8 +215,10 @@ export function createHostTable({ store, actions }) {
       }
       return markAct(action, button(ACTION_LABEL[action], {
         variant: action === 'stop' ? 'danger' : 'default',
-        disabled: busy || !writable,
-        title: !writable ? '与 manager 失联，写操作已暂停' : null,
+        disabled: busy || !writable || (!host.local && host.orphaned),
+        title: !writable
+          ? '与 manager 失联，写操作已暂停'
+          : ((!host.local && host.orphaned) ? 'ssh config 已消失，远程动作已禁用' : null),
         onClick: (e) => {
           e.stopPropagation();
           actions.hostAction(action, host.name);

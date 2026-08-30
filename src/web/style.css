@@ -30,10 +30,10 @@
   --z-banner: 30;
   --z-scrim: 40;
   --z-drawer: 50;
-  --z-toast: 60;
-  /* 菜单在 toast 之上：亲手唤出来的东西不许被一条自己会消失的通知压住（issue #68） */
-  --z-menu: 70;
-  --z-dialog: 80;
+  /* toast 必须能盖过抽屉/原生 dialog 的 backdrop，确保关闭/复制始终可达 */
+  --z-toast: 80;
+  --z-menu: 90;
+  --z-dialog: 100;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -382,7 +382,6 @@ body {
   background: var(--surface);
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.14);
 }
-.toast-region[data-modal-blocked="true"] .toast { pointer-events: none; }
 .toast .summary { margin: 0; font-size: 13px; }
 .toast-error { border-left: 3px solid var(--crashed); }
 .toast-warn { border-left: 3px solid var(--degraded); }

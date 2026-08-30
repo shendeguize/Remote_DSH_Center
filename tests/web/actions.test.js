@@ -127,6 +127,18 @@ test('未知主机不能执行动作或打开管理抽屉', async (t) => {
   assert.equal(toast.count, 2, '动作与管理入口都应明确拒绝，而不是静默吞掉');
 });
 
+test('orphaned 主机远程动作前端硬闸提示 SSH 配置消失', async (t) => {
+  const h = harness(t, { responder: () => res(202, { accepted: true, operationId: 'must-not-run' }) });
+  seed(h.store, { orphaned: true });
+
+  for (const action of ['start', 'restart', 'stop', 'probe', 'reconnect']) {
+    // eslint-disable-next-line no-await-in-loop -- 每个动作都要验证没有绕过前端硬闸
+    await h.actions.hostAction(action, 'gpu-1');
+  }
+  assert.equal(h.calls.length, 0);
+  assert.match(h.store.state.toasts.at(-1).summary, /ssh config 已消失/u);
+});
+
 test('HTTP 错误：pending 立即释放，toast 带 detail', async (t) => {
   const h = harness(t, {
     responder: () => res(409, { error: '远端端口被占用', code: 'REMOTE_PORT_BUSY', detail: 'bind: address already in use' }),
@@ -750,6 +762,43 @@ test('reload 成功展示变更，随后 HTTP 失败释放 pending 并保留错�
   assert.equal(h.store.state.toasts.at(-1).level, 'error');
   assert.equal(h.store.state.toasts.at(-1).summary, '配置文件暂时不可读');
   assert.equal(h.store.state.toasts.at(-1).detail, 'permission denied');
+});
+
+test('清空 orphaned：确认后调用 POST、移除前端主机并提示成功', async (t) => {
+  const h = harness(t, {
+    responder: ({ path, method }) => (
+      path === '/api/hosts/clear-orphaned' && method === 'POST'
+        ? res(200, { removed: ['gpu-1'] })
+        : res(404, { error: 'unexpected', code: 'NOT_FOUND' })
+    ),
+  });
+  seed(h.store, { orphaned: true });
+
+  const result = await h.actions.clearOrphaned();
+  assert.deepEqual(result.removed, ['gpu-1']);
+  assert.deepEqual(h.calls.map(({ method, path }) => [method, path]), [
+    ['POST', '/api/hosts/clear-orphaned'],
+  ]);
+  assert.equal(h.store.getHost('gpu-1'), null);
+  assert.match(h.store.state.toasts.at(-1).summary, /已清空 1 台 orphaned/u);
+  assert.equal(h.confirms.length, 1);
+});
+
+test('清空 orphaned 失败：仍释放 pending 并显示服务端错误 toast', async (t) => {
+  const h = harness(t, {
+    responder: () => res(409, {
+      error: '配置文件被外部改过',
+      code: 'CONFIG_STALE',
+      detail: '请重新加载',
+    }),
+  });
+  seed(h.store, { orphaned: true });
+
+  assert.equal(await h.actions.clearOrphaned(), null);
+  assert.equal(h.store.isPending('orphaned:clear'), false);
+  assert.equal(h.store.getHost('gpu-1')?.orphaned, true);
+  assert.equal(h.store.state.toasts.at(-1).level, 'error');
+  assert.equal(h.store.state.toasts.at(-1).summary, '配置文件被外部改过');
 });
 
 test('manager 重启取消：不发请求也不创建 pending', async (t) => {

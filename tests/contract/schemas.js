@@ -277,7 +277,13 @@ export const defaultsPutResponse = V.obj({
   restartRequired: V.bool(),
 });
 
-export const reloadResponse = V.obj({ changed: V.arr(V.str()) });
+export const reloadResponse = V.obj({
+  changed: V.arr(V.str()),
+  orphaned: V.arr(V.str({ min: 1 })),
+});
+export const orphanedClearResponse = V.obj({
+  removed: V.arr(V.str({ min: 1 })),
+});
 
 export const setupResponse = V.obj({
   ok: V.bool(),

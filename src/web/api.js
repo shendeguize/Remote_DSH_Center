@@ -239,6 +239,7 @@ export const api = {
   saveHostConfig: (name, patch) => call('PUT', `/api/hosts/${enc(name)}/config`, { body: patch }),
   saveDefaults: (patch) => call('PUT', '/api/config/defaults', { body: patch }),
   reload: () => call('POST', '/api/reload'),
+  clearOrphaned: () => call('POST', '/api/hosts/clear-orphaned'),
 
   setup: (config) => call('POST', '/api/setup', { body: config, timeoutMs: 30_000 }),
   restartManager: () => call('POST', '/api/manager/restart'),
