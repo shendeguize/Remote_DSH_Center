@@ -546,6 +546,24 @@ Center product path: it may install only zstd and userland Sidecar when authoriz
 Python. To verify the bootstrap itself, run `bash scripts/bootstrap-remote.sh --deep <ssh-host>`,
 then run the normal bootstrap and acceptance again.
 
+The five-agent Sidecar/plugin matrix is a separate operator entry point and is never triggered by
+`npm test`:
+
+```bash
+npm run acceptance:matrix -- --host <ssh-host> --timeout 180000 --parallel 2
+npm run acceptance:matrix -- --fixture
+npm run acceptance:matrix -- --dry-run
+```
+
+The matrix defaults to `claude,codex,copilot,kimi,dsh`. A real run performs a fresh SSH scan,
+reuses the Center tunnel to read pod-local plugin state, and checks the real
+`inject.prepare` → `inject.execute` receipt. `--parallel`, `--timeout`, `--remote-dir`, and
+`--report-dir` are bounded. Evidence keeps only the agent, a redacted session hash, states,
+delivery, outcome, and error code; it does not retain messages, confirm tokens, credentials,
+complete session IDs, or raw paths. Kimi `delivery=unknown` is terminal and is never retried;
+`dsh_preset_unsupported`/HTTP 409 for a persisted DSH preset is recorded honestly. Fixture and
+dry-run modes validate orchestration only and never count as a real pass.
+
 CI runs required `npm run check` on Ubuntu for pull requests and repeats it on macOS after a
 merge to main. Ubuntu includes Chrome, so the browser gate must run. macOS may skip it when
 Chrome is absent; use `DSHC_CHROME=<path>` to select a browser locally.

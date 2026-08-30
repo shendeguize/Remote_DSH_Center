@@ -26,6 +26,7 @@
     "ui:smoke": "node scripts/ui-smoke.mjs",
     "acceptance:real": "node scripts/real-acceptance.mjs",
     "acceptance:smoke": "node scripts/real-acceptance.mjs --tier smoke",
+    "acceptance:matrix": "node scripts/agent-matrix.mjs",
     "journey:check": "node scripts/journey-gate.mjs",
     "journey:write": "node scripts/journey-gate.mjs --write",
     "install:cli": "node scripts/install.mjs",

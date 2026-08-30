@@ -760,4 +760,4 @@ async function main() {
 
 if (isMainEntry(import.meta.url)) await main();
 
-export { CASES, EXEMPT, Rig, parseArgs };
+export { CASES, EXEMPT, Rig, parseArgs, rescanSshConfig };
