@@ -44,11 +44,12 @@ const hostConfigView = V.obj({
   local: V.bool(),
   enabled: V.bool(),
   autoStart: V.bool(),
+  dshPath: V.nullable(V.str()),
   localPort: V.nullable(port),
   remoteWebPort: V.nullable(port),
   workdir: workdirView,
   inject: injectView,
-});
+}, { optional: ['dshPath'] });
 
 export const hostView = V.obj({
   name: V.str({ min: 1 }),
@@ -68,6 +69,12 @@ export const hostView = V.obj({
     version: V.nullable(V.str()),
     dshHome: V.nullable(V.str()),
     profileWeb: V.bool(),
+    dependencies: V.obj({
+      binary: V.bool(),
+      webProfile: V.bool(),
+      bash: V.bool(),
+      timeout: V.bool(),
+    }),
     noDshReason: V.nullable(V.enum_(['missing-bin', 'no-web-profile'])),
     sniff: V.obj({
       paths: V.arr(V.str()),
@@ -77,7 +84,7 @@ export const hostView = V.obj({
     }),
     at: iso,
     errorSummary: V.nullable(V.str()),
-  }, { optional: ['sniff'] })),
+  }, { optional: ['dependencies', 'sniff'] })),
   web: V.nullable(V.obj({
     pid: V.int({ min: 1 }),
     port,

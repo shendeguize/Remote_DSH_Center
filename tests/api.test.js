@@ -85,7 +85,7 @@ function syncServerOptions({ setupCompleted = true } = {}) {
         inject: { env: { SYNCED: 'yes' }, extraArgs: ['--source'], patches: ['source.patch'] },
       },
       'target-a': {
-        enabled: false,
+        enabled: true,
         autoStart: true,
         localPort: 17777,
         remoteWebPort: 9001,
@@ -791,7 +791,7 @@ test('POST sync-config apply：一次原子落盘并只复制 profile', async (t
   assert.equal(onDisk.hosts['target-a'].remoteWebPort, null, '源为 null 时清除端口 override');
   assert.equal(onDisk.hosts['target-a'].workdir, null, '源为 null 时清除 workdir override');
   assert.deepEqual(onDisk.hosts['target-a'].inject, onDisk.hosts.source.inject);
-  assert.equal(onDisk.hosts['target-a'].enabled, false);
+  assert.equal(onDisk.hosts['target-a'].enabled, true);
   assert.equal(onDisk.hosts['target-a'].autoStart, true);
   assert.equal(onDisk.hosts['target-a'].localPort, 17777);
   assert.equal(onDisk.hosts['target-a'].local, false);

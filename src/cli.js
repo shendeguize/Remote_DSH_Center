@@ -449,8 +449,14 @@ export function installGuideLines(host, { full = true } = {}) {
     noDshReason: probe.noDshReason,
     sniff: probe.sniff,
     dshHome: probe.dshHome,
+    dependencies: probe.dependencies,
   });
   const lines = [`安装指引：${guide.summary}`];
+  for (const check of guide.checks ?? []) {
+    const status = check.status === 'pass' ? '通过' : check.status === 'optional' ? '可选' : '待处理';
+    lines.push(`  [${status}] ${check.label}：${check.detail}`);
+    for (const command of check.commands ?? []) lines.push(`    可复制：${command}`);
+  }
   if (probe.sniff?.probePath) lines.push(`  非交互 PATH：${probe.sniff.probePath}`);
   if (Array.isArray(probe.sniff?.paths) && probe.sniff.paths.length > 0) {
     lines.push(`  检测到的 dsh：${probe.sniff.paths.join('、')}`);

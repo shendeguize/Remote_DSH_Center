@@ -26,22 +26,38 @@ const remotePath = (rel) => `$HOME/${REMOTE_DIR}/${rel}`;
 
 // ── §1.1 探测协议 ────────────────────────────────────────────────────────
 
-/** 无注入值，模板为常量。 */
-export function buildProbeScript() {
+function dshPathToken(value) {
+  // 省略仅保留给底层模板兼容调用；manager 的 start 路径总会传入已解析绝对路径。
+  if (value === undefined) return 'dsh';
+  if (value === null || value === '') return '';
+  if (typeof value !== 'string' || !/^\/[^\0\r\n]*$/u.test(value)) {
+    throw new DshError('VALIDATION', 'dshPath 必须是不含换行的绝对路径');
+  }
+  return shq(value);
+}
+
+/** 配置路径由 manager 注入，其余候选均在目标 shell 内按优先级解析。 */
+export function buildProbeScript({ dshPath = null } = {}) {
+  const configured = dshPathToken(dshPath);
   return [
-    'echo "DSH_BIN=$(command -v dsh || echo MISSING)"',
-    'if command -v dsh >/dev/null 2>&1; then echo "DSH_VERSION=$(dsh --version 2>/dev/null | head -n 1)"; fi',
+    `CONFIG_DSH_PATH=${configured}`,
+    'PATH_DSH=; if command -v dsh >/dev/null 2>&1; then PATH_DSH=$(command -v dsh 2>/dev/null | head -n 1); case "$PATH_DSH" in /*) ;; *) PATH_DSH=;; esac; fi',
     'H="${DSH_HOME:-$HOME/.dsh}"',
     "printf 'DSH_HOME=%s\\n' \"$H\"",
     'if [ -d "$H/profiles/web" ]; then echo "PROFILE_WEB=yes"; else echo "PROFILE_WEB=no"; fi',
     "printf 'PROBE_PATH=%s\\n' \"$PATH\"",
+    'if command -v bash >/dev/null 2>&1; then echo "HAS_BASH=yes"; else echo "HAS_BASH=no"; fi',
+    'if command -v timeout >/dev/null 2>&1; then echo "HAS_TIMEOUT=yes"; else echo "HAS_TIMEOUT=no"; fi',
     'SNIFF_PATH=',
     'echo "DSH_SNIFF<<EOF"',
-    'for D in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /opt/homebrew/bin /snap/bin; do if [ -x "$D/dsh" ]; then printf "%s\\n" "$D/dsh"; if [ -z "$SNIFF_PATH" ]; then SNIFF_PATH="$D/dsh"; fi; fi; done',
+    'for D in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /usr/bin /usr/sbin /bin /opt/homebrew/bin /snap/bin; do if [ -x "$D/dsh" ]; then printf "%s\\n" "$D/dsh"; if [ -z "$SNIFF_PATH" ]; then SNIFF_PATH="$D/dsh"; fi; fi; done',
     'echo "EOF"',
     'LOGIN_DSH=',
-    'if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then LOGIN_DSH=$(timeout 5 bash -lc \'command -v dsh\' 2>/dev/null | head -n 1); fi',
+    'if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then LOGIN_DSH=$(timeout 5 bash -lc \'command -v dsh\' 2>/dev/null | head -n 1); case "$LOGIN_DSH" in /*) ;; *) LOGIN_DSH=;; esac; fi',
     'printf "DSH_SNIFF_LOGIN=%s\\n" "$LOGIN_DSH"',
+    'RESOLVED_DSH=; if [ -n "$CONFIG_DSH_PATH" ] && [ -x "$CONFIG_DSH_PATH" ]; then RESOLVED_DSH="$CONFIG_DSH_PATH"; elif [ -n "$PATH_DSH" ] && [ -x "$PATH_DSH" ]; then RESOLVED_DSH="$PATH_DSH"; elif [ -n "$SNIFF_PATH" ]; then RESOLVED_DSH="$SNIFF_PATH"; elif [ -n "$LOGIN_DSH" ] && [ -x "$LOGIN_DSH" ]; then RESOLVED_DSH="$LOGIN_DSH"; fi',
+    'echo "DSH_BIN=${RESOLVED_DSH:-MISSING}"',
+    'if [ -n "$RESOLVED_DSH" ]; then echo "DSH_VERSION=$("$RESOLVED_DSH" --version 2>/dev/null | head -n 1)"; fi',
     'if [ -z "$SNIFF_PATH" ] && [ -n "$LOGIN_DSH" ]; then SNIFF_PATH="$LOGIN_DSH"; fi',
     'if command -v timeout >/dev/null 2>&1 && [ -n "$SNIFF_PATH" ]; then DSH_SNIFF_VERSION=$(timeout 5 "$SNIFF_PATH" --version 2>/dev/null | head -n 1); printf "DSH_SNIFF_VERSION=%s\\n" "$DSH_SNIFF_VERSION"; fi',
     'echo "RUNNING_DSH_WEB<<EOF"',
@@ -57,14 +73,16 @@ export function buildProbeScript() {
 // ── §1.2 拉起协议 ────────────────────────────────────────────────────────
 
 /**
- * @param {{logName:string, port:number|'0', env?:Record<string,string>,
+ * @param {{logName:string, port:number|'0', dshPath:string, env?:Record<string,string>,
  *          patchRemoteNames?:string[], extraArgs?:string[], workdir?:string|null}} p
  */
 export function buildLaunchScript({
-  logName, port, env = {}, patchRemoteNames = [], extraArgs = [], workdir = null,
+  logName, port, dshPath, env = {}, patchRemoteNames = [], extraArgs = [], workdir = null,
 }) {
   assertSafeName(logName);
   const portTok = assertInt(port, { min: 1, max: 65535, allowZero: true });
+  const dshTok = dshPathToken(dshPath);
+  if (!dshTok) throw new DshError('VALIDATION', '拉起协议缺少已解析的 dsh 绝对路径');
 
   let envp = '';
   const envEntries = Object.entries(env);
@@ -98,7 +116,7 @@ export function buildLaunchScript({
   // --patch 是 dsh 启动器自己的旗标，必须紧跟 `web` 排在 web app 旗标之前：真机
   // （dsh 0.1.0-rc.7）上 `dsh web --no-open ... --patch P` 会被 web app 判为
   // unknown option '--patch' 而直接退出。extraArgs 反过来是 app 参数，仍留在尾部。
-  const launch = `nohup ${envp}dsh web${patchArgs} --no-open --host 127.0.0.1 --port ${portTok}${extra} > "$LOG" 2>&1 < /dev/null &`;
+  const launch = `nohup ${envp}${dshTok} web${patchArgs} --no-open --host 127.0.0.1 --port ${portTok}${extra} > "$LOG" 2>&1 < /dev/null &`;
   return `${prelude}; ${launch} echo "PID=$!"`;
 }
 

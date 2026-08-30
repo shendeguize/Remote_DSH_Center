@@ -108,7 +108,11 @@ export function planConfigSync(config, { source, targets } = {}) {
 
   const profile = syncProfileOf(requireHost(config, source, '源主机'));
   const targetPlans = targets.map((name) => {
-    const fields = changedFields(profile, syncProfileOf(requireHost(config, name, '目标主机')));
+    const target = requireHost(config, name, '目标主机');
+    // 禁用主机保留在预览结果中以维持请求顺序与 API 形状，但永远不进入同步写入。
+    const fields = target.enabled === false
+      ? []
+      : changedFields(profile, syncProfileOf(target));
     return { name, changed: fields.length > 0, changedFields: fields };
   });
 
@@ -147,7 +151,9 @@ export function applyConfigSync(draft, plan) {
   }));
   const changed = [];
   for (const { config: target, plan: targetPlan } of targets) {
-    if (!targetPlan.changed) continue;
+    // Re-check the live draft as a defense in depth: a caller must not be able
+    // to turn a stale/mutated plan into a write for a disabled host.
+    if (!targetPlan.changed || target.enabled === false) continue;
     target.remoteWebPort = plan.profile.remoteWebPort;
     target.workdir = plan.profile.workdir;
     target.inject = cloneInject(plan.profile.inject);

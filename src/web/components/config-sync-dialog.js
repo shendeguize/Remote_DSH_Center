@@ -5,6 +5,7 @@
  */
 
 import { CONFIG_SYNC_TARGET_LIMIT, HOST_WEB_RESTART_NOTICE } from '../actions.js';
+import { isHostEnabled } from '../host-rules.js';
 import { button, clear, el } from '../utils.js';
 
 const FIELD_LABEL = Object.freeze({
@@ -95,7 +96,7 @@ export function createConfigSyncDialog({ store, actions }) {
   let hostNamesKey = '';
 
   function hosts() {
-    return store.listHosts();
+    return store.listHosts().filter(isHostEnabled);
   }
 
   function selectionSignature() {

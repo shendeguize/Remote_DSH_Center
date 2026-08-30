@@ -94,6 +94,31 @@ test('interpretProbe：多行 version 已在远端 head -n 1，此处按单行�
   assert.equal(r.version, 'dsh 0.1.0-rc.7 (build abc)');
 });
 
+test('探测按 config > PATH > 常见目录 > login shell 解析绝对 dsh，并回传依赖', () => {
+  const script = buildProbeScript({ dshPath: '/opt/custom path/dsh' });
+  assert.ok(script.includes("CONFIG_DSH_PATH='/opt/custom path/dsh'"));
+  assert.ok(script.indexOf('CONFIG_DSH_PATH=') < script.indexOf('PATH_DSH='));
+  assert.ok(script.indexOf('PATH_DSH=') < script.indexOf('SNIFF_PATH='));
+  assert.ok(script.indexOf('SNIFF_PATH=') < script.indexOf('LOGIN_DSH='));
+  assert.ok(script.includes('/usr/bin /usr/sbin'));
+
+  const result = interpretProbe(ok([
+    'DSH_BIN=/opt/custom path/dsh',
+    'DSH_VERSION=dsh custom',
+    'DSH_HOME=/root/.dsh',
+    'PROFILE_WEB=yes',
+    'HAS_BASH=yes',
+    'HAS_TIMEOUT=no',
+    'RUNNING_DSH_WEB<<EOF',
+    'EOF',
+    'PROBE_DONE=yes',
+  ].join('\n')));
+  assert.deepEqual(result.dependencies, {
+    binary: true, webProfile: true, bash: true, timeout: false,
+  });
+  assert.equal(result.phase, 'ready');
+});
+
 test('parseRunningBlock：ps 行解析、忽略噪声行', () => {
   assert.deepEqual(
     parseRunningBlock('  123 dsh web --port 1\n\nnot a ps line\n 456   dsh web --port 2  '),
@@ -191,6 +216,7 @@ test('applyProbe：三分类正确写 phase 与 probe 详情', async (t) => {
   applyProbe('gpu-1', interpretProbe(ok(READY_SAMPLE)));
   assert.equal(store.getPhase('gpu-1'), 'ready');
   const probe = store.getHostState('gpu-1').probe;
+  assert.equal(store.getHostState('gpu-1').dshPath, '/usr/bin/dsh');
   assert.equal(probe.version, '0.1.0-rc.7');
   assert.deepEqual(probe.sniff, {
     paths: ['/home/test/.local/bin/dsh', '/usr/local/bin/dsh'],

@@ -435,7 +435,7 @@ async function checkDemo(outDir) {
     await cdp.waitFor(
       `window.location.hash === '#/manage'
         && document.querySelector('.view-dashboard:not([hidden])')
-        && document.querySelectorAll('.host-table tbody tr').length === 4`,
+        && document.querySelectorAll('.host-table tbody tr[data-host]').length === 4`,
       '从标签栏进入 manage 并看到四台主机',
     );
     await cdp.click('.host-tabs .tab[data-host="gpu-4090-daily"]');

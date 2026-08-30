@@ -256,6 +256,37 @@ test('local 与 remote 主机使用同一 profile；排除字段和运行态噪�
   ]);
 });
 
+test('批量同步保留 disabled 目标但不计划或写入其配置', () => {
+  const config = configOf({
+    source: host({ remoteWebPort: 9010 }),
+    disabled: host({ enabled: false, remoteWebPort: 9020 }),
+    enabled: host({ remoteWebPort: 9030 }),
+  });
+  const plan = planConfigSync(config, {
+    source: 'source',
+    targets: ['disabled', 'enabled'],
+  });
+  assert.deepEqual(plan.targets, [
+    { name: 'disabled', changed: false, changedFields: [] },
+    {
+      name: 'enabled',
+      changed: true,
+      changedFields: ['remoteWebPort'],
+    },
+  ]);
+  const before = structuredClone(config.hosts.disabled);
+  applyConfigSync(config, plan);
+  assert.deepEqual(config.hosts.disabled, before);
+  assert.equal(config.hosts.enabled.remoteWebPort, 9010);
+
+  const forgedPlan = {
+    ...plan,
+    targets: [{ name: 'disabled', changed: true, changedFields: ['workdir'] }],
+  };
+  applyConfigSync(config, forgedPlan);
+  assert.deepEqual(config.hosts.disabled, before, '应用阶段也必须跳过已禁用目标');
+});
+
 test('plan 拒绝空目标、重复目标和源主机混入目标', () => {
   const config = configOf({
     source: host(),
@@ -435,7 +466,7 @@ test('apply 只改 changed target 的 profile，并保持所有排除字段不�
     }),
     changed: host({
       local: true,
-      enabled: false,
+      enabled: true,
       autoStart: true,
       localPort: null,
       remoteWebPort: 9555,

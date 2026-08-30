@@ -50,3 +50,19 @@ test('未知或缺失原因安全回退到安装指引', () => {
   assert.equal(guide.steps.length, 3);
   assert.match(guide.steps[0], /Center 不会代为安装/);
 });
+
+test('安装指引按探测结果列出二进制/profile/可选依赖，并只提供复制命令', () => {
+  const guide = buildInstallGuide({
+    noDshReason: 'no-web-profile',
+    dshHome: '/root/.dsh',
+    dependencies: { binary: true, webProfile: false, bash: false, timeout: true },
+  });
+  assert.deepEqual(guide.checks.map(({ id, status }) => [id, status]), [
+    ['binary', 'pass'],
+    ['web-profile', 'fail'],
+    ['bash', 'optional'],
+    ['timeout', 'pass'],
+  ]);
+  assert.ok(guide.checks.every((check) => check.commands.length > 0));
+  assert.doesNotMatch(JSON.stringify(guide), /npm install|brew install|curl .*install/);
+});

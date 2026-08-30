@@ -602,6 +602,7 @@ export function createHandler({ managerCtl }) {
         }
         if ('enabled' in body) host.enabled = body.enabled;
         if ('autoStart' in body) host.autoStart = body.autoStart;
+        if ('dshPath' in body) host.dshPath = body.dshPath;
         if ('remoteWebPort' in body) host.remoteWebPort = body.remoteWebPort;
         // 与 inject 同款语义：落盘即生效于「下一次拉起」，不动正在跑的实例
         if ('workdir' in body) host.workdir = body.workdir;
