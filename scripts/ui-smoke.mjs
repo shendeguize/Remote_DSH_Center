@@ -624,7 +624,7 @@ async function main() {
     // 抽屉的模态性只有真浏览器能证：inert 是浏览器原生语义，垫片里它只是个属性。
     // 真机上曾经 25 次 Tab 有 17 次落到遮罩后面，且焦点一出抽屉 Esc 就失灵（issue #28）。
     await check('S4b', '抽屉即模态：Tab 出不去，任何焦点位置 Esc 都能关', async () => {
-      await cdp.eval("document.querySelector('.host-table tbody tr').focus(); return true;");
+      await cdp.eval("document.querySelector('.host-table tbody tr[data-host]').focus(); return true;");
       await cdp.key('Enter', { keyCode: 13 });
       await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
 
@@ -671,7 +671,7 @@ async function main() {
     // 真机里根本收不到），而「碰过之后跟着值走」正是 issue #30 的修复点。
     await check('S4c', '就地校验：打字不吵、离开就报、改对即灭', async () => {
       try {
-        await cdp.eval("document.querySelector('.host-table tbody tr').click(); return true;");
+        await cdp.eval("document.querySelector('.host-table tbody tr[data-host]').click(); return true;");
         await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
         const errs = async () => cdp.eval(`
           const d = document.querySelector('.host-drawer');
@@ -727,7 +727,7 @@ async function main() {
       // 整表重建，且同名控件在忙碌态下变 disabled）。直接打后端 API 压不到它：
       // pending 是页面对自己在飞请求的记账。
       await cdp.eval(`
-        const tr = document.querySelector('.host-table tbody tr');
+        const tr = document.querySelector('.host-table tbody tr[data-host]');
         const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
         b.focus(); return Boolean(b);
       `);
@@ -735,7 +735,7 @@ async function main() {
       assert(before, `前提：焦点没落在主机行上（${await cdp.eval(`
         const a = document.activeElement;
         return 'active=' + (a === document.body ? 'body' : a.tagName.toLowerCase())
-          + ' rows=' + document.querySelectorAll('.host-table tbody tr').length
+          + ' rows=' + document.querySelectorAll('.host-table tbody tr[data-host]').length
           + ' 抽屉还开着=' + !document.querySelector('.host-drawer').hidden;
       `)}）`);
 
@@ -771,7 +771,7 @@ async function main() {
         for (;;) {
           // eslint-disable-next-line no-await-in-loop -- 上一轮探测结束前按钮会保持 disabled
           const state = await cdp.eval(`
-            const tr = document.querySelector('.host-table tbody tr');
+            const tr = document.querySelector('.host-table tbody tr[data-host]');
             const b = tr && [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
             const connection = document.querySelector('.conn-indicator')?.dataset.state ?? 'missing';
             const writable = connection === 'open' && Boolean(document.querySelector('.disconnect-banner')?.hidden);
@@ -803,7 +803,7 @@ async function main() {
         await waitProbeReady(named);
         // eslint-disable-next-line no-await-in-loop -- 逐个按键
         const focused = await cdp.eval(`
-          const tr = document.querySelector('.host-table tbody tr');
+          const tr = document.querySelector('.host-table tbody tr[data-host]');
           const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
           if (!b || b.disabled) return false;
           b.focus();
@@ -829,7 +829,7 @@ async function main() {
       await cdp.waitFor("!document.querySelector('.view-dashboard').hidden", '回到管理台');
 
       const pressReadiness = () => cdp.eval(`
-        const tr = document.querySelector('.host-table tbody tr');
+        const tr = document.querySelector('.host-table tbody tr[data-host]');
         const b = tr && [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
         const connection = document.querySelector('.conn-indicator')?.dataset.state ?? 'missing';
         const writable = connection === 'open' && Boolean(document.querySelector('.disconnect-banner')?.hidden);
@@ -874,7 +874,7 @@ async function main() {
         const ready = await waitPressReady(named);
         // eslint-disable-next-line no-await-in-loop -- 逐条按压
         const box = await cdp.eval(`
-          const tr = document.querySelector('.host-table tbody tr');
+          const tr = document.querySelector('.host-table tbody tr[data-host]');
           const b = [...tr.querySelectorAll('button')].find((x) => x.dataset.act === 'probe');
           if (!b || b.disabled) return null;
           b.scrollIntoView({ block: 'center' });
@@ -923,7 +923,7 @@ async function main() {
     // 紧接着就把刚开的框关掉——用户看到的是「按 Esc 毫无反应」。
     await check('S4g', '有改动时 Esc 弹确认框，且框不会被同一记 Esc 自己关掉', async () => {
       try {
-        await cdp.eval("document.querySelector('.host-table tbody tr').focus(); return true;");
+        await cdp.eval("document.querySelector('.host-table tbody tr[data-host]').focus(); return true;");
         await cdp.key('Enter', { keyCode: 13 });
         await cdp.waitFor("!document.querySelector('.host-drawer').hidden", '抽屉打开');
         await cdp.eval(`
@@ -1380,7 +1380,7 @@ async function main() {
     // 回管理台与 1440 宽，别把后面的场景留在 iframe 页 / 窄视口上
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
-    await cdp.waitFor("document.querySelector('.host-table tbody tr')", '回到管理台');
+    await cdp.waitFor("document.querySelector('.host-table tbody tr[data-host]')", '回到管理台');
 
     await check('S8', '减少动效：动画真的关掉', async () => {
       const probe = `
@@ -1409,7 +1409,7 @@ async function main() {
       // 掐线前先按下一次写操作，让断线发生在「有动作在飞」的真实时刻，
       // 而不是页面闲着的时候（判据不靠它，见 S9b 的说明）。
       await cdp.eval(`
-        const tr = document.querySelector('.host-table tbody tr');
+        const tr = document.querySelector('.host-table tbody tr[data-host]');
         [...tr.querySelectorAll('button')].find((b) => b.dataset.act === 'start')?.click();
         return true;
       `);
@@ -1417,7 +1417,7 @@ async function main() {
       await rig.shutdown();
       await cdp.waitFor("!document.querySelector('.disconnect-banner').hidden", '断线横幅出现', { timeoutMs: 20_000 });
       const state = await cdp.eval(`
-        const row = document.querySelector('.host-table tbody tr');
+        const row = document.querySelector('.host-table tbody tr[data-host]');
         const manageBack = document.querySelector('.manage-back');
         return {
           banner: document.querySelector('.disconnect-banner').textContent.trim(),
@@ -1448,20 +1448,20 @@ async function main() {
       await cdp.waitFor("document.querySelector('.disconnect-banner').hidden", '横幅消失', { timeoutMs: 30_000 });
       await cdp.waitFor(`
         (() => {
-          const row = document.querySelector('.host-table tbody tr');
+          const row = document.querySelector('.host-table tbody tr[data-host]');
           return Boolean(row && [...row.querySelectorAll('.row-actions .btn')]
             .some((button) => !button.disabled && button.textContent !== '打开'));
         })()
       `, '恢复后行内写按钮解禁', { timeoutMs: 30_000 });
       const back = await cdp.eval(`
-        const row = document.querySelector('.host-table tbody tr');
+        const row = document.querySelector('.host-table tbody tr[data-host]');
         const manageBack = document.querySelector('.manage-back');
         return {
           navigationEnabled: Boolean(manageBack && !manageBack.disabled),
           toolbarWrites: [...document.querySelectorAll('.manage-header .probe-all, .manage-header .reload-config, .manage-header .config-sync-open')]
             .map((button) => [button.textContent.trim(), button.disabled]),
           rowWritable: [...row.querySelectorAll('.row-actions .btn')].some((b) => !b.disabled && b.textContent !== '打开'),
-          rows: document.querySelectorAll('.host-table tbody tr').length,
+          rows: document.querySelectorAll('.host-table tbody tr[data-host]').length,
         };
       `);
       assert(back.navigationEnabled, '恢复后「返回主页面」导航被禁用或缺失');

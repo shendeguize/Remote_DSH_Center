@@ -93,7 +93,7 @@ async function main() {
     // ② #/manage 上的主机详情抽屉
     await cdp.eval("window.location.hash = '#/manage'; return true;");
     await cdp.waitFor(
-      "location.hash === '#/manage' && !document.querySelector('.view-dashboard').hidden && document.querySelectorAll('.host-table tbody tr').length === 4",
+      "location.hash === '#/manage' && !document.querySelector('.view-dashboard').hidden && document.querySelectorAll('.host-table tbody tr[data-host]').length === 4",
       '管理页四台主机就位',
     );
     await cdp.click('.host-table tr[data-host="gpu-a100"]');
