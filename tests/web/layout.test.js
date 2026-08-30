@@ -161,9 +161,9 @@ test('模态层序与 toast 指针契约：scrim < drawer < toast < menu < dialo
   assert.equal(declaration(blockFor(CSS, '.drawer-scrim'), 'z-index'), 'var(--z-scrim)');
   assert.equal(declaration(blockFor(CSS, '.host-drawer'), 'z-index'), 'var(--z-drawer)');
   assert.equal(
-    declaration(blockFor(CSS, '.toast-region[data-modal-blocked="true"] .toast'), 'pointer-events'),
-    'none',
-    'toast 可视觉显示，但抽屉打开时不能盖住抽屉或截获落在其上的鼠标',
+    declaration(blockFor(CSS, '.toast'), 'pointer-events'),
+    'auto',
+    'toast 在抽屉或对话框打开时仍必须可以接收关闭/复制点击',
   );
 });
 

@@ -142,6 +142,20 @@ test('首屏：拉 info/hosts/config，根路由落 hub 而不是管理台', asy
   assert.equal(dom.app.querySelector('.view-dashboard').hidden, true, '原管理台不能再占默认首屏');
 });
 
+test('管理表：orphaned 远程动作禁用并提供清空入口', async (t) => {
+  const { dom } = await mount(t, {
+    hosts: [hostView('orphan', { orphaned: true }), hostView('healthy')],
+  });
+  const row = dom.app.querySelector('tr[data-host="orphan"]');
+  assert.ok(row);
+  assert.match(row.textContent, /ssh config 已消失/u);
+  assert.equal([...row.querySelectorAll('button')].every((node) => node.disabled), true);
+
+  const clearButton = dom.app.querySelector('.clear-orphaned');
+  assert.ok(clearButton);
+  assert.equal(clearButton.disabled, false);
+});
+
 test('添加本机：名称输入可留空，默认名冲突后可填自定义名重试', async (t) => {
   const created = localHostView('workstation-local');
   const reply = (status, body) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });

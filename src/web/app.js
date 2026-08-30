@@ -116,7 +116,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     confirm: dialog.confirm,
     setBackgroundInert: (on) => {
       for (const node of backgroundLayers) node.inert = on;
-      // toast 仍须留在 aria-live 树里播报抽屉保存错误，只单独封住交互控件。
+      // toast 保留在 aria-live 树里并继续可点击，只退出 drawer 模态的 Tab 环。
       toasts.setModalBlocked(on);
     },
   });

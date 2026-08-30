@@ -32,6 +32,7 @@ function hasSniffedDsh(host) {
 /** 状态徽章下方的一行补充说明（缺失原因、挂起原因、orphaned…）。 */
 export function phaseHint(host) {
   if (!host) return '';
+  if (!host.local && host.orphaned) return 'ssh config 已消失，远程动作已禁用';
   if (host.phase === 'no_dsh') {
     if (hasSniffedDsh(host)) return '已检测到 dsh（不在非交互 PATH）';
     return NO_DSH_REASON[host.probe?.noDshReason] ?? '';

@@ -401,6 +401,9 @@ export function start(name) {
   return hostQueue(name).run('start', async (signal) => {
     const view = store.getHostView(name);
     if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
+    if (!view.local && view.orphaned) {
+      throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止启动`, { host: name });
+    }
     if (!view.config.enabled) {
       throw new DshError('NOT_ALLOWED', `主机 ${name} 已在配置中停用`, { host: name });
     }
@@ -519,6 +522,9 @@ export function stop(name) {
     const st = store.getHostState(name);
     const view = store.getHostView(name);
     if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
+    if (!view.local && view.orphaned) {
+      throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止关停`, { host: name });
+    }
     if (!st?.web?.startedByUs) {
       throw new DshError('NOT_ALLOWED', `主机 ${name} 上没有由本 manager 拉起的实例，拒绝关停`, { host: name });
     }
@@ -570,6 +576,10 @@ export async function restart(name) {
 export async function recoverOne(name) {
   return hostQueue(name).run('recover', async (signal) => {
     const view = store.getHostView(name);
+    if (view && !view.local && view.orphaned) {
+      logEvent(name, 'warn', '恢复复核跳过：ssh config 已消失');
+      return toCrashed(name);
+    }
     const local = view?.local === true;
     const st = store.getHostState(name);
     // 上一代 manager 的隧道子进程随其退出而死：state 里的隧道记录一律作废（契约疑议 3 口径）

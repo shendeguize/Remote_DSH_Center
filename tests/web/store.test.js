@@ -471,3 +471,22 @@ test('upsertHost 落地 REST 回传视图且不动 revision', () => {
   assert.equal(store.getHost('a').config.autoStart, true);
   assert.equal(store.state.revision, 3);
 });
+
+test('removeHosts 只从前端镜像移除 orphaned，不误删 local 或正常主机', () => {
+  const store = createStore();
+  store.applySnapshot({
+    revision: 1,
+    hosts: [
+      hostView('orphan', { orphaned: true }),
+      hostView('local', { local: true }),
+      hostView('healthy'),
+    ],
+    logs: [],
+  });
+  const resets = [];
+  store.on('hosts:reset', (names) => resets.push(names));
+
+  assert.deepEqual(store.removeHosts(['orphan', 'local', 'healthy']), ['orphan']);
+  assert.deepEqual(store.listHosts().map((host) => host.name), ['healthy', 'local']);
+  assert.deepEqual(resets.at(-1), ['local', 'healthy']);
+});

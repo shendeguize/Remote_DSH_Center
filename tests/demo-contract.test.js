@@ -32,7 +32,7 @@ import {
   accepted, assertSseStream, assertShape, configBody, errorBody, hostsList, hostView,
   managerInfo, reloadResponse, setupResponse, defaultsPutResponse, hostConfigPutResponse,
   localHostCreateResponse, settingsReadResponse, settingsWriteResponse, syncConfigResponse,
-  workspaceRegisterResponse,
+  workspaceRegisterResponse, orphanedClearResponse,
 } from './contract/schemas.js';
 
 /** assert.throws 不回传异常对象，而这些用例要逐字段查 status/code/detail。 */
@@ -170,8 +170,8 @@ test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () =>
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 19 个真实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 19, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 20 个真实实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 20, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -180,6 +180,7 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['GET', '/api/config', 'config'],
     ['PUT', '/api/config/defaults', 'defaults-put'],
     ['POST', '/api/reload', 'reload'],
+    ['POST', '/api/hosts/clear-orphaned', 'clear-orphaned'],
     ['POST', '/api/setup', 'setup'],
     ['POST', '/api/hosts/probe', 'probe-all'],
     ['POST', '/api/hosts/local', 'local-create'],
@@ -1278,6 +1279,11 @@ test('PUT /api/config/defaults 与 POST /api/reload 过契约；改默认端口�
   assert.equal(restart.json.restartRequired, true, '改 manager 端口只落盘，要重启才生效');
 
   assertShape(reloadResponse, req(manager, 'POST', '/api/reload').json, 'POST reload 响应');
+  assertShape(
+    orphanedClearResponse,
+    req(manager, 'POST', '/api/hosts/clear-orphaned').json,
+    'POST clear-orphaned 响应',
+  );
 });
 
 test('manager 自身的 restart/shutdown 在 demo 里降级为 409，且说清原因', () => {

@@ -68,6 +68,7 @@ test('isPrimaryHost 同时要求启用和主入口状态', () => {
   assert.equal(isPrimaryHost(managed('unreachable')), false);
   assert.equal(isPrimaryHost(manual('crashed', { config: undefined, enabled: true })), true);
   assert.equal(isPrimaryHost(null), false);
+  assert.equal(isPrimaryHost(managed('running', { orphaned: true })), false, 'orphaned 不得进入 Hub 主入口');
 });
 
 test('primaryHosts 为 Hub/Tab 提供同一份稳定 name 排序，且不改输入', () => {
@@ -130,6 +131,15 @@ test('stop/reconnect 入口与后端 phase 契约对齐', () => {
     false,
     '后端虽接受 running，但页面入口省略；竞态由 actions 判为已自行恢复',
   );
+});
+
+test('orphaned 远程主机只保留查看入口，隐藏所有远程动作', () => {
+  const host = managed('running', { orphaned: true, local: false });
+  assert.deepEqual(allowedHostActions(host), ['open']);
+  for (const action of ['start', 'stop', 'restart', 'reconnect', 'probe']) {
+    assert.equal(isHostActionAllowed(host, action), false, action);
+  }
+  assert.equal(isHostActionAllowed(host, 'open'), true);
 });
 
 test('allowedHostActions 返回不可变值，调用方不能污染后续结果', () => {

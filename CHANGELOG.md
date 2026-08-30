@@ -14,6 +14,13 @@
 
 ### 新增
 
+- 管理台新增 orphaned 主机安全清理：仅删除当前 SSH 配置已消失的配置与运行记录，
+  并在清理前后保留远端进程不误杀；orphaned 主机的远程动作、配置同步与 dsh
+  配置/Workspace 操作会被 manager 拒绝，同时页面明确提示 SSH 配置已消失；
+  清理接口为 `POST /api/hosts/clear-orphaned`。
+- `POST /api/reload` 现在会重新读取 SSH 配置并刷新 orphaned 状态；Center toast
+  在抽屉或对话框打开时仍可关闭和复制，并继续保留 `aria-live` 播报。
+
 - 新增 `acceptance:matrix` 五 agent 操作员验收入口，默认覆盖
   `claude`、`codex`、`copilot`、`kimi` 和 `dsh`，提供有界并行/超时、fresh SSH
   scan、两阶段插件注入回执和脱敏 JSON/Markdown 证据；fixture/dry-run 不计入真实通过。

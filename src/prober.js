@@ -6,7 +6,7 @@ import { logEvent } from './lib/bus.js';
 import { buildProbeScript, kvOne, parseProtoOutput } from './lib/proto.js';
 import { hostQueue, localExec, sshExec } from './lib/ssh.js';
 import { PROBE_PROTECTED_PHASES } from './lib/machine.js';
-import { asDshError } from './lib/errors.js';
+import { DshError, asDshError } from './lib/errors.js';
 import { mapPool } from './lib/pool.js';
 import { SSH_FANOUT_LIMIT } from './defaults.js';
 import * as store from './store.js';
@@ -155,7 +155,12 @@ function summarize(stderr) {
 export async function probeHost(name) {
   return hostQueue(name).run('probe', async (signal) => {
     // 队首才重取 HostView：排队期间 reload 可能已换了配置快照，运输类型只认当前 config。
-    const local = store.getHostView(name)?.local === true;
+    const view = store.getHostView(name);
+    if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
+    if (!view.local && view.orphaned) {
+      throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止探测`, { host: name });
+    }
+    const local = view.local === true;
     const result = await probeOnce(name, { local, signal });
     applyProbe(name, result);
     return result;
@@ -199,7 +204,8 @@ export function applyProbe(name, result) {
  * @returns {Promise<PromiseSettledResult<any>[]>} 供 server 启动序列 await
  */
 export function probeAll(names = null) {
-  const targets = names ?? store.listHostNames();
+  const targets = (names ?? store.listHostNames())
+    .filter((name) => !store.getHostView(name)?.orphaned || store.getHostView(name)?.local);
   // 有闸：主机一多，无闸的扇出会把共用跳板机的 MaxStartups 打爆（issue #85）
   return mapPool(targets, (name) => probeHost(name).catch((err) => {
     const e = asDshError(err);

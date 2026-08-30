@@ -200,6 +200,22 @@ export function createStore(preset = {}) {
     settleByPhase(host);
   };
 
+  /** 清理 orphaned 响应的前端镜像；只删除当前仍标记 orphaned 的条目。 */
+  const removeHosts = (names) => {
+    const removed = [];
+    for (const name of names ?? []) {
+      const host = state.hosts.get(name);
+      if (!host?.orphaned || host.local) continue;
+      state.hosts.delete(name);
+      removed.push(name);
+    }
+    if (removed.length > 0) {
+      hostsResetEpoch += 1;
+      emit('hosts:reset', [...state.hosts.keys()]);
+    }
+    return removed;
+  };
+
   /** host-changed 帧：旧 revision 丢弃（13 §3.1 的前端规则）。 */
   const applyHostChanged = (frame) => {
     if (frame.revision <= domainRevisions.hosts) return false;
@@ -370,6 +386,7 @@ export function createStore(preset = {}) {
     mergeActionHosts,
     applySnapshot,
     upsertHost,
+    removeHosts,
     applyHostChanged,
     applyConfigChanged,
     appendEvent,

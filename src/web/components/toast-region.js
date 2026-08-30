@@ -58,14 +58,10 @@ export function createToastRegion({ store }) {
   };
 
   /**
-   * toast 留在 aria-live 树里播报抽屉内的保存错误，但 custom modal 打开时，它的
-   * summary/button 不能成为外部 Tab 落点。render 会重建整片内容，所以每次渲染都
-   * 重新同步；关闭抽屉时再还原各控件原本的 tabindex。
+   * toast 留在 aria-live 树里播报抽屉内的保存错误。模态期间只把控件移出
+   * 外部 Tab 环，不阻断 pointer/click，保证用户仍能关闭或复制通知。
    */
   function syncModalBlocked() {
-    if (modalBlocked) root.setAttribute('data-modal-blocked', 'true');
-    else root.removeAttribute('data-modal-blocked');
-
     const controls = [
       ...root.querySelectorAll('summary'),
       ...root.querySelectorAll('button'),
