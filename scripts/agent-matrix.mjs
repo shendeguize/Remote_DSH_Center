@@ -163,7 +163,7 @@ async function pluginState(base, timeoutMs) {
 }
 
 async function waitPluginState(base, args) {
-  const deadline = Date.now() + Math.min(args.timeoutMs, 30_000);
+  const deadline = Date.now() + args.timeoutMs;
   while (Date.now() < deadline) {
     const state = await pluginState(base, args.timeoutMs);
     if (state.status === 200) return state;
@@ -191,7 +191,9 @@ async function ensureDshSession(base, args) {
     throw error;
   }
 
-  const deadline = Date.now() + Math.min(args.timeoutMs, 30_000);
+  // A freshly started plugin has a cold session index, so the bound tracks the
+  // configured timeout instead of an unrelated constant.
+  const deadline = Date.now() + args.timeoutMs;
   while (Date.now() < deadline) {
     const state = await pluginState(base, args.timeoutMs);
     if (state.status === 200) {
@@ -209,7 +211,7 @@ async function ensureDshSession(base, args) {
 }
 
 async function waitForEligible(base, agent, sessionId, args) {
-  const deadline = Date.now() + Math.min(args.timeoutMs, 60_000);
+  const deadline = Date.now() + args.timeoutMs;
   let lastReason = 'session_not_found';
   while (Date.now() < deadline) {
     const state = await pluginState(base, args.timeoutMs);
@@ -337,15 +339,18 @@ async function realRun(args) {
     const host = await rig.waitPhase('running', { timeoutMs: args.timeoutMs });
     if (!host.mappedUrl) throw new Error('Center returned no mapped plugin URL');
 
+    stage = 'plugin.waitState';
     const state = await waitPluginState(host.mappedUrl, args);
     if (state.status !== 200 || !state.json?.board?.sessions) {
       throw new Error(`plugin state unavailable (${state.status})`);
     }
     const rows = state.json.board.sessions;
+    stage = 'dsh.ensureSession';
     const dshRow = args.agents.includes('dsh')
       ? await ensureDshSession(host.mappedUrl, args)
       : null;
     dshSessionId = dshRow?.session_id ?? null;
+    stage = 'agents.inject';
     const work = args.agents.map((agent) => ({
       agent,
       row: agent === 'dsh' ? dshRow : sessionRowByAgent(rows, agent),
@@ -404,6 +409,7 @@ async function realRun(args) {
       // The token is deliberately not copied into result/evidence.
       return result;
     });
+    stage = 'plugin.postState';
     const after = await fetchJson(
       pluginUrl(host.mappedUrl, '/plugins/agent-sidecar/api/state'),
       {},
@@ -411,6 +417,7 @@ async function realRun(args) {
     );
     if (after.status !== 200) drift.push(`post-matrix plugin state unavailable (${after.status})`);
     if (dshRow) {
+      stage = 'dsh.disposeSession';
       try {
         await dshRpc(host.mappedUrl, 'session.dispose', { sessionId: dshRow.session_id }, args.timeoutMs);
       } catch (error) {
