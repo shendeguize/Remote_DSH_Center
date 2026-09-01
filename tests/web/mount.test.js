@@ -802,6 +802,21 @@ test('批量配置入口随主机数、连接态与 config:sync pending 刷新',
     '断线关闭后焦点要回到稳定导航，不能留在 disabled 入口或 body');
 });
 
+test('舰队分析入口随连接态开关，断线时不留可点却无反应的按钮', async (t) => {
+  const { app, dom } = await mount(t, { hash: '#/manage' });
+  const run = dom.app.querySelector('.fleet-analysis button');
+  assert.ok(run, '管理页应提供舰队分析入口');
+  assert.equal(run.disabled, false);
+
+  app.store.setConnection({ sse: 'offline', everOpened: true });
+  assert.equal(run.disabled, true, '断线后必须禁用，而不是留个点了没反应的按钮');
+  assert.match(run.title, /写操作已暂停/);
+
+  app.store.setConnection({ sse: 'open', resyncing: false });
+  assert.equal(run.disabled, false, '重连并校准后放开');
+  assert.equal(run.title, '');
+});
+
 test('批量配置 dialog：原生语义、焦点、源目标互斥与快捷选择完整', async (t) => {
   const { dom } = await mount(t, {
     hash: '#/manage',
