@@ -124,7 +124,7 @@ test('§1.2 拉起模板：双层算例逐字一致（12 §2.5）', () => {
   noRawNewline(s, 'launch');
   assert.equal(
     s,
-    'mkdir -p "$HOME/.dsh_center_remote/patches" || { echo "ERR=mkdir"; exit 9; }; LOG="$HOME/.dsh_center_remote/web-8899.log"; : > "$LOG"; nohup env GREETING=\'hi there\' dsh web --no-open --host 127.0.0.1 --port 8899 \'--verbose\' > "$LOG" 2>&1 < /dev/null & echo "PID=$!"',
+    'mkdir -p "$HOME/.dsh_center_remote/patches" || { echo "ERR=mkdir"; exit 9; }; LOG="$HOME/.dsh_center_remote/web-8899.log"; : > "$LOG"; DSH=dsh; if ! command -v dsh >/dev/null 2>&1; then DSH=; for D in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /opt/homebrew/bin /snap/bin; do if [ -x "$D/dsh" ]; then DSH="$D/dsh"; break; fi; done; fi; if [ -z "$DSH" ] && command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then DSH=$(timeout 5 bash -lc \'command -v dsh\' 2>/dev/null | head -n 1); fi; if [ -z "$DSH" ]; then echo "ERR=no-dsh"; exit 7; fi; nohup env GREETING=\'hi there\' "$DSH" web --no-open --host 127.0.0.1 --port 8899 \'--verbose\' > "$LOG" 2>&1 < /dev/null & echo "PID=$!"',
   );
 });
 
@@ -141,8 +141,63 @@ test('§1.2 前置语句用 "; " 连接、& 后直接跟 echo $!', () => {
   const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
   assert.ok(s.includes('< /dev/null & echo "PID=$!"'), '& 本身是分隔符，其后不能再跟 ;');
   assert.ok(!s.includes('&& echo "PID'), 'AND 链接会让 $! 变成子壳 PID');
-  assert.ok(s.includes('"$LOG"; nohup '), '前置语句与 nohup 之间用 "; "');
+  assert.ok(s.includes('; nohup '), '前置语句与 nohup 之间用 "; "');
   assert.ok(s.includes('< /dev/null'), 'stdin 必须重定向，否则 sshd 等后台进程释放通道');
+});
+
+test('§1.2 dsh 解析段：默认字面 dsh，嗅探清单与探测协议同一份，找不到则 exit 7 快败', () => {
+  const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
+  // command -v 成功时保持字面 `dsh`：argv[0] 不变，ps 指纹维持 `dsh web …` 旧形态（不误杀零回归）
+  assert.ok(s.includes('; DSH=dsh; if ! command -v dsh >/dev/null 2>&1; then DSH=;'));
+  const sniffDirs = '"$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /opt/homebrew/bin /snap/bin';
+  assert.ok(s.includes(`for D in ${sniffDirs}; do`), '拉起模板的嗅探目录清单');
+  assert.ok(buildProbeScript().includes(`for D in ${sniffDirs}; do`), '与 §1.1 探测协议同一份清单');
+  assert.ok(s.includes("bash -lc 'command -v dsh'"), 'login shell 兜底（同探测）');
+  assert.ok(s.includes('echo "ERR=no-dsh"; exit 7'), '找不到 dsh 带标记快败；退出码 7 见占用表');
+  assert.ok(s.indexOf('exit 7; fi') < s.indexOf('; nohup '), '解析与快败必须排在 nohup 之前');
+});
+
+test('§1.2 显式 dshPath 跳过自动嗅探并校验可执行文件', () => {
+  const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: '~/bin/dsh' });
+  assert.match(s, /DSH="\$HOME"'\/bin\/dsh'/);
+  assert.match(s, /\[ ! -x "\$DSH" \]/);
+  assert.doesNotMatch(s, /command -v dsh/);
+  assert.throws(
+    () => buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: 'bin/dsh' }),
+    (error) => error.code === 'VALIDATION',
+  );
+});
+
+test('§1.2 dsh 解析段在真实 sh 下按序兜底（空 PATH 完全隔离本机环境）', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+
+  const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
+  const block = s.slice(s.indexOf('DSH=dsh'), s.indexOf('; nohup '));
+  // 解析块只用到 shell 内建（command / [ ] / for），空 PATH 即密封：
+  // timeout、bash 均不在 PATH，login shell 兜底的分支守卫恒不成立。
+  const sealedPath = await mkdtemp(join(tmpdir(), 'dshc-sealed-path-'));
+
+  // PATH 里有 dsh → 保持字面 dsh
+  const binDir = await mkdtemp(join(tmpdir(), 'dshc-bin-'));
+  await writeFile(join(binDir, 'dsh'), '#!/bin/sh\n');
+  await chmod(join(binDir, 'dsh'), 0o755);
+  const onPath = await run('/bin/sh', ['-c', `${block}; printf 'DSH=<%s>\\n' "$DSH"`], {
+    env: { PATH: binDir, HOME: await mkdtemp(join(tmpdir(), 'dshc-home-')) },
+  });
+  assert.equal(onPath.stdout, 'DSH=<dsh>\n');
+
+  // PATH 没有、~/.local/bin 有 → 兜底为绝对路径（嗅探清单里 $HOME 系目录排在最前，
+  // 真机 /usr/local/bin 等绝对目录即使存在也抢不到前面，用例对本机环境免疫）
+  const home = await mkdtemp(join(tmpdir(), 'dshc-home-'));
+  await mkdir(join(home, '.local', 'bin'), { recursive: true });
+  await writeFile(join(home, '.local', 'bin', 'dsh'), '#!/bin/sh\n');
+  await chmod(join(home, '.local', 'bin', 'dsh'), 0o755);
+  const sniffed = await run('/bin/sh', ['-c', `${block}; printf 'DSH=<%s>\\n' "$DSH"`], {
+    env: { PATH: sealedPath, HOME: home },
+  });
+  assert.equal(sniffed.stdout, `DSH=<${home}/.local/bin/dsh>\n`);
 });
 
 test('§1.2 workdir=null 时模板逐字不含 cd（回归锁，补丁 01 §4.1）', () => {
@@ -156,9 +211,10 @@ test('§1.2 workdir 注入 cd 段：绝对路径、~ 拼接与退出码 8', () =
   const abs = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: '/root/my proj' });
   noRawNewline(abs, 'launch+workdir');
   assert.ok(
-    abs.includes(`: > "$LOG"; cd -- '/root/my proj' || { echo "ERR=workdir"; printf 'WD=%s\\n' '/root/my proj'; exit 8; }; nohup `),
-    `cd 段应排在日志截断之后、nohup 之前：${abs}`,
+    abs.includes(`: > "$LOG"; cd -- '/root/my proj' || { echo "ERR=workdir"; printf 'WD=%s\\n' '/root/my proj'; exit 8; }; DSH=dsh;`),
+    `cd 段应排在日志截断之后、dsh 解析段之前：${abs}`,
   );
+  assert.ok(abs.indexOf('exit 8; }') < abs.indexOf('; nohup '), 'cd 段与 dsh 解析都在 nohup 之前');
 
   // ~ 不能进单引号（引号内不展开），必须是 "$HOME" 与 shq 段相邻拼接
   const tilde = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: '~/proj' });
@@ -217,11 +273,11 @@ test('§1.2 patch 与 extraArgs 拼装、--port 0 降级、注入值转义', () 
     extraArgs: ['--verbose', 'x; rm -rf ~'],
   });
   assert.ok(s.includes('--port 0 '), '降级路径命令行只含字面 0');
-  assert.ok(s.includes("env A_B='it'\\''s' dsh web"));
+  assert.ok(s.includes("env A_B='it'\\''s' \"$DSH\" web"));
   assert.ok(s.includes(' --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'));
   assert.ok(s.includes(' --patch "$HOME/.dsh_center_remote/patches/aabbccddeeff-b.yml"'));
   assert.ok(
-    s.includes('dsh web --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'
+    s.includes('"$DSH" web --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'
       + ' --patch "$HOME/.dsh_center_remote/patches/aabbccddeeff-b.yml" --no-open'),
     '--patch 是启动器旗标，必须紧跟 web 排在 web app 旗标之前（真机 dsh 0.1.0-rc.7 否则报 unknown option）',
   );

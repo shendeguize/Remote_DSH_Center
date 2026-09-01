@@ -493,14 +493,14 @@ function settingsTransaction(operation) {
   return `${operation}-${randomUUID()}`;
 }
 
-async function execute(host, local, command, { signal, input } = {}) {
+async function execute(host, local, command, { signal, input, user = null } = {}) {
   return local
     ? localExec(command, { signal, input })
-    : sshExec(host, command, { signal, input });
+    : sshExec(host, command, { signal, input, user });
 }
 
 /** 读取固定 `${DSH_HOME:-$HOME/.dsh}/settings.yaml`。 */
-export async function readDshSettings(host, { resolveLocal } = {}) {
+export async function readDshSettings(host, { resolveLocal, user = null } = {}) {
   assertSafeHost(host);
   assertResolveLocal(resolveLocal);
   const release = acquireSettingsSlot(host);
@@ -509,7 +509,7 @@ export async function readDshSettings(host, { resolveLocal } = {}) {
       const local = currentLocal(host, resolveLocal);
       const txn = settingsTransaction('read');
       const command = buildSettingsReadScript({ txn });
-      const result = await execute(host, local, command, { signal });
+      const result = await execute(host, local, command, { signal, user });
       assertExecutionSucceeded('read', host, result, txn);
       return _parseSettingsReadResult(result, host, txn);
     });
@@ -523,7 +523,7 @@ export async function readDshSettings(host, { resolveLocal } = {}) {
  */
 export async function writeDshSettings(
   host,
-  { resolveLocal, content, baseChecksum } = {},
+  { resolveLocal, content, baseChecksum, user = null } = {},
 ) {
   assertSafeHost(host);
   assertResolveLocal(resolveLocal);
@@ -540,7 +540,7 @@ export async function writeDshSettings(
         txn,
         baseChecksum,
       });
-      const result = await execute(host, local, command, { signal, input });
+      const result = await execute(host, local, command, { signal, input, user });
       assertExecutionSucceeded('write', host, result, txn);
       return parseSettingsWriteResult(result, input, host, txn);
     });

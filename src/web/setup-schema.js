@@ -172,16 +172,19 @@ export function buildConfigFromAnswers(answers, candidates, probeResults, factor
     const { name, local } = candidate;
     const pick = selection[name] ?? {};
     const enabled = pick.enabled ?? true;
+    if (!enabled) continue;
     // 未探测/非 ready 的主机永远不自启：避免开机就撞一串失败
     const autoStart = Boolean(enabled && pick.autoStart && canAutoStart(probeResults?.[name]));
     hosts[name] = {
       local,
-      enabled,
+      enabled: true,
       autoStart,
       dshPath: hostDefaults.dshPath ?? null,
       localPort: local ? null : hostDefaults.localPort,
       remoteWebPort: hostDefaults.remoteWebPort,
       workdir: hostDefaults.workdir ?? null,
+      sshUser: hostDefaults.sshUser ?? null,
+      dshPath: hostDefaults.dshPath ?? null,
       inject: { env: {}, extraArgs: [], patches: [] },
     };
   }

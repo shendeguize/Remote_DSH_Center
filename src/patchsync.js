@@ -233,13 +233,13 @@ async function planLocalManifest(manifest) {
  * @param {string} host
  * @param {string[]} patches
  * @param {{files:Record<string,{hash:string,remoteName:string,syncedAt:string|null}>}} previous
- * @param {{signal?:AbortSignal, local?:boolean}} [opts]
+ * @param {{signal?:AbortSignal, local?:boolean, user?:string|null}} [opts]
  */
 export async function syncPatches(
   host,
   patches,
   previous = { files: {} },
-  { signal, local = false } = {},
+  { signal, local = false, user = null } = {},
 ) {
   const baseManifest = await buildManifest(patches);
   const manifest = local ? await planLocalManifest(baseManifest) : baseManifest;
@@ -248,7 +248,7 @@ export async function syncPatches(
   if (!local) {
     // 远端清理先行：删除旧 hash 与已移除项，并兼职保证目录存在。
     const cleanup = buildPatchCleanupScript({ keepNames });
-    const cleanRes = await sshExec(host, cleanup, { signal });
+    const cleanRes = await sshExec(host, cleanup, { signal, user });
     const cleanErr = execFailure(host, 'patch 目录清理', cleanRes);
     if (cleanErr) throw cleanErr;
     const cleanOut = parseProtoOutput(cleanRes.stdout, { requireDone: 'CLEAN_DONE' });
@@ -295,7 +295,7 @@ export async function syncPatches(
     // eslint-disable-next-line no-await-in-loop -- 逐文件上载，失败即整体快败
     const res = local
       ? await localCopy(item.localPath, rel, { signal })
-      : await scpTo(host, item.localPath, rel, { signal });
+      : await scpTo(host, item.localPath, rel, { signal, user });
     const err = execFailure(host, `patch 上载 ${path.basename(item.localPath)}`, res);
     if (err) throw err;
     files[item.localPath] = {

@@ -13,6 +13,8 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SAFE_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const SAFE_HOST_RE = /^[A-Za-z0-9._-]+$/;
 const INT_RE = /^[1-9][0-9]{0,9}$/;
+// ssh 登录用户名：不允许多用户服务器的 `user@host` 整个目标被塞进单个字段，只收用户部分。
+const SSH_USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 
 /**
  * 任意字符串 → 可作为单个 shell 单词安全嵌入。
@@ -56,6 +58,21 @@ export function assertSafeHost(h) {
     });
   }
   return h;
+}
+
+/** 可覆盖的 ssh 登录用户名形态校验（multi-user 远端）。`user@host` 只收 user 部分。 */
+export function isValidSshUser(v) {
+  return typeof v === 'string' && v.length >= 1 && SSH_USER_RE.test(v) && !v.startsWith('-');
+}
+
+/** @throws {DshError} VALIDATION */
+export function assertSshUser(v) {
+  if (!isValidSshUser(v)) {
+    throw new DshError('VALIDATION', `非法 ssh 登录用户名：${JSON.stringify(v)}`, {
+      detail: `用户名须匹配 ${SSH_USER_RE} 且不以 - 开头；只填用户部分，不要把 user@host 整个目标塞进来`,
+    });
+  }
+  return v;
 }
 
 /**
@@ -109,4 +126,4 @@ export function assertInt(v, { min = 1, max = 65535, allowZero = false } = {}) {
   return s;
 }
 
-export { ENV_KEY_RE, SAFE_NAME_RE, SAFE_HOST_RE };
+export { ENV_KEY_RE, SAFE_NAME_RE, SAFE_HOST_RE, SSH_USER_RE };

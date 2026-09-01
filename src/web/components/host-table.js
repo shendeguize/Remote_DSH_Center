@@ -14,80 +14,25 @@ import {
 import { isHostEnabled } from '../host-rules.js';
 import { field, input } from '../form.js';
 
-const COLUMNS = ['主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
-export const HOST_GROUPS = Object.freeze([
-  Object.freeze({
-    id: 'started',
-    label: '已启动',
-    phases: Object.freeze(['running', 'starting', 'reconnect', 'abnormal', 'degraded', 'crashed']),
-  }),
-  Object.freeze({ id: 'ready', label: '可拉起', phases: Object.freeze(['ready']) }),
-  Object.freeze({
-    id: 'missing-config',
-    label: '缺失配置',
-    phases: Object.freeze(['no_dsh', 'missing-config']),
-  }),
-  Object.freeze({ id: 'unreachable', label: '不可达', phases: Object.freeze(['unreachable', 'unknown']) }),
-  Object.freeze({ id: 'unmanaged', label: '未纳管', phases: Object.freeze([]) }),
-]);
-
-export function hostGroupId(host) {
-  if (!isHostEnabled(host)) return 'unmanaged';
-  if (host?.orphaned === true) return 'unreachable';
-  return HOST_GROUPS.find((group) => group.phases.includes(host?.phase))?.id ?? 'unreachable';
-}
-
-export function groupHostViews(hosts) {
-  const grouped = Object.fromEntries(HOST_GROUPS.map(({ id }) => [id, []]));
-  for (const host of hosts ?? []) grouped[hostGroupId(host)].push(host);
-  return grouped;
-}
-
-function sortValue(host, key) {
-  if (key === 'status') return hostPhaseMeta(host).label;
-  if (key === 'dsh') return host.probe?.dshPath ?? host.probe?.version ?? '';
-  if (key === 'pid') return host.web?.pid ?? Number.POSITIVE_INFINITY;
-  return host.name ?? '';
-}
-
-export function sortHostViews(hosts, key = 'name', direction = 'asc') {
-  const factor = direction === 'desc' ? -1 : 1;
-  return [...hosts].sort((a, b) => {
-    const left = sortValue(a, key);
-    const right = sortValue(b, key);
-    const result = typeof left === 'number' && typeof right === 'number'
-      ? left - right
-      : String(left).localeCompare(String(right));
-    return factor * (result || String(a.name).localeCompare(String(b.name)));
-  });
-}
-
-const COLLAPSE_STORAGE_KEY = 'dshc.host-table.collapsed-groups';
-
-function loadCollapsedGroups() {
-  try {
-    const parsed = JSON.parse(globalThis.localStorage?.getItem(COLLAPSE_STORAGE_KEY) ?? '{}');
-    return new Set(HOST_GROUPS.map(({ id }) => id).filter((id) => parsed?.[id] === true));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveCollapsedGroups(collapsed) {
-  try {
-    globalThis.localStorage?.setItem(
-      COLLAPSE_STORAGE_KEY,
-      JSON.stringify(Object.fromEntries([...collapsed].map((id) => [id, true]))),
-    );
-  } catch {
-    // localStorage 不可用时折叠仍在当前页面内有效
-  }
-}
+const COLUMNS = ['', '主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
 
 export function createHostTable({ store, actions }) {
   const tbody = el('tbody');
   const empty = el('p.empty-hint', { text: '尚无主机：确认 ~/.ssh/config 中有可用 Host 条目，然后重新探测。' });
   const countLabel = el('span.card-sub.host-count');
+  const selected = new Set();
+  const selectAll = input('checkbox', false, { 'aria-label': '选择全部主机' });
+  selectAll.addEventListener('click', (event) => event.stopPropagation());
+  selectAll.addEventListener('change', () => {
+    selected.clear();
+    if (selectAll.checked) for (const host of store.listHosts()) selected.add(host.name);
+    renderAll();
+  });
+  const removeButton = button('删除所选', {
+    variant: 'danger',
+    onClick: () => actions.removeHosts([...selected]),
+  });
+  removeButton.dataset.act = 'remove-selected';
   const localName = field('本机名称（可选）', input('text', '', {
     placeholder: '留空使用系统主机名',
     autocomplete: 'off',
@@ -98,22 +43,41 @@ export function createHostTable({ store, actions }) {
   });
   addLocalButton.dataset.act = 'add-local';
   addLocalButton.setAttribute('aria-label', '添加本机');
-  const clearOrphanedButton = button('清空 orphaned', {
-    variant: 'danger',
-    onClick: () => actions.clearOrphaned(),
+  const remoteName = field('远端主机', input('text', '', {
+    placeholder: '主机名或地址', autocomplete: 'off', 'aria-label': '远端主机',
+  }));
+  const remoteUser = field('SSH 用户（可选）', input('text', '', {
+    placeholder: 'alice', autocomplete: 'off', 'aria-label': 'SSH 用户（可选）',
+  }));
+  const remoteDshPath = field('dsh 路径（可选）', input('text', '', {
+    placeholder: '~/.local/bin/dsh', autocomplete: 'off', 'aria-label': 'dsh 路径（可选）',
+  }));
+  const addRemoteButton = button('添加远端', {
+    onClick: async () => {
+      const result = await actions.addRemoteHost(remoteName.input.value, {
+        sshUser: remoteUser.input.value.trim() || null,
+        dshPath: remoteDshPath.input.value.trim() || null,
+      });
+      if (result?.host) {
+        remoteName.input.value = '';
+        remoteUser.input.value = '';
+        remoteDshPath.input.value = '';
+      }
+    },
   });
-  clearOrphanedButton.classList.add('clear-orphaned');
-  clearOrphanedButton.dataset.act = 'clear-orphaned';
-  clearOrphanedButton.setAttribute('aria-label', '清空 orphaned 主机');
+  addRemoteButton.dataset.act = 'add-remote';
 
   const root = el('section.card.host-table-card', {}, [
     el('header.card-header', {}, [
       el('h2', { text: '主机' }),
-      el('div.row-actions', {}, [countLabel, clearOrphanedButton, localName.root, addLocalButton]),
+      el('div.row-actions', {}, [
+        countLabel, removeButton, localName.root, addLocalButton,
+        remoteName.root, remoteUser.root, remoteDshPath.root, addRemoteButton,
+      ]),
     ]),
     el('div.table-scroll', {}, [
       el('table.host-table', {}, [
-        el('thead'),
+        el('thead', {}, [el('tr', {}, COLUMNS.map((c, index) => el('th', {}, index === 0 ? [selectAll] : [c])))]),
         tbody,
       ]),
     ]),
@@ -176,18 +140,22 @@ export function createHostTable({ store, actions }) {
 
   function syncHeader() {
     const hosts = store.listHosts();
+    for (const name of selected) if (!hosts.some((host) => host.name === name)) selected.delete(name);
     const loaded = store.state.hostsLoaded;
     const hasLocal = hosts.some((host) => host.local === true);
     const showAddLocal = loaded && !hasLocal;
     const addLocalDisabled = !showAddLocal || !store.canWrite() || store.isPending('local:create');
     countLabel.textContent = hosts.length > 0 ? `${hosts.length} 台` : '';
-    const orphanedCount = hosts.filter((host) => !host.local && host.orphaned).length;
-    clearOrphanedButton.disabled = orphanedCount === 0
-      || !store.canWrite()
-      || store.isPending('orphaned:clear');
-    clearOrphanedButton.title = orphanedCount === 0
-      ? '没有需要清空的 orphaned 主机'
-      : (!store.canWrite() ? '与 manager 失联，写操作已暂停' : '删除配置中的 orphaned 条目并清理运行记录');
+    selectAll.checked = hosts.length > 0 && selected.size === hosts.length;
+    selectAll.indeterminate = selected.size > 0 && selected.size < hosts.length;
+    selectAll.disabled = hosts.length === 0;
+    removeButton.hidden = selected.size === 0;
+    removeButton.disabled = !store.canWrite() || store.isPending('hosts:remove');
+    const addRemoteDisabled = !store.canWrite() || store.isPending('remote:create');
+    remoteName.input.disabled = addRemoteDisabled;
+    remoteUser.input.disabled = addRemoteDisabled;
+    remoteDshPath.input.disabled = addRemoteDisabled;
+    addRemoteButton.disabled = addRemoteDisabled;
     localName.root.hidden = !showAddLocal;
     localName.input.disabled = addLocalDisabled;
     addLocalButton.hidden = !showAddLocal;
@@ -235,6 +203,18 @@ export function createHostTable({ store, actions }) {
     });
 
     const ssh = host.sshInfo;
+    const selectedBox = input('checkbox', selected.has(host.name), {
+      'aria-label': `选择 ${host.name}`,
+      on: {
+        click: (event) => event.stopPropagation(),
+        change: (event) => {
+          if (event.target.checked) selected.add(host.name);
+          else selected.delete(host.name);
+          renderAll();
+        },
+      },
+    });
+    tr.append(el('td.select-cell', { on: { click: (event) => event.stopPropagation() } }, [selectedBox]));
     tr.append(el('td.host-cell', {}, [
       el('strong', { text: host.name }),
       host.local ? el('span.tag.tag-lock', { text: '本机' }) : null,

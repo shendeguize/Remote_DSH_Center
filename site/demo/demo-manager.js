@@ -579,6 +579,7 @@ export function createFakeManager({
       localPort: seed.localPort,
       remoteWebPort: seed.remoteWebPort,
       workdir: seed.workdir,
+      sshUser: null,
       inject: seed.inject ? clone(seed.inject) : { env: {}, extraArgs: [], patches: [] },
     };
     const host = {
@@ -1124,7 +1125,7 @@ export function createFakeManager({
     return { created: true, ...workspace };
   }
 
-  const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject']);
+  const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'sshUser', 'inject']);
 
   function saveHostConfig(name, patch) {
     gate();
@@ -1218,6 +1219,7 @@ export function createFakeManager({
         localPort: hostCfg.localPort ?? null,
         remoteWebPort: hostCfg.remoteWebPort ?? null,
         workdir: hostCfg.workdir ?? null,
+        sshUser: hostCfg.sshUser ?? null,
         inject: clone(hostCfg.inject ?? { env: {}, extraArgs: [], patches: [] }),
       };
       host.effectiveRemotePort = host.config.remoteWebPort ?? config.defaults.remoteWebPort;

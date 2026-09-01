@@ -378,6 +378,20 @@ test('runLaunchSequence：落地目录创建失败保留原始诊断，不误报
   );
 });
 
+test('runLaunchSequence：远端找不到 dsh 快败（ERR=no-dsh，退出码 7 不误报不可达）', async (t) => {
+  recorderFixture(t, {
+    launch: { stdout: 'ERR=no-dsh\n', code: 7 },
+  });
+  _setWait(() => Promise.resolve());
+
+  await assert.rejects(
+    () => runLaunchSequence('gpu-1', { port: 19001 }),
+    (err) => err?.code === 'LAUNCH_FAILED'
+      && /找不到 dsh/.test(err.message)
+      && !/不可达|SSH/.test(err.message),
+  );
+});
+
 test('runLaunchSequence：LAUNCH 缺 PID 时快败并附日志', async (t) => {
   recorderFixture(t, {
     launch: { stdout: 'PID=not-a-pid\n' },

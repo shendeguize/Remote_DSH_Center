@@ -24,6 +24,12 @@ export const PROTO_TIMING = Object.freeze({
 
 const remotePath = (rel) => `$HOME/${REMOTE_DIR}/${rel}`;
 
+/**
+ * dsh 嗅探目录清单（§1.1 探测与 §1.2 拉起共用同一份，保持「探测能发现 = 拉起够得着」）。
+ * $HOME 系目录排在绝对目录之前：先命中先赢。
+ */
+const SNIFF_DIRS = '"$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /opt/homebrew/bin /snap/bin';
+
 // ── §1.1 探测协议 ────────────────────────────────────────────────────────
 
 function dshPathToken(value) {
@@ -50,7 +56,7 @@ export function buildProbeScript({ dshPath = null } = {}) {
     'if command -v timeout >/dev/null 2>&1; then echo "HAS_TIMEOUT=yes"; else echo "HAS_TIMEOUT=no"; fi',
     'SNIFF_PATH=',
     'echo "DSH_SNIFF<<EOF"',
-    'for D in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin" /usr/local/bin /usr/bin /usr/sbin /bin /opt/homebrew/bin /snap/bin; do if [ -x "$D/dsh" ]; then printf "%s\\n" "$D/dsh"; if [ -z "$SNIFF_PATH" ]; then SNIFF_PATH="$D/dsh"; fi; fi; done',
+    `for D in ${SNIFF_DIRS}; do if [ -x "$D/dsh" ]; then printf "%s\\n" "$D/dsh"; if [ -z "$SNIFF_PATH" ]; then SNIFF_PATH="$D/dsh"; fi; fi; done`,
     'echo "EOF"',
     'LOGIN_DSH=',
     'if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then LOGIN_DSH=$(timeout 5 bash -lc \'command -v dsh\' 2>/dev/null | head -n 1); case "$LOGIN_DSH" in /*) ;; *) LOGIN_DSH=;; esac; fi',
@@ -109,11 +115,12 @@ export function parseManualPortBlock(raw) {
 // ── §1.2 拉起协议 ────────────────────────────────────────────────────────
 
 /**
- * @param {{logName:string, port:number|'0', dshPath:string, env?:Record<string,string>,
- *          patchRemoteNames?:string[], extraArgs?:string[], workdir?:string|null}} p
+ * @param {{logName:string, port:number|'0', env?:Record<string,string>,
+ *          patchRemoteNames?:string[], extraArgs?:string[], workdir?:string|null,
+ *          dshPath?:string|null}} p
  */
 export function buildLaunchScript({
-  logName, port, dshPath, env = {}, patchRemoteNames = [], extraArgs = [], workdir = null,
+  logName, port, env = {}, patchRemoteNames = [], extraArgs = [], workdir = null, dshPath = null,
 }) {
   assertSafeName(logName);
   const portTok = assertInt(port, { min: 1, max: 65535, allowZero: true });
@@ -134,7 +141,7 @@ export function buildLaunchScript({
   // 前置语句以 '; ' 连接到 nohup（12 §0：若用 '&&'，`A && B &` 会把整个 AND 列表放入
   // 后台子壳，$! 拿到的是子壳 PID）。'&' 本身即后台化语句与 echo 之间的分隔符——
   // 其后不能再跟 ';'（POSIX 语法错误）。
-  // workdir=null 时整段不生成，模板逐字退回补丁 01 之前的形态（零回归面）。
+  // workdir=null 时 cd 整段不生成（补丁 01 的零回归面口径，回归锁见 proto.test.js）。
   // 落地物路径（日志、patches、--patch 参数）全是 $HOME 绝对形态，cd 影响不到它们。
   const cdStmt = workdir === null
     ? null
@@ -143,16 +150,33 @@ export function buildLaunchScript({
       return `cd -- ${wd} || { echo "ERR=workdir"; printf 'WD=%s\\n' ${wd}; exit 8; }`;
     })();
 
+  // dsh 解析段（排在 cd 之后：cd 可能改变相对 PATH 条目的解析结果）。command -v 成功时
+  // 保持字面 `dsh` 不动——argv[0] 不变，ps 指纹维持 `dsh web …` 旧形态（不误杀零回归）；
+  // 失败再退回嗅探目录与 login shell 的绝对路径，此时指纹自然变成 `/abs/path/dsh web …`
+  // （指纹本来就是 ps 实测回采，12 §5.2，形态变化不影响全等判据）。
+  // 都找不到就 ERR=no-dsh + exit 7（占用表：7=no-dsh、8=workdir、9=mkdir）在 nohup 之前
+  // 快败——不再让「nohup: dsh: No such file or directory」埋进日志尾冒充「进程立即退出」。
+  const dshResolve = dshPath === null ? [
+    'DSH=dsh',
+    `if ! command -v dsh >/dev/null 2>&1; then DSH=; for D in ${SNIFF_DIRS}; do if [ -x "$D/dsh" ]; then DSH="$D/dsh"; break; fi; done; fi`,
+    `if [ -z "$DSH" ] && command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then DSH=$(timeout 5 bash -lc 'command -v dsh' 2>/dev/null | head -n 1); fi`,
+    'if [ -z "$DSH" ]; then echo "ERR=no-dsh"; exit 7; fi',
+  ] : [
+    `DSH=${workdirToken(dshPath)}`,
+    'if [ ! -x "$DSH" ]; then echo "ERR=no-dsh"; exit 7; fi',
+  ];
+
   const prelude = [
     `mkdir -p "${remotePath('patches')}" || { echo "ERR=mkdir"; exit 9; }`,
     `LOG="${remotePath(logName)}"`,
     ': > "$LOG"',
     ...(cdStmt ? [cdStmt] : []),
+    ...dshResolve,
   ].join('; ');
   // --patch 是 dsh 启动器自己的旗标，必须紧跟 `web` 排在 web app 旗标之前：真机
   // （dsh 0.1.0-rc.7）上 `dsh web --no-open ... --patch P` 会被 web app 判为
   // unknown option '--patch' 而直接退出。extraArgs 反过来是 app 参数，仍留在尾部。
-  const launch = `nohup ${envp}${dshTok} web${patchArgs} --no-open --host 127.0.0.1 --port ${portTok}${extra} > "$LOG" 2>&1 < /dev/null &`;
+  const launch = `nohup ${envp}"$DSH" web${patchArgs} --no-open --host 127.0.0.1 --port ${portTok}${extra} > "$LOG" 2>&1 < /dev/null &`;
   return `${prelude}; ${launch} echo "PID=$!"`;
 }
 
