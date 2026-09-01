@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import * as store from '../src/store.js';
 import {
-  applyProbe, interpretProbe, parseRunningBlock, parseSniffPaths, probeHost, probeOnce,
+  applyProbe, interpretProbe, parseManualPort, parseRunningBlock, parseSniffPaths, probeHost, probeOnce,
 } from '../src/prober.js';
 import { CONFIG_VERSION, resolvePaths } from '../src/defaults.js';
 import { _resetForTest } from '../src/lib/bus.js';
@@ -50,7 +50,11 @@ test('interpretProbe：ready 全字段', () => {
     version: 'dsh 0.1.0-rc.7 (build abc)',
     probePath: '/usr/local/bin:/usr/bin',
   });
-  assert.deepEqual(r.manualInstances, [{ pid: 60768, args: 'dsh web --no-open --host 127.0.0.1 --port 8899' }]);
+  assert.deepEqual(r.manualInstances, [{
+    pid: 60768,
+    args: 'dsh web --no-open --host 127.0.0.1 --port 8899',
+    port: 8899,
+  }]);
 });
 
 test('interpretProbe：no_dsh 两种原因可区分', () => {
@@ -123,12 +127,19 @@ test('parseRunningBlock：ps 行解析、忽略噪声行', () => {
   assert.deepEqual(
     parseRunningBlock('  123 dsh web --port 1\n\nnot a ps line\n 456   dsh web --port 2  '),
     [
-      { pid: 123, args: 'dsh web --port 1' },
-      { pid: 456, args: 'dsh web --port 2' },
+      { pid: 123, args: 'dsh web --port 1', port: 1 },
+      { pid: 456, args: 'dsh web --port 2', port: 2 },
     ],
   );
   assert.deepEqual(parseRunningBlock(''), []);
   assert.deepEqual(parseRunningBlock(null), []);
+});
+
+test('parseManualPort：固定端口可读，0/缺失按未知', () => {
+  assert.equal(parseManualPort('dsh web --port 8899'), 8899);
+  assert.equal(parseManualPort('dsh web --port=8899'), 8899);
+  assert.equal(parseManualPort('dsh web --port 0'), null);
+  assert.equal(parseManualPort('dsh web'), null);
 });
 
 test('parseSniffPaths：按行收集命中路径并忽略空行', () => {

@@ -12,8 +12,15 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
+import readline from 'node:readline';
 
 import * as daemon from './daemon.js';
+import { createAnalysisService } from './analysis.js';
+import {
+  DEFAULT_CLEANUP_RULES,
+  buildCleanupPlan,
+  normalizeCleanupRules,
+} from './cleanup.js';
 import * as updater from './updater.js';
 import { FACTORY_DEFAULTS, newFactoryConfig, resolvePaths } from './defaults.js';
 import { isMainEntry } from './lib/entry.js';
@@ -39,6 +46,10 @@ const FLAG_SPEC = {
   port: 'number',
   foreground: 'boolean',
   force: 'boolean',
+  adopt: 'boolean',
+  'force-new': 'boolean',
+  apply: 'boolean',
+  rules: 'string',
   'no-wait': 'boolean',
   json: 'boolean',
   verbose: 'boolean',
@@ -180,6 +191,10 @@ export function parseSseFrame(raw) {
  */
 export const TERMINAL = Object.freeze({
   start: { success: ['running'], fail: ['ready', 'crashed'], afterStarting: true },
+  // Adoption has no starting phase; a late ready snapshot from the probe must
+  // not be treated as a failed adoption. The operation-done event is the
+  // authoritative success/failure signal for this action.
+  adopt: { success: ['running'], fail: [] },
   restart: { success: ['running'], fail: ['ready', 'crashed'], afterStarting: true },
   stop: { success: ['ready'], fail: [] },
   reconnect: { success: ['running'], fail: ['crashed'] },
@@ -610,8 +625,17 @@ async function cmdRestart(parsed) {
 async function cmdStatus({ flags }) {
   const check = await daemon.aliveCheck();
   const service = await daemon.serviceStatus();
+  const localSidecar = await createAnalysisService().status();
   const port = check.info?.port ?? managerPort(flags);
   const info = check.remote ?? await daemon.fetchInfo(port);
+  let sidecar = localSidecar;
+  if (info) {
+    try {
+      sidecar = (await apiRequest(port, 'GET', '/api/sidecar/status')).json;
+    } catch {
+      sidecar = { compatible: false, version: null, executable: null, error: 'status unavailable' };
+    }
+  }
 
   const report = {
     running: Boolean(info),
@@ -624,6 +648,7 @@ async function cmdStatus({ flags }) {
     pidfile: check.info ?? null,
     pidfileStale: check.stale,
     launchd: service,
+    sidecar,
   };
 
   if (flags.json) {
@@ -641,6 +666,7 @@ async function cmdStatus({ flags }) {
 
   out(`manager：运行中（${report.mode}）`);
   out(`  pid ${report.pid}  端口 ${report.port}  已运行 ${fmtDuration(report.uptimeMs)}`);
+  out(`  Sidecar：${report.sidecar?.version ?? '未找到'}${report.sidecar?.compatible ? '（兼容）' : '（不可用或版本过低）'}`);
   if (report.hosts) {
     out(`  主机 ${report.hosts.total} 台：运行 ${report.hosts.running} / 重连 ${report.hosts.degraded} / 异常 ${report.hosts.crashed}`);
   }
@@ -760,8 +786,9 @@ async function cmdService({ positionals }) {
 
 async function cmdVersion({ flags }) {
   const info = await updater.collectVersionInfo();
+  const sidecar = await createAnalysisService().status();
   if (flags.json) {
-    out(JSON.stringify(info, null, 2));
+    out(JSON.stringify({ ...info, sidecar }, null, 2));
     return EXIT.ok;
   }
   out(`dsh-center ${info.version ?? '（版本号读不出来）'}`);
@@ -769,6 +796,7 @@ async function cmdVersion({ flags }) {
   // 运行时路径是 bundle 安装的自证：指向 <bundle 根>/runtime/bin/node 才算真用上自带运行时
   out(`Node 运行时：${info.node.version}（${info.node.execPath}）`);
   out(`安装位置：${info.root}`);
+  out(`Sidecar：${sidecar.version ?? '未找到'}${sidecar.compatible ? '（兼容）' : '（不可用或版本过低）'}`);
   return info.channel === 'unknown' ? EXIT.failed : EXIT.ok;
 }
 
@@ -914,6 +942,50 @@ async function cmdLs(parsed) {
   });
 }
 
+async function cmdCleanup(parsed) {
+  return withApi(parsed, async (port) => {
+    const hosts = await fetchHosts(port);
+    let selectedHosts = hosts;
+    if (parsed.positionals.length > 0) {
+      const picked = resolveHostArg(parsed.positionals[0], hosts.map((host) => host.name));
+      if (!picked.ok) {
+        errOut(`错误：${picked.error}`);
+        if (picked.candidates.length > 0) errOut(`候选：${picked.candidates.join(', ')}`);
+        return EXIT.usage;
+      }
+      selectedHosts = hosts.filter((host) => host.name === picked.name);
+    }
+    const config = (await apiRequest(port, 'GET', '/api/config')).json;
+    const configuredRules = parsed.flags.rules === undefined
+      ? config.cleanup?.rules ?? DEFAULT_CLEANUP_RULES
+      : parsed.flags.rules.split(',');
+    let rules;
+    try {
+      rules = normalizeCleanupRules(configuredRules);
+    } catch (error) {
+      throw new UsageError(`清理规则无效：${error.message}`);
+    }
+    const plan = buildCleanupPlan(selectedHosts, { rules });
+    if (parsed.flags.json) out(JSON.stringify({
+      apply: parsed.flags.apply === true,
+      rules,
+      candidates: plan,
+    }, null, 2));
+    else if (plan.length === 0) out('没有符合安全清理规则的实例。');
+    else plan.forEach((item) => out(
+      `${parsed.flags.apply === true ? '准备清理' : '待清理'} ${item.host} `
+      + `pid=${item.pid} port=${item.port ?? 'unknown'} rule=${item.rule} `
+      + `fingerprint=${item.fingerprintSha12}`,
+    ));
+    if (parsed.flags.apply !== true) return EXIT.ok;
+    for (const item of plan) {
+      const code = await runAction(port, item.host, 'stop', { flags: {} });
+      if (code !== EXIT.ok) return code;
+    }
+    return EXIT.ok;
+  });
+}
+
 async function cmdProbe(parsed) {
   return withApi(parsed, async (port) => {
     if (parsed.positionals.length === 0) {
@@ -941,6 +1013,31 @@ async function cmdHostAction(action, parsed) {
     try {
       return await runAction(port, picked.name, action, parsed);
     } catch (err) {
+      if (
+        action === 'start'
+        && err?.code === 'ADOPTION_AVAILABLE'
+        && parsed.flags.adopt !== true
+        && parsed.flags['force-new'] !== true
+      ) {
+        if (!process.stdin.isTTY) {
+          errOut('已发现正在运行的手动 dsh web；非交互模式拒绝重复拉起。请使用 --adopt 或 --force-new。');
+          return EXIT.failed;
+        }
+        const choice = await promptAdoption(picked.name);
+        if (choice === 'adopt') {
+          return runAction(port, picked.name, 'start', {
+            ...parsed,
+            flags: { ...parsed.flags, adopt: true },
+          });
+        }
+        if (choice === 'force') {
+          return runAction(port, picked.name, 'start', {
+            ...parsed,
+            flags: { ...parsed.flags, 'force-new': true },
+          });
+        }
+        return EXIT.failed;
+      }
       if (action === 'start') {
         const current = await fetchHosts(port).catch(() => []);
         const host = current.find((item) => item.name === picked.name);
@@ -951,18 +1048,41 @@ async function cmdHostAction(action, parsed) {
   });
 }
 
+function promptAdoption(host) {
+  return new Promise((resolve) => {
+    const input = process.stdin;
+    const output = process.stdout;
+    const rl = readline.createInterface({ input, output });
+    rl.question(
+      `主机 ${host} 已有手动 dsh web：[a] 只读领养 / [f] 强拉新实例 / [c] 取消？ `,
+      (answer) => {
+        rl.close();
+        const choice = String(answer).trim().toLowerCase();
+        resolve(choice === 'a' ? 'adopt' : choice === 'f' ? 'force' : 'cancel');
+      },
+    );
+  });
+}
+
 /** 202 受理型操作：默认挂 SSE 等终态，--no-wait 立即返回。 */
 async function runAction(port, name, action, parsed) {
-  const endpoint = `/api/hosts/${encodeURIComponent(name)}/${action}`;
+  const adopt = action === 'start' && parsed.flags.adopt === true;
+  const endpoint = `/api/hosts/${encodeURIComponent(name)}/${adopt ? 'adopt' : action}`;
+  const terminalAction = adopt ? 'adopt' : action;
+  const body = adopt
+    ? {}
+    : action === 'start' && parsed.flags['force-new'] === true
+      ? { forceNew: true }
+      : undefined;
 
   if (parsed.flags['no-wait']) {
-    await apiRequest(port, 'POST', endpoint);
+    await apiRequest(port, 'POST', endpoint, body);
     out(`已受理：${name} ${action}`);
     return EXIT.ok;
   }
 
-  const res = await waitTerminal(port, name, action, {
-    trigger: () => apiRequest(port, 'POST', endpoint),
+  const res = await waitTerminal(port, name, terminalAction, {
+    trigger: () => apiRequest(port, 'POST', endpoint, body),
     onLog: (line) => errOut(`  [${line.level}] ${line.msg}`),
   });
 
@@ -1404,9 +1524,10 @@ export const COMMANDS = {
 
   ls: { usage: 'dshc ls [--json]', needsServer: true, run: cmdLs },
   probe: { usage: 'dshc probe [<host>]', needsServer: true, run: cmdProbe },
-  start: { usage: 'dshc start <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('start', p) },
+  start: { usage: 'dshc start <host> [--adopt|--force-new] [--no-wait]', needsServer: true, run: (p) => cmdHostAction('start', p) },
   stop: { usage: 'dshc stop <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('stop', p) },
   reconnect: { usage: 'dshc reconnect <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('reconnect', p) },
+  cleanup: { usage: 'dshc cleanup [<host>] [--rules LIST] [--apply] [--json]', needsServer: true, run: cmdCleanup },
   log: { usage: 'dshc log <host> [-n N]', needsServer: true, run: cmdLog },
   // 先探活再开浏览器：manager 没起时打开一个必定打不开的页面，还报成功，
   // 只会让人去怀疑浏览器和端口（issue #23）。引导模式要放行，页面就是向导。
@@ -1418,7 +1539,7 @@ export function usageText() {
   const lines = ['dshc —— DSH Center 本机入口', '', '生命周期：'];
   for (const key of ['init', 'up', 'down', 'restart', 'status', 'logs', 'service', 'version', 'update']) lines.push(`  ${COMMANDS[key].usage}`);
   lines.push('', '主机操作：');
-  for (const key of ['ls', 'probe', 'start', 'stop', 'reconnect', 'log', 'open', 'config']) lines.push(`  ${COMMANDS[key].usage}`);
+  for (const key of ['ls', 'probe', 'start', 'stop', 'reconnect', 'cleanup', 'log', 'open', 'config']) lines.push(`  ${COMMANDS[key].usage}`);
   lines.push('', '退出码：0 成功｜1 操作失败｜2 超时/通信失败｜3 用法错误｜130 等待被 Ctrl-C 打断（操作仍在继续）');
   return lines.join('\n');
 }

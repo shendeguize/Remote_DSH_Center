@@ -256,12 +256,13 @@ test('SSE 分帧器：跨 chunk、心跳注释、坏 JSON', () => {
   assert.equal(parseSseFrame('event: x'), null, '没有 data 字段不成帧');
 });
 
-test('终态表覆盖五个受理型操作（11 §6.2）', () => {
-  assert.deepEqual(Object.keys(TERMINAL).sort(), ['probe', 'reconnect', 'restart', 'start', 'stop']);
+test('终态表覆盖生命周期与只读领养操作', () => {
+  assert.deepEqual(Object.keys(TERMINAL).sort(), ['adopt', 'probe', 'reconnect', 'restart', 'start', 'stop']);
   assert.deepEqual(TERMINAL.start, { success: ['running'], fail: ['ready', 'crashed'], afterStarting: true });
   assert.equal(TERMINAL.restart.afterStarting, true, 'ready 只有在 starting 之后才算回滚失败');
   assert.equal(TERMINAL.probe.afterStarting, undefined, 'probe 的 ready 就是成功，不需延后');
   assert.deepEqual(TERMINAL.probe.success, ['ready', 'no_dsh', 'unreachable']);
+  assert.deepEqual(TERMINAL.adopt.fail, [], '领养以 operation-done 为权威失败信号');
   assert.deepEqual(TERMINAL.stop.fail, [], 'stop 的失败靠 HTTP 409 KILL_REFUSED，不等 SSE');
 });
 

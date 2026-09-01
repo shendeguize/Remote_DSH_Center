@@ -261,14 +261,45 @@ class Rig {
     }
   }
 
-  async teardown({ keep = false } = {}) {
+  async cleanupDshSession(sessionId) {
+    if (!/^session-[0-9a-f-]{36}$/u.test(sessionId ?? '')) {
+      throw new Error('invalid DSH session id');
+    }
+    const script = [
+      `sid=${shq(sessionId)}`,
+      'root="$HOME/.dsh/sessions"',
+      'found=""',
+      'count=0',
+      'for candidate in "$root"/*/"$sid"; do [ -d "$candidate" ] || continue; count=$((count + 1)); found="$candidate"; done',
+      '[ "$count" -eq 1 ] || { echo "DSH_SESSION_CLEANUP=not-unique"; exit 7; }',
+      'case "$found" in "$root"/*/"$sid") ;; *) echo "DSH_SESSION_CLEANUP=path-refused"; exit 8 ;; esac',
+      'rm -rf -- "$found"',
+      '[ ! -e "$found" ] || { echo "DSH_SESSION_CLEANUP=remove-failed"; exit 9; }',
+      'echo "DSH_SESSION_CLEANUP=removed"',
+    ].join('; ');
+    const result = await this.ssh(script);
+    if (result.code !== 0 || !result.stdout.includes('DSH_SESSION_CLEANUP=removed')) {
+      throw new Error(result.stdout.trim() || result.stderr.trim() || 'DSH session artifact cleanup failed');
+    }
+  }
+
+  async teardown({ keep = false, cleanupSessionId = null } = {}) {
     const patchNames = this.trackedPatchNames();
+    this.lastDshCleanup = { requested: cleanupSessionId !== null, ok: cleanupSessionId === null };
     try {
       await this.dshc(['stop', this.host], { timeoutMs: 60_000 });
     } catch { /* 尽力而为 */ }
     try {
       await this.dshc(['down']);
     } catch { /* 同上 */ }
+    if (cleanupSessionId !== null && !keep) {
+      try {
+        await this.cleanupDshSession(cleanupSessionId);
+        this.lastDshCleanup.ok = true;
+      } catch (err) {
+        this.lastDshCleanup.error = err instanceof Error ? err.message : String(err);
+      }
+    }
     // 远端别留本轮孤儿：不能用宽匹配 pkill，必须逐个按 PID + 完整指纹核对。
     for (const tracked of this.trackedProcesses.values()) {
       try {

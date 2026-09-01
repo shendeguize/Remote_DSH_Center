@@ -110,7 +110,10 @@ export const hostView = V.obj({
       syncedAt: V.nullable(iso),
     })),
   }),
-  manualInstances: V.arr(V.obj({ pid: V.int({ min: 1 }), args: V.str() })),
+  manualInstances: V.arr(V.obj(
+    { pid: V.int({ min: 1 }), args: V.str(), port: V.nullable(port) },
+    { optional: ['port'] },
+  )),
 });
 
 // ── §2 REST ─────────────────────────────────────────────────────────────
@@ -143,8 +146,11 @@ export const configBody = V.obj({
   setupCompleted: V.bool(),
   manager: V.obj({ port }),
   defaults: defaultsView,
+  cleanup: V.obj({
+    rules: V.arr(V.str({ min: 1, max: 32 })),
+  }),
   hosts: V.rec(null, hostConfigView),
-});
+}, { optional: ['cleanup'] });
 
 export const managerInfo = V.obj({
   version: V.str({ min: 1 }),

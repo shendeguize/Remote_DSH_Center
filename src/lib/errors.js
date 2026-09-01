@@ -10,6 +10,9 @@ export const ERROR_HTTP_STATUS = Object.freeze({
   SETUP_REQUIRED: 409,
   PHASE_CONFLICT: 409,
   NOT_ALLOWED: 409,
+  ADOPTION_AVAILABLE: 409,
+  ADOPT_REFUSED: 409,
+  PORT_UNKNOWN: 409,
   // 跨站防线（src/lib/origin-guard.js）：都是 403，且都在路由之前判掉
   FORBIDDEN_ORIGIN: 403,
   FORBIDDEN_HOST: 403,

@@ -19,6 +19,7 @@ import { createConfirmDialog } from './components/confirm-dialog.js';
 import { createConfigSyncDialog } from './components/config-sync-dialog.js';
 import { createDefaultsCard } from './components/defaults-card.js';
 import { createEventPanel } from './components/event-panel.js';
+import { createFleetAnalysis } from './components/fleet-analysis.js';
 import { createHostDrawer } from './components/host-drawer.js';
 import { createHostTable } from './components/host-table.js';
 import { createHub } from './components/hub.js';
@@ -92,6 +93,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
   const managerCard = createManagerCard({ store, actions });
   const defaultsCard = createDefaultsCard({ store, actions });
   const eventPanel = createEventPanel({ store });
+  const fleetAnalysis = createFleetAnalysis({ store });
   configSyncDialog = createConfigSyncDialog({ store, actions });
   dashboard.append(
     el('div.card-header.manage-header', {}, [
@@ -100,6 +102,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
     ]),
     hostTable.root,
     el('div.side-by-side', {}, [managerCard.root, defaultsCard.root]),
+    fleetAnalysis.root,
     eventPanel.root,
   );
 

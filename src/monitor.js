@@ -80,15 +80,23 @@ export async function checkOne(name) {
   const alive = await deepCheck(name);
 
   if (alive === false) {
-    store.mutateHostState(name, (st) => { st.tunnel = null; });
+    const adopted = store.getHostState(name)?.web?.startedByUs === false;
+    store.mutateHostState(name, (st) => {
+      st.tunnel = null;
+      if (adopted) st.web = null;
+    });
     await tunnel.close(name);
     if (store.getPhase(name) === 'running') store.setPhase(name, 'crashed', 'monitor.deepCheck');
     logEvent(
       name,
       'error',
       local
-        ? '深度复核：本机实例已消失或指纹不符，标记 crashed'
-        : '深度复核：远端实例已消失或指纹不符，标记 crashed',
+        ? adopted
+          ? '深度复核：本机领养实例已消失，已解除领养并标记 crashed'
+          : '深度复核：本机实例已消失或指纹不符，标记 crashed'
+        : adopted
+          ? '深度复核：远端领养实例已消失，已解除领养并标记 crashed'
+          : '深度复核：远端实例已消失或指纹不符，标记 crashed',
     );
     return { host: name, outcome: 'crashed' };
   }

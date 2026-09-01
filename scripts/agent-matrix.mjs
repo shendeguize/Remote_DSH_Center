@@ -88,7 +88,10 @@ function hash(value) {
 function sessionRowByAgent(rows, agent) {
   return rows
     .filter((row) => row?.agent === agent && typeof row.session_id === 'string' && row.session_id)
-    .sort((left, right) => Number(right.updated_at ?? 0) - Number(left.updated_at ?? 0))[0] ?? null;
+    .sort((left, right) => (
+      Number(right.inject_eligibility?.allowed === true)
+      - Number(left.inject_eligibility?.allowed === true)
+    ) || Number(right.updated_at ?? 0) - Number(left.updated_at ?? 0))[0] ?? null;
 }
 
 async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -105,7 +108,10 @@ async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     try {
       json = text ? JSON.parse(text) : null;
     } catch {
-      throw new Error(`invalid JSON response (${response.status})`);
+      throw new Error(
+        `invalid JSON response (${response.status}) ${url}: `
+        + `${text.replace(/\s+/gu, ' ').slice(0, 160)}`,
+      );
     }
     return { status: response.status, json };
   } finally {
@@ -141,32 +147,84 @@ async function dshRpc(base, method, payload, timeoutMs) {
   return response.json.result.value;
 }
 
-async function ensureDshSession(base, rows, args) {
-  const existing = sessionRowByAgent(rows, 'dsh');
-  if (existing) return existing;
+async function pluginState(base, timeoutMs) {
+  try {
+    return await fetchJson(
+      pluginUrl(base, '/plugins/agent-sidecar/api/state'),
+      {},
+      timeoutMs,
+    );
+  } catch (error) {
+    if (error instanceof Error && /response \(404\)/u.test(error.message)) {
+      return { status: 404, json: null };
+    }
+    throw error;
+  }
+}
 
+async function waitPluginState(base, args) {
+  const deadline = Date.now() + Math.min(args.timeoutMs, 30_000);
+  while (Date.now() < deadline) {
+    const state = await pluginState(base, args.timeoutMs);
+    if (state.status === 200) return state;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error('Sidecar plugin state did not become available');
+}
+
+async function ensureDshSession(base, args) {
   const created = await dshRpc(base, 'session.create', { cwd: args.remoteDir }, args.timeoutMs);
   if (!created?.sessionId) throw new Error('DSH session.create returned no session');
-  await dshRpc(base, 'session.prompt', {
-    sessionId: created.sessionId,
-    mode: 'queue',
-    content: [{ type: 'text', text: MESSAGE }],
-  }, args.timeoutMs);
+  try {
+    await dshRpc(
+      base,
+      'session.prompt',
+      {
+        sessionId: created.sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: 'agent-sidecar matrix probe: initialize DSH session' }],
+      },
+      args.timeoutMs,
+    );
+  } catch (error) {
+    error.dshSessionId = created.sessionId;
+    throw error;
+  }
 
   const deadline = Date.now() + Math.min(args.timeoutMs, 30_000);
   while (Date.now() < deadline) {
-    const state = await fetchJson(
-      pluginUrl(base, '/plugins/agent-sidecar/api/state'),
-      {},
-      args.timeoutMs,
-    );
+    const state = await pluginState(base, args.timeoutMs);
     if (state.status === 200) {
-      const row = sessionRowByAgent(state.json?.board?.sessions ?? [], 'dsh');
+      const row = (state.json?.board?.sessions ?? []).find(
+        (candidate) => candidate?.agent === 'dsh'
+          && candidate?.session_id === created.sessionId,
+      );
       if (row) return row;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  return null;
+  const error = new Error('DSH session.create did not become observable');
+  error.dshSessionId = created.sessionId;
+  throw error;
+}
+
+async function waitForEligible(base, agent, sessionId, args) {
+  const deadline = Date.now() + Math.min(args.timeoutMs, 60_000);
+  let lastReason = 'session_not_found';
+  while (Date.now() < deadline) {
+    const state = await pluginState(base, args.timeoutMs);
+    if (state.status === 200) {
+      const row = (state.json?.board?.sessions ?? []).find(
+        (candidate) => candidate?.agent === agent
+          && candidate?.session_id === sessionId,
+      );
+      if (row?.inject_eligibility?.allowed === true) return row;
+      lastReason = row?.inject_eligibility?.reason || 'session_not_found';
+      if (lastReason !== 'working_session') return row;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return { session_id: sessionId, agent, inject_eligibility: { allowed: false, reason: lastReason } };
 }
 
 async function mapLimit(items, limit, worker) {
@@ -253,45 +311,55 @@ async function realRun(args) {
     unreachableHost: `${args.host}-matrix-unreachable`,
   });
   const drift = [];
+  let dshSessionId = null;
+  let cleanupSessionId = null;
+  let results = [];
+  let stage = 'boot';
   try {
     await rescanSshConfig(args.host);
+    stage = 'rig.boot';
     await rig.boot();
+    stage = 'rig.ensureReady';
     await rig.ensureReady();
+    stage = 'rig.chooseRemotePort';
+    const remotePort = await rig.chooseRemotePort();
+    await rig.setRemoteWebPort(remotePort);
+    stage = 'center.start';
     const started = await rig.api(
       'POST',
       `/api/hosts/${encodeURIComponent(args.host)}/start`,
+      { forceNew: true },
     );
     if (started.status !== 202) {
       throw new Error(`Center did not accept remote web start (${started.status}: ${JSON.stringify(started.json)})`);
     }
+    stage = 'center.waitPhase';
     const host = await rig.waitPhase('running', { timeoutMs: args.timeoutMs });
     if (!host.mappedUrl) throw new Error('Center returned no mapped plugin URL');
 
-    const state = await fetchJson(
-      pluginUrl(host.mappedUrl, '/plugins/agent-sidecar/api/state'),
-      {},
-      args.timeoutMs,
-    );
+    const state = await waitPluginState(host.mappedUrl, args);
     if (state.status !== 200 || !state.json?.board?.sessions) {
       throw new Error(`plugin state unavailable (${state.status})`);
     }
     const rows = state.json.board.sessions;
     const dshRow = args.agents.includes('dsh')
-      ? await ensureDshSession(host.mappedUrl, rows, args)
+      ? await ensureDshSession(host.mappedUrl, args)
       : null;
+    dshSessionId = dshRow?.session_id ?? null;
     const work = args.agents.map((agent) => ({
       agent,
       row: agent === 'dsh' ? dshRow : sessionRowByAgent(rows, agent),
     }));
 
-    const results = await mapLimit(work, args.parallel, async ({ agent, row }) => {
+    results = await mapLimit(work, args.parallel, async ({ agent, row }) => {
       const result = baseResult(agent, agent === 'dsh' ? 'queue' : 'resume', row?.session_id);
       if (!row) {
         result.errorCode = 'session_not_found';
         return result;
       }
-      if (row.inject_eligibility?.allowed !== true) {
-        result.errorCode = row.inject_eligibility?.reason || 'ineligible_session';
+      const eligible = await waitForEligible(host.mappedUrl, agent, row.session_id, args);
+      if (eligible.inject_eligibility?.allowed !== true) {
+        result.errorCode = eligible.inject_eligibility?.reason || 'ineligible_session';
         return result;
       }
       const prepare = await fetchJson(
@@ -342,9 +410,30 @@ async function realRun(args) {
       args.timeoutMs,
     );
     if (after.status !== 200) drift.push(`post-matrix plugin state unavailable (${after.status})`);
+    if (dshRow) {
+      try {
+        await dshRpc(host.mappedUrl, 'session.dispose', { sessionId: dshRow.session_id }, args.timeoutMs);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupSessionId = dshSessionId;
+        drift.push(`DSH session.dispose unavailable; deferred exact artifact cleanup: ${detail}`);
+      }
+    }
     return { results, drift, versions: rig.versions };
+  } catch (error) {
+    cleanupSessionId ||= error?.dshSessionId ?? null;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.startsWith(`${stage}:`) ? message : `${stage}: ${message}`, { cause: error });
   } finally {
-    await rig.teardown({ keep: args.keep });
+    await rig.teardown({ keep: args.keep, cleanupSessionId });
+    if (cleanupSessionId !== null && !rig.lastDshCleanup.ok) {
+      drift.push(`DSH session cleanup failed: ${rig.lastDshCleanup.error ?? 'unknown error'}`);
+      const dshResult = results.find((item) => item.agent === 'dsh');
+      if (dshResult) {
+        dshResult.outcome = 'failed';
+        dshResult.errorCode = 'session_cleanup_failed';
+      }
+    }
   }
 }
 

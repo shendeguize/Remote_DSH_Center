@@ -74,6 +74,37 @@ export function pathHint(prefix, shell = process.env.SHELL ?? '') {
   return `echo 'export PATH="${prefix}:$PATH"' >> ${rc} && exec $SHELL -l`;
 }
 
+async function installSidecarBestEffort() {
+  const existing = await run('agent-sidecar', ['--version']);
+  const match = existing.stdout.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  const compatible = match !== null
+    && (
+      Number(match[1]) > 0
+      || (Number(match[1]) === 0 && Number(match[2]) > 9)
+      || (Number(match[1]) === 0 && Number(match[2]) === 9 && Number(match[3]) >= 0)
+    );
+  if (existing.code === 0 && compatible) {
+    process.stdout.write(`Agent Sidecar 已存在：${existing.stdout.trim()}\n`);
+    return;
+  }
+  if (existing.code === 0) process.stdout.write('Agent Sidecar 版本过低，尝试自动升级…\n');
+  const installerUrl = process.env.DSH_SIDECAR_INSTALLER_URL
+    ?? 'https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh';
+  const temp = path.join(os.tmpdir(), `agent-sidecar-install-${process.pid}.sh`);
+  const download = await run('curl', ['-fsSL', '-o', temp, installerUrl]);
+  if (download.code !== 0) {
+    process.stdout.write('警告：Agent Sidecar 下载失败，Center 安装继续。\n');
+    return;
+  }
+  const installed = await run('sh', [temp, '--prefix', path.join(os.homedir(), '.local')]);
+  try { fs.rmSync(temp); } catch { /* best effort cleanup */ }
+  if (installed.code === 0) {
+    process.stdout.write('Agent Sidecar 已通过官方校验和安装器安装。\n');
+  } else {
+    process.stdout.write('警告：Agent Sidecar 安装失败，Center 安装继续。\n');
+  }
+}
+
 /**
  * 下游不看了（`| head` 之类）属于哪种错。
  *
@@ -186,6 +217,8 @@ async function main() {
   if (!prefixInPath(prefix)) {
     process.stdout.write(`\n注意：${prefix} 不在 PATH 里，现在敲 dshc 还找不到。加一行：\n  ${pathHint(prefix)}\n`);
   }
+
+  await installSidecarBestEffort();
 
   if (flag('service')) {
     process.stdout.write('\n装 launchd 服务（开机自启 + 被杀拉回）…\n');

@@ -158,6 +158,17 @@
 
 ## 5. HTTP / SSE 契约（13 文档，TST-05）
 
+## 5.1 新增能力登记（F1 / F2）
+
+| 行为 ID | 覆盖 |
+|---|---|
+| `API:GET /api/sidecar/status` | `tests/analysis.test.js`、真机 `dshc status` |
+| `API:POST /api/analysis/fleet` | `tests/analysis.test.js`、真机 Center 舰队分析 |
+| `API:POST /api/hosts/:name/adopt` | `tests/cli.test.js`、真机标准 8899 只读领养 |
+| `FSM:ready→running` `FSM:crashed→running` | `tests/lib/machine.test.js`、真机领养恢复 |
+| `ERR:ADOPTION_AVAILABLE` `ERR:ADOPT_REFUSED` `ERR:PORT_UNKNOWN` | `tests/cli.test.js`、`tests/prober.test.js` |
+| `CLI:cleanup` | `tests/cleanup.test.js`、真机 dry-run/apply 清理护栏 |
+
 | 面 | 覆盖 |
 |---|---|
 | 全部 REST 响应逐一过 schema 校验 | `tests/contract/schemas.js` 接入 `tests/integration/*.test.js` |

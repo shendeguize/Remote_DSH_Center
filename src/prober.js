@@ -3,7 +3,13 @@
  */
 
 import { logEvent } from './lib/bus.js';
-import { buildProbeScript, kvOne, parseProtoOutput } from './lib/proto.js';
+import {
+  buildManualPortProbeScript,
+  buildProbeScript,
+  kvOne,
+  parseManualPortBlock,
+  parseProtoOutput,
+} from './lib/proto.js';
 import { hostQueue, localExec, sshExec } from './lib/ssh.js';
 import { PROBE_PROTECTED_PHASES } from './lib/machine.js';
 import { DshError, asDshError } from './lib/errors.js';
@@ -17,7 +23,7 @@ import * as store from './store.js';
  *   sniff:{paths:string[], loginPath:string|null, version:string|null, probePath:string|null},
  *   dependencies:{binary:boolean, webProfile:boolean, bash:boolean, timeout:boolean},
  *   noDshReason:'missing-bin'|'no-web-profile'|null, stderr:string,
- *   manualInstances:{pid:number,args:string}[]}} ProbeResult
+ *   manualInstances:{pid:number,args:string,port:number|null}[]}} ProbeResult
  */
 
 /** `ps -eo pid,args` 行 → {pid, args}。 */
@@ -26,9 +32,17 @@ export function parseRunningBlock(raw) {
   for (const line of String(raw ?? '').split('\n')) {
     const m = /^\s*(\d+)\s+(.*\S)\s*$/.exec(line);
     if (!m) continue;
-    out.push({ pid: Number(m[1]), args: m[2] });
+    out.push({ pid: Number(m[1]), args: m[2], port: parseManualPort(m[2]) });
   }
   return out;
+}
+
+/** 从手动实例 argv 读取固定端口；0/缺失/非法均表示需要监听探测。 */
+export function parseManualPort(args) {
+  const match = /(?:^|\s)--port(?:=|\s+)(\d+)(?=\s|$)/.exec(String(args ?? ''));
+  if (!match) return null;
+  const port = Number(match[1]);
+  return port >= 1 && port <= 65535 ? port : null;
 }
 
 /** 嗅探块按行收集，空行只表示没有命中。 */
@@ -156,7 +170,29 @@ export async function probeOnce(host, { local = false, timeoutMs, signal, dshPat
   const res = local
     ? await localExec(command, { timeoutMs, signal })
     : await sshExec(host, command, { timeoutMs, signal });
-  return interpretProbe(res, { local });
+  const result = interpretProbe(res, { local });
+  const ambiguous = result.manualInstances.filter((item) => item.port === null);
+  if (ambiguous.length === 0) return result;
+  const portProbe = local
+    ? await localExec(buildManualPortProbeScript(ambiguous.map((item) => item.pid)), { timeoutMs, signal })
+    : await sshExec(host, buildManualPortProbeScript(ambiguous.map((item) => item.pid)), { timeoutMs, signal });
+  if (portProbe.code !== 0 || portProbe.timedOut || portProbe.aborted) return result;
+  let ports;
+  try {
+    ports = parseManualPortBlock(
+      parseProtoOutput(portProbe.stdout, { requireDone: 'MANUAL_PORTS_DONE' }).blocks.MANUAL_PORTS ?? '',
+    );
+  } catch {
+    return result;
+  }
+  return {
+    ...result,
+    manualInstances: result.manualInstances.map((item) => (
+      item.port === null && ports.has(item.pid)
+        ? { ...item, port: ports.get(item.pid) }
+        : item
+    )),
+  };
 }
 
 /** 单行 stderr 摘要（长文本不进环形缓冲，11 §7.2）。 */

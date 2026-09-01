@@ -60,6 +60,30 @@ export function verifyPackFiles(files) {
 }
 
 /**
+ * npm 10 returns an array here while npm 11 returns the package object directly.
+ * Keep the release gate compatible with both supported npm output shapes.
+ * @param {string} json `npm pack --dry-run --json` stdout
+ * @returns {string[]}
+ */
+export function packFilesFromJson(json) {
+  let record;
+  try {
+    const start = String(json).search(/[\[{]/u);
+    if (start < 0) throw new Error('missing JSON');
+    const parsed = JSON.parse(String(json).slice(start).trim());
+    record = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!Array.isArray(record?.files) && parsed && !Array.isArray(parsed)) {
+      const packageRecords = Object.values(parsed);
+      record = packageRecords.length === 1 ? packageRecords[0] : null;
+    }
+    if (!record || !Array.isArray(record.files)) throw new Error('invalid pack record');
+    return record.files.map((file) => file.path);
+  } catch {
+    throw new Error('npm pack --json 输出无法解析');
+  }
+}
+
+/**
  * 关卡选择：--only 与 --skip 都按 id 匹配，未知 id 直接报错（打错字不该被静默忽略）。
  * @param {Array<{id:string}>} stages
  * @param {{only?:string|null, skip?:string|null}} [sel]
@@ -181,7 +205,7 @@ export const STAGES = [
       if (res.code !== 0) throw new Error(`npm pack 失败：${res.stderr.trim().split('\n').pop()}`);
       let files;
       try {
-        files = JSON.parse(res.stdout)[0].files.map((f) => f.path);
+        files = packFilesFromJson(res.stdout);
       } catch {
         throw new Error('npm pack --json 输出无法解析');
       }

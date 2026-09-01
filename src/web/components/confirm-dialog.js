@@ -9,10 +9,11 @@ export function createConfirmDialog() {
   const title = el('h2', { id: 'confirm-title' });
   const body = el('div.confirm-body');
   const cancelBtn = el('button.btn.btn-default', { type: 'button', value: 'cancel', text: '取消' });
+  const secondaryBtn = el('button.btn.btn-default', { type: 'button', value: 'secondary', text: '次要操作', hidden: true });
   const okBtn = el('button.btn.btn-danger', { type: 'button', value: 'confirm', text: '确认' });
 
   const dialog = el('dialog.confirm-dialog', { 'aria-labelledby': 'confirm-title' }, [
-    el('div.confirm-inner', {}, [title, body, el('footer.confirm-actions', {}, [cancelBtn, okBtn])]),
+    el('div.confirm-inner', {}, [title, body, el('footer.confirm-actions', {}, [cancelBtn, secondaryBtn, okBtn])]),
   ]);
 
   let settle = null;
@@ -29,6 +30,7 @@ export function createConfirmDialog() {
   };
 
   cancelBtn.addEventListener('click', () => finish(false));
+  secondaryBtn.addEventListener('click', () => finish('secondary'));
   okBtn.addEventListener('click', () => finish(true));
   dialog.addEventListener('cancel', (e) => {
     e.preventDefault(); // Escape 走同一条收口路径
@@ -36,8 +38,8 @@ export function createConfirmDialog() {
   });
 
   /**
-   * @param {{title:string, lines?:string[], confirmLabel?:string, danger?:boolean}} opts
-   * @returns {Promise<boolean>}
+   * @param {{title:string, lines?:string[], confirmLabel?:string, secondaryLabel?:string, danger?:boolean}} opts
+   * @returns {Promise<boolean|string>}
    */
   function confirm(opts) {
     if (settle) finish(false); // 串行：新的请求让旧的按取消收场
@@ -45,6 +47,8 @@ export function createConfirmDialog() {
     clear(body);
     for (const line of opts.lines ?? []) body.append(el('p', { text: line }));
     okBtn.textContent = opts.confirmLabel ?? '确认';
+    secondaryBtn.hidden = !opts.secondaryLabel;
+    secondaryBtn.textContent = opts.secondaryLabel ?? '次要操作';
     okBtn.className = `btn ${opts.danger === false ? 'btn-primary' : 'btn-danger'}`;
     restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 

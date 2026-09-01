@@ -381,6 +381,7 @@ function failure(host, attempts, cause) {
 
 export const START_PHASES = Object.freeze(['ready', 'crashed']);
 export const STOP_PHASES = Object.freeze(['running', 'degraded']);
+export const ADOPT_PHASES = Object.freeze(['ready', 'crashed']);
 
 /** 队列内复检（11 §2.3 第 2 层，TOCTOU 防护）：排队期间 phase 可能已被隧道/巡检改掉。 */
 function recheckPhase(name, allowed, action) {
@@ -481,6 +482,78 @@ export function start(name) {
       logEvent(name, 'error', `启动失败：${e.message}`, e.detail ?? null);
       throw e;
     }
+  }, { timeoutMs: PROTO_TIMING.startBudgetMs });
+}
+
+/**
+ * 只读领养一个已存在的手动 dsh web。领养只登记 PID/端口/指纹并建立隧道，
+ * 不会向远端发送 stop，也不会把 startedByUs 写成 true。
+ */
+export function adopt(name, { pid = null, port = null } = {}) {
+  return hostQueue(name).run('adopt', async (signal) => {
+    const view = store.getHostView(name);
+    if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
+    if (!view.local && view.orphaned) {
+      throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止领养`, { host: name });
+    }
+    recheckPhase(name, ADOPT_PHASES, '领养');
+    const current = store.getHostState(name);
+    if (current?.web) {
+      throw new DshError('PHASE_CONFLICT', `主机 ${name} 已登记 web 实例，拒绝重复领养`, { host: name });
+    }
+    const candidates = current?.manualInstances ?? [];
+    if (candidates.length === 0) {
+      throw new DshError('NOT_FOUND', `主机 ${name} 没有可领养的手动 dsh web`, { host: name });
+    }
+    const selected = pid === null
+      ? (candidates.length === 1 ? candidates[0] : null)
+      : candidates.find((item) => item.pid === pid) ?? null;
+    if (!selected) {
+      throw new DshError('PHASE_CONFLICT', `主机 ${name} 有多个手动 dsh web，请指定 PID`, { host: name });
+    }
+    const actualPort = Number.isInteger(port) && port >= 1 && port <= 65_535
+      ? port
+      : selected.port;
+    if (!Number.isInteger(actualPort) || actualPort < 1 || actualPort > 65_535) {
+      throw new DshError('PORT_UNKNOWN', `无法确定手动实例 pid=${selected.pid} 的监听端口，请先重新探测`, { host: name });
+    }
+    const local = view.local === true;
+    const verified = await verifyRemote(
+      name,
+      { pid: selected.pid, port: actualPort },
+      { local, signal },
+    );
+    if (!verified.alive || verified.argsRaw !== selected.args || verified.listen === 'no') {
+      throw new DshError('ADOPT_REFUSED', `手动实例 pid=${selected.pid} 在领养复核时已变化，拒绝登记`, { host: name });
+    }
+    const localPort = local ? actualPort : await ensureLocalPort(name);
+    await tunnel.open(name, {
+      localPort,
+      remotePort: actualPort,
+      direct: local,
+    });
+    store.mutateHostState(name, (st) => {
+      st.web = {
+        pid: selected.pid,
+        port: actualPort,
+        startedByUs: false,
+        cmdFingerprint: verified.argsRaw,
+        log: null,
+        startedAt: new Date().toISOString(),
+        workdir: null,
+        cwd: verified.cwd,
+      };
+      st.manualInstances = (st.manualInstances ?? []).filter((item) => item.pid !== selected.pid);
+    });
+    store.setPhase(name, 'running', 'launcher.adopt');
+    logEvent(
+      name,
+      'info',
+      local
+        ? `已只读领养 pid=${selected.pid} web 端口=${actualPort}`
+        : `已只读领养 pid=${selected.pid} 远端端口=${actualPort} 本机端口=${localPort}`,
+    );
+    return { pid: selected.pid, actualPort, localPort, startedByUs: false };
   }, { timeoutMs: PROTO_TIMING.startBudgetMs });
 }
 
@@ -609,6 +682,14 @@ export async function recoverOne(name) {
 
     if (!v.alive || v.fingerprintMatch === false) {
       logEvent(name, 'warn', v.alive ? '恢复复核：指纹不符，标记 crashed' : '恢复复核：远端进程已消失，标记 crashed');
+      if (web.startedByUs === false) {
+        await tunnel.close(name);
+        store.mutateHostState(name, (entry) => {
+          entry.web = null;
+          entry.tunnel = null;
+        });
+        logEvent(name, 'info', '恢复复核：领养实例已死亡，已解除只读领养');
+      }
       return toCrashed(name);
     }
 

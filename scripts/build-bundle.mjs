@@ -39,7 +39,7 @@ import {
   assetName, bundleDirName, formatSums, parseSums,
 } from '../src/lib/bundle.js';
 import { parseVersion } from '../src/lib/semver.js';
-import { verifyPackFiles } from './check.mjs';
+import { packFilesFromJson, verifyPackFiles } from './check.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -103,12 +103,7 @@ export function makeBundleInfo({
  * @throws {Error} 清单缺必需文件或混进了不该发的
  */
 export function packFileList(json) {
-  let files;
-  try {
-    files = JSON.parse(json)[0].files.map((f) => f.path);
-  } catch {
-    throw new Error('npm pack --json 输出无法解析');
-  }
+  const files = packFilesFromJson(json);
   const verdict = verifyPackFiles(files);
   if (verdict.missing.length > 0) throw new Error(`产物缺文件：${verdict.missing.join(', ')}`);
   if (verdict.leaked.length > 0) throw new Error(`产物混入了不该发的：${verdict.leaked.slice(0, 5).join(', ')}`);

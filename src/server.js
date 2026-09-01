@@ -28,6 +28,7 @@ import * as prober from './prober.js';
 import * as store from './store.js';
 import * as tunnel from './tunnel.js';
 import { createHandler } from './api.js';
+import { createAnalysisService } from './analysis.js';
 import { loadHosts } from './ssh-config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -70,6 +71,7 @@ export const runtime = {
   shuttingDown: false,
   /** @type {NodeJS.Timeout|null} */
   logTrimTimer: null,
+  analysis: createAnalysisService(),
 };
 
 // ── 静态资源（01 文档前端；无构建链，原样吐 ESM） ─────────────────────────
@@ -126,6 +128,12 @@ function buildManagerCtl() {
     async applySetup(incoming) {
       return applySetup(incoming);
     },
+    sidecarStatus() {
+      return runtime.analysis.status();
+    },
+    fleetAnalysis() {
+      return runtime.analysis.analyze();
+    },
   };
 }
 
@@ -180,7 +188,10 @@ async function postSetupBoot() {
 async function recoverState() {
   const targets = store.listHostNames().filter((n) => (
     !store.getHostView(n)?.orphaned
-    && ['running', 'degraded'].includes(store.getPhase(n))
+    && (
+      ['running', 'degraded'].includes(store.getPhase(n))
+      || (store.getPhase(n) === 'ready' && store.getHostState(n)?.web)
+    )
   ));
   if (targets.length === 0) return [];
   logEvent(null, 'info', `恢复复核 ${targets.length} 台主机`);

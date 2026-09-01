@@ -27,6 +27,10 @@
 - 矩阵会在缺少 DSH 会话时通过官方 `session.create` / `session.prompt` 创建测试
   会话，并将 persisted preset 导致的 `dsh_preset_unsupported` / HTTP 409 作为
   fail-closed 合同结果保留，不自动清除 preset 或重试。
+- 新增已有 `dsh web` 的只读领养流程，支持 CLI/UI 确认、实际端口发现、持久化
+  `startedByUs: false` 状态和实例死亡自动解除，避免重复拉起或未授权关停。
+- 新增按需舰队聚类分析、Sidecar 最低版本握手、本机 DSH headless 摘要及
+  fail-closed 的确定性降级；新增有界的 owned-web/test-workdir 清理预览与显式应用。
 
 ## [0.7.1] - 2026-08-29
 
