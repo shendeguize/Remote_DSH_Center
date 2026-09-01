@@ -12,7 +12,7 @@ export function createFleetAnalysis({ store }) {
     onClick: async () => {
       if (!store.canWrite() || busy) return;
       busy = true;
-      run.disabled = true;
+      sync();
       status.textContent = '正在采集聚类并生成本机摘要…';
       clear(list);
       report.hidden = true;
@@ -23,11 +23,18 @@ export function createFleetAnalysis({ store }) {
         status.textContent = `分析失败：${error.message}`;
       } finally {
         busy = false;
-        run.disabled = !store.canWrite();
+        sync();
       }
     },
   });
   let busy = false;
+
+  /** 与其他卡片一致：按钮随写权限实时开关，失联时给出与主机表同一套说明。 */
+  function sync() {
+    const writable = store.canWrite();
+    run.disabled = busy || !writable;
+    run.title = writable ? '' : '与 manager 失联，写操作已暂停';
+  }
 
   function render(result) {
     const rows = Array.isArray(result?.clusters) ? result.clusters : [];
@@ -50,6 +57,12 @@ export function createFleetAnalysis({ store }) {
     }
   }
 
+  const offs = [
+    store.on('connection:changed', sync),
+    store.on('pending:changed', sync),
+  ];
+  sync();
+
   return {
     root: el('section.card.fleet-analysis', {}, [
       el('div.card-header', {}, [title, run]),
@@ -57,6 +70,9 @@ export function createFleetAnalysis({ store }) {
       report,
       list,
     ]),
+    destroy() {
+      for (const off of offs) off();
+    },
   };
 }
 

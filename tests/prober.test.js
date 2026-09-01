@@ -35,6 +35,12 @@ const READY_SAMPLE = [
   '',
 ].join('\n');
 
+/** 同一份样本，但手动实例的端口一个写死、一个 `--port 0`（首段解析不出）。 */
+const AMBIGUOUS_SAMPLE = READY_SAMPLE.replace(
+  ' 60768 dsh web --no-open --host 127.0.0.1 --port 8899',
+  ' 60768 dsh web --no-open --host 127.0.0.1 --port 0\n 70001 dsh web --no-open --port 8899',
+);
+
 test('interpretProbe：ready 全字段', () => {
   const r = interpretProbe(ok(READY_SAMPLE));
   assert.equal(r.ok, true);
@@ -192,6 +198,59 @@ test('probeOnce：同一 PROBE 模板按 local 显式选择本机或 ssh 运输'
   await probeHost('local-node');
   assert.equal(fs.existsSync(localMark), true, '队首从当前 HostView 读取 local');
   assert.equal(fs.existsSync(sshMark), false);
+});
+
+/**
+ * 二段式端口解析的确定性夹具：第一段回 PROBE 样本（手动实例 --port 0，端口未知），
+ * 第二段按 `manualPorts` 回 MANUAL_PORTS 块。真机上这条路径只在「首段解析不出端口」
+ * 时才走，靠真实进程碰运气覆盖不到（Linux 上 ss 直接给出端口就整段跳过了）。
+ */
+function twoStageProbeFixture(t, { manualPorts = 'MANUAL_PORTS<<EOF\n60768=41234\nEOF\nMANUAL_PORTS_DONE=yes\n', exitCode = 0 } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-probe-2stage-'));
+  const recorder = path.join(dir, 'record.mjs');
+  fs.writeFileSync(recorder, [
+    'const script = process.argv.at(-1);',
+    'if (script.includes("MANUAL_PORTS")) {',
+    `  process.stdout.write(${JSON.stringify(manualPorts)});`,
+    `  process.exit(${exitCode});`,
+    '}',
+    `process.stdout.write(${JSON.stringify(AMBIGUOUS_SAMPLE)});`,
+  ].join('\n'));
+
+  const saved = process.env.DSHC_LOCAL_SH_BIN;
+  process.env.DSHC_LOCAL_SH_BIN = `${process.execPath} ${recorder}`;
+  t.after(() => {
+    if (saved === undefined) delete process.env.DSHC_LOCAL_SH_BIN;
+    else process.env.DSHC_LOCAL_SH_BIN = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+}
+
+test('probeOnce：--port 0 的手动实例走二段式解析补上真实端口', async (t) => {
+  twoStageProbeFixture(t);
+
+  const result = await probeOnce('gpu-1', { local: true });
+  assert.equal(result.phase, 'ready');
+  assert.deepEqual(result.manualInstances.map((i) => [i.pid, i.port]), [[60768, 41234], [70001, 8899]]);
+});
+
+test('probeOnce：二段式探测失败或输出残缺时保留端口未知，不编造端口', async (t) => {
+  twoStageProbeFixture(t, { exitCode: 1 });
+  const failed = await probeOnce('gpu-1', { local: true });
+  assert.equal(failed.manualInstances[0].port, null, '非零退出按未知处理');
+
+  // DONE 哨兵缺失说明输出被截断，parseProtoOutput 抛错——此时同样只能按未知处理。
+  twoStageProbeFixture(t, { manualPorts: 'MANUAL_PORTS<<EOF\n60768=41234\nEOF\n' });
+  const truncated = await probeOnce('gpu-1', { local: true });
+  assert.equal(truncated.manualInstances[0].port, null, '缺 DONE 哨兵按未知处理');
+});
+
+test('probeOnce：二段式只补未知端口，已解析出的端口不被覆写', async (t) => {
+  // 70001 首段已从 --port 8899 解析出端口，二段式即便报了别的端口也不该改它。
+  twoStageProbeFixture(t, { manualPorts: 'MANUAL_PORTS<<EOF\n60768=41234\n70001=52000\nEOF\nMANUAL_PORTS_DONE=yes\n' });
+
+  const result = await probeOnce('gpu-1', { local: true });
+  assert.deepEqual(result.manualInstances.map((i) => [i.pid, i.port]), [[60768, 41234], [70001, 8899]]);
 });
 
 async function storeFixture(t, hosts = { 'gpu-1': null }) {
