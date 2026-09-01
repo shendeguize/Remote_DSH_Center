@@ -165,13 +165,13 @@ test('§1.1 手动实例扫描在真 shell 上认真实例、放过旁观进程'
   // 这条流水线此前只有垫片对译过，从没在真 ps/grep 上跑过——幻影实例就是这么漏的
   const dir = await mkdtemp(join(tmpdir(), 'proto-scan-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  // 两个替身都不许 exec：exec 会把自己的 argv 换成 `sleep 30`，进程表里既没有
+  // `dsh web` 也没有脚本文本，两条判据一起空转（Linux 上就是这么假绿的）。
   const fakeDsh = join(dir, 'dsh');
-  await writeFile(fakeDsh, '#!/bin/sh\nexec sleep 30\n');
+  await writeFile(fakeDsh, '#!/bin/sh\nsleep 30\n');
   await chmod(fakeDsh, 0o755);
 
   // 旁观者照 Center 在本机的真实形状造：argv 里原样驮着整份探测脚本的 ssh。
-  // 注意不能用 `sh -c 'sleep 30'`——shell 会 exec 掉自己，ps 里只剩 `sleep 30`，
-  // 脚本文本根本不在进程表里，陷阱等于没布。
   const fakeSsh = join(dir, 'ssh');
   await writeFile(fakeSsh, '#!/bin/sh\nsleep 30\n');
   await chmod(fakeSsh, 0o755);
@@ -185,8 +185,10 @@ test('§1.1 手动实例扫描在真 shell 上认真实例、放过旁观进程'
   const [real, bystander] = children;
   await new Promise((resolve) => { setTimeout(resolve, 200); });
 
+  // 先验两个替身在进程表里确实是想要的形状，否则失败信息会指向扫描、而真正坏的是布景
   const table = await localExec('ps -eo pid,args');
   const lineOf = (pid) => table.stdout.split('\n').find((l) => Number(l.trim().split(/\s+/)[0]) === pid) ?? '';
+  assert.match(lineOf(real.pid), /\/dsh web /, '前提：真实例的 argv 里 dsh web 相邻');
   assert.match(lineOf(bystander.pid), /dsh/, '前提：旁观者的命令行确实驮着脚本，陷阱布好了');
   assert.match(lineOf(bystander.pid), /web/, '前提：脚本里的 profiles/web 也在 ps 可见范围内');
 
