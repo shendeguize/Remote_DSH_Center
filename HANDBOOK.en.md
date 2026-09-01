@@ -395,6 +395,13 @@ while non-interactive SSH cannot, the diagnostic appears in the details.
 **Will it stop a `dsh web` that someone started manually?** No. Manual instances are shown as
 "🔒 manual" and read-only; `stop` and `restart` are refused. A fingerprint mismatch never kills.
 
+**A host has several manual instances — which one gets adopted?** The one you pick; Center never
+guesses. Pressing **Start** lists every candidate with its PID, port and command line as a single
+choice; candidates whose port is unknown stay listed but disabled until a fresh probe finds the
+port. The CLI equivalent is `dshc start <host> --adopt --pid <pid>`; interactively you can type the
+PID at the prompt, and non-interactively a missing `--pid` fails loudly instead of picking one at
+random. Use `--force-new` (**Start a second one** in the page) when you want a brand-new instance.
+
 **Can the remote's `X-Frame-Options` block the iframe?** In practice, dsh web sets no such header.
 The initial loading state only means waiting and cannot diagnose a cross-origin failure. If
 embedding is blocked, use **Open in a new window** from the host menu.

@@ -407,6 +407,25 @@ function parseFrame(raw) {
   }
 }
 
+/**
+ * 绕开 manager 直接拉起假 dsh web：造出「别人手动起的实例」。
+ *
+ * 走的是同一条拉起协议，所以指纹、监听端口都与真手动实例一致；manager 只能靠探测
+ * 发现它们。
+ * @returns {Promise<{pid:number, port:number, args:string}[]>}
+ */
+export async function spawnManualWeb(name, { count = 1 } = {}) {
+  const spawned = [];
+  for (let i = 0; i < count; i += 1) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个占端口再拉起，个位数
+    const port = await nextRemotePort();
+    // eslint-disable-next-line no-await-in-loop -- 同上
+    const res = await launcher.runLaunchSequence(name, { port });
+    spawned.push({ pid: res.pid, port: res.actualPort, args: res.fingerprint });
+  }
+  return spawned;
+}
+
 // ── 轮询断言 ─────────────────────────────────────────────────────────────
 
 /** 等某主机进入目标 phase（比 SSE 更适合「不关心中间过程」的断言）。 */

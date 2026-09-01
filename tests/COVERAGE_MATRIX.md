@@ -164,7 +164,8 @@
 |---|---|
 | `API:GET /api/sidecar/status` | `tests/analysis.test.js`、真机 `dshc status` |
 | `API:POST /api/analysis/fleet` | `tests/analysis.test.js`、真机 Center 舰队分析 |
-| `API:POST /api/hosts/:name/adopt` | `tests/cli.test.js`、真机标准 8899 只读领养 |
+| `API:POST /api/hosts/:name/adopt` | `tests/cli.test.js`、`tests/integration/flows.test.js`（多候选：盲领养被拒 / 指定 PID 只登记那一个）、真机标准 8899 只读领养 |
+| `UI:多手动实例挑一个领养` | `tests/web/actions.test.js`、`tests/web/mount.test.js`（候选单选、端口未知禁用、全禁用只剩强拉） |
 | `FSM:ready→running` `FSM:crashed→running` | `tests/lib/machine.test.js`、真机领养恢复 |
 | `ERR:ADOPTION_AVAILABLE` `ERR:ADOPT_REFUSED` `ERR:PORT_UNKNOWN` | `tests/cli.test.js`、`tests/prober.test.js` |
 | `CLI:cleanup` | `tests/cleanup.test.js`、真机 dry-run/apply 清理护栏 |

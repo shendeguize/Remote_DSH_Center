@@ -39,7 +39,7 @@ function harness(t, { responder, confirmAnswer = true } = {}) {
     store,
     confirm: async (opts) => {
       confirms.push(opts);
-      return confirmAnswer;
+      return typeof confirmAnswer === 'function' ? confirmAnswer(opts) : confirmAnswer;
     },
     navigate: (to) => navigated.push(to),
   });
@@ -179,6 +179,67 @@ test('关停需二次确认，取消则不发请求', async (t) => {
   assert.equal(h.confirms.length, 1);
   assert.match(h.confirms[0].lines.join(' '), /4242/, '确认文案要给出 PID');
   assert.match(h.confirms[0].lines.join(' '), /指纹校验/, '要说明只杀自己拉起的进程');
+});
+
+function adoptionHarness(t, { confirmAnswer }) {
+  return harness(t, {
+    confirmAnswer,
+    responder: ({ path }) => (path.endsWith('/start')
+      ? res(409, {
+        error: '主机 gpu-1 已有手动 dsh web（pid=1001 port=8899、pid=2002 port=unknown、pid=3003 port=8900）',
+        code: 'ADOPTION_AVAILABLE',
+      })
+      : res(202, { accepted: true, operationId: 'op-adopt' })),
+  });
+}
+
+const MANUAL_THREE = [
+  { pid: 1001, port: 8899, args: 'dsh web --port 8899' },
+  { pid: 2002, port: null, args: 'dsh web --port 0' },
+  { pid: 3003, port: 8900, args: 'dsh web --port 8900' },
+];
+
+test('多个手动实例：领养前先挑一个，选中的 PID 随请求送出', async (t) => {
+  const h = adoptionHarness(t, { confirmAnswer: () => 3003 });
+  seed(h.store, { manualInstances: MANUAL_THREE });
+
+  await h.actions.hostAction('start', 'gpu-1');
+
+  const [opts] = h.confirms;
+  assert.deepEqual(opts.choices.map((c) => c.value), [1001, 2002, 3003], '候选要全摆出来，不替用户筛');
+  assert.match(opts.choices[0].label, /PID 1001 · 端口 8899/);
+  assert.match(opts.choices[0].hint, /dsh web --port 8899/, '命令行是分辨同名实例的唯一线索');
+  assert.match(opts.choices[1].label, /端口未知/);
+  assert.equal(opts.choices[1].disabled, true, '端口未知的候选点了必然被后端拒绝');
+  assert.match(opts.choices[1].reason, /重新探测/);
+  assert.match(opts.lines.join(' '), /3 个手动实例/);
+
+  const adopt = h.calls.find((call) => call.path === '/api/hosts/gpu-1/adopt');
+  assert.equal(adopt.body.pid, 3003, '选了谁就领养谁');
+  assert.equal(h.store.isPending('adopt', 'gpu-1'), true);
+});
+
+test('多个手动实例：取消不发请求，强拉第二份走 forceNew', async (t) => {
+  const cancelled = adoptionHarness(t, { confirmAnswer: false });
+  seed(cancelled.store, { manualInstances: MANUAL_THREE });
+  await cancelled.actions.hostAction('start', 'gpu-1');
+  assert.deepEqual(cancelled.calls.map((call) => call.path), ['/api/hosts/gpu-1/start']);
+
+  const forced = adoptionHarness(t, { confirmAnswer: 'secondary' });
+  seed(forced.store, { manualInstances: MANUAL_THREE });
+  await forced.actions.hostAction('start', 'gpu-1');
+  assert.deepEqual(forced.calls.at(-1).body, { forceNew: true });
+});
+
+test('只有一个手动实例：不摆选项，沿用后端的唯一候选', async (t) => {
+  const h = adoptionHarness(t, { confirmAnswer: true });
+  seed(h.store, { manualInstances: [MANUAL_THREE[0]] });
+
+  await h.actions.hostAction('start', 'gpu-1');
+
+  assert.deepEqual(h.confirms[0].choices, [], '一个候选没什么可挑的');
+  assert.equal(h.calls.at(-1).path, '/api/hosts/gpu-1/adopt');
+  assert.equal(h.calls.at(-1).body.pid, null);
 });
 
 test('动作硬闸阻止手动实例 restart/stop：不确认、不发请求', async (t) => {

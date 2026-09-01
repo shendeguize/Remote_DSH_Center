@@ -28,6 +28,26 @@ function isOrphaned(host) {
   return Boolean(host && !host.local && host.orphaned);
 }
 
+/**
+ * 手动实例 → 领养候选项（10 §3.10）。
+ *
+ * 端口未知的候选留在原位禁用：后端拿不到端口会以 PORT_UNKNOWN 拒绝登记，
+ * 让它可点只是把同一个失败推后一步；补端口要靠重新探测。
+ * @param {{pid:number, port:number|null, args?:string}[]} instances
+ */
+export function adoptionChoices(instances) {
+  return (instances ?? []).map((item) => {
+    const known = Number.isInteger(item.port);
+    return {
+      value: item.pid,
+      label: `PID ${item.pid} · ${known ? `端口 ${item.port}` : '端口未知'}`,
+      hint: item.args ?? '',
+      disabled: !known,
+      reason: '端口未知，重新探测补上端口后才能领养',
+    };
+  });
+}
+
 function workdirChangePending(patch, hostBeforeSave, savedHost) {
   if (!Object.hasOwn(patch, 'workdir') || !HOST_RESTART_PHASES.has(savedHost?.phase)) {
     return false;
@@ -175,21 +195,32 @@ export function createActions({ store, confirm, navigate }) {
         onError: async (toast) => {
           if (toast.code !== 'ADOPTION_AVAILABLE') return;
           store.dismissToast(toast.id);
+          // 多个候选时必须挑一个：后端只在唯一候选时允许省略 PID，否则一律拒绝领养
+          const choices = adoptionChoices(store.getHost(name)?.manualInstances ?? []);
           const choice = await confirm({
             title: `主机 ${name} 已有手动 dsh web`,
-            lines: [
-              '只读领养只登记现有进程并建立映射，不会停止或重启它。',
-              '强拉会启动第二个实例；取消则保持当前状态。',
-            ],
+            lines: choices.length > 1
+              ? [
+                `已发现 ${choices.length} 个手动实例，选择要领养的那一个。`,
+                '只读领养只登记它并建立映射，不会停止或重启它。',
+                '强拉会启动又一个实例；取消则保持当前状态。',
+              ]
+              : [
+                '只读领养只登记现有进程并建立映射，不会停止或重启它。',
+                '强拉会启动第二个实例；取消则保持当前状态。',
+              ],
+            choices: choices.length > 1 ? choices : [],
+            choicesLabel: `${name} 上的手动 dsh web`,
             confirmLabel: '只读领养',
             secondaryLabel: '强拉第二份',
             cancelLabel: '取消',
             danger: false,
           });
-          if (choice === true) {
-            await guarded({ action: 'adopt', host: name, run: () => CALL.adopt(name) });
-          } else if (choice === 'secondary') {
+          if (choice === 'secondary') {
             await guarded({ action: 'start', host: name, run: () => CALL.start(name, { forceNew: true }) });
+          } else if (choice) {
+            const pid = Number.isInteger(choice) ? choice : null;
+            await guarded({ action: 'adopt', host: name, run: () => CALL.adopt(name, { pid }) });
           }
         },
       });

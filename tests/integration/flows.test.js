@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { bootServer, waitPhase } from './helpers.js';
+import { bootServer, spawnManualWeb, waitPhase } from './helpers.js';
 import { SCENARIOS } from '../harness/scenarios.js';
 import {
   accepted, assertRest, defaultsPutResponse, hostConfigPutResponse, hostsList, reloadResponse,
@@ -174,6 +174,47 @@ test('运行中探测不改 phase，只并入手动实例', async (t) => {
   assert.equal(after.web.pid, running.web.pid);
   assert.deepEqual(after.manualInstances, [], '受管 PID 不算手动实例');
   assert.ok(after.probe.at, '探测详情照常刷新');
+});
+
+test('多个手动实例：候选清单进错误、盲领养被拒、指定 PID 才登记那一个', async (t) => {
+  const ctx = await bootServer(t);
+  const manual = await spawnManualWeb('gpu-1', { count: 3 });
+  const events = await ctx.sse();
+
+  const probe = await ctx.api('POST', '/api/hosts/gpu-1/probe');
+  await events.wait((f) => f.type === 'operation-done' && f.data.operationId === probe.json.operationId);
+  const seen = byName(await ctx.get('/api/hosts'), 'gpu-1');
+  assert.deepEqual(seen.manualInstances.map((i) => i.pid).sort(), manual.map((i) => i.pid).sort());
+
+  const start = await ctx.api('POST', '/api/hosts/gpu-1/start');
+  assert.equal(start.status, 409);
+  assert.equal(start.json.code, 'ADOPTION_AVAILABLE');
+  for (const item of manual) {
+    assert.match(start.json.error, new RegExp(`pid=${item.pid} port=${item.port}`),
+      '候选连 PID 带端口一起摆出来，用户才挑得动');
+  }
+
+  const blind = await ctx.api('POST', '/api/hosts/gpu-1/adopt', {});
+  const blindDone = await events.wait((f) => f.type === 'operation-done' && f.data.operationId === blind.json.operationId);
+  assert.equal(blindDone.data.status, 'failed');
+  assert.match(blindDone.data.error, /指定 PID/, '多个候选时不许替用户猜一个来杀/登记');
+  assert.equal(byName(await ctx.get('/api/hosts'), 'gpu-1').phase, 'ready', '失败的领养不留痕');
+
+  const target = manual[1];
+  const picked = await ctx.api('POST', '/api/hosts/gpu-1/adopt', { pid: target.pid });
+  assert.equal(picked.status, 202);
+  await waitPhase(ctx, 'gpu-1', 'running');
+
+  const after = byName(await ctx.get('/api/hosts'), 'gpu-1');
+  assert.equal(after.web.pid, target.pid, '登记的必须是选中的那一个');
+  assert.equal(after.web.port, target.port);
+  assert.equal(after.web.startedByUs, false, '领养来的实例不许被当成自己拉起的');
+  assert.deepEqual(
+    after.manualInstances.map((i) => i.pid).sort(),
+    manual.filter((i) => i.pid !== target.pid).map((i) => i.pid).sort(),
+    '其余手动实例照旧只读挂着，一个都不许被顺手关掉',
+  );
+  assert.equal(ctx.harness.liveProcesses('gpu-1').length, 3, '领养不碰任何进程');
 });
 
 test('配置热生效：PUT 主机配置 / PUT defaults / POST reload', async (t) => {

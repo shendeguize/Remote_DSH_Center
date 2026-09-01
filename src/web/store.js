@@ -336,7 +336,7 @@ export function createStore(preset = {}) {
   /** 兜底：动作已到终态而 operation-done 迟到/丢失时也让按钮解锁。 */
   function settleByPhase(host) {
     const terminal = {
-      start: ['running'], restart: ['running'], stop: ['ready'], reconnect: ['running'],
+      start: ['running'], restart: ['running'], stop: ['ready'], reconnect: ['running'], adopt: ['running'],
     };
     for (const [key, entry] of state.pending) {
       if (entry.host !== host.name) continue;

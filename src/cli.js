@@ -47,6 +47,7 @@ const FLAG_SPEC = {
   foreground: 'boolean',
   force: 'boolean',
   adopt: 'boolean',
+  pid: 'number',
   'force-new': 'boolean',
   apply: 'boolean',
   rules: 'string',
@@ -1020,14 +1021,22 @@ async function cmdHostAction(action, parsed) {
         && parsed.flags['force-new'] !== true
       ) {
         if (!process.stdin.isTTY) {
-          errOut('已发现正在运行的手动 dsh web；非交互模式拒绝重复拉起。请使用 --adopt 或 --force-new。');
+          errOut('已发现正在运行的手动 dsh web；非交互模式拒绝重复拉起。');
+          errOut(`  ${err.message}`);
+          errOut('请使用 --adopt（多个实例时加 --pid <pid> 指定领养谁）或 --force-new。');
           return EXIT.failed;
         }
+        // 候选清单就在这条错误里（pid=… port=…），先摆出来再问，否则用户无从选起
+        errOut(err.message);
         const choice = await promptAdoption(picked.name);
-        if (choice === 'adopt') {
+        if (choice === 'adopt' || Number.isInteger(choice)) {
           return runAction(port, picked.name, 'start', {
             ...parsed,
-            flags: { ...parsed.flags, adopt: true },
+            flags: {
+              ...parsed.flags,
+              adopt: true,
+              ...(Number.isInteger(choice) ? { pid: choice } : {}),
+            },
           });
         }
         if (choice === 'force') {
@@ -1048,20 +1057,30 @@ async function cmdHostAction(action, parsed) {
   });
 }
 
+/** @returns {Promise<'adopt'|'force'|'cancel'|number>} number = 要领养的 PID */
 function promptAdoption(host) {
   return new Promise((resolve) => {
     const input = process.stdin;
     const output = process.stdout;
     const rl = readline.createInterface({ input, output });
     rl.question(
-      `主机 ${host} 已有手动 dsh web：[a] 只读领养 / [f] 强拉新实例 / [c] 取消？ `,
+      `主机 ${host} 已有手动 dsh web：[a] 只读领养 / [f] 强拉新实例 / [c] 取消 / 或直接输入要领养的 PID？ `,
       (answer) => {
         rl.close();
-        const choice = String(answer).trim().toLowerCase();
-        resolve(choice === 'a' ? 'adopt' : choice === 'f' ? 'force' : 'cancel');
+        resolve(parseAdoptionAnswer(answer));
       },
     );
   });
+}
+
+/** `a` / `f` / `c` 之外还认裸 PID：多实例时 `a` 会被后端以「请指定 PID」挡回。 */
+export function parseAdoptionAnswer(answer) {
+  const choice = String(answer ?? '').trim().toLowerCase();
+  if (/^\d+$/.test(choice)) {
+    const pid = Number(choice);
+    return pid >= 1 && pid <= 4_294_967_295 ? pid : 'cancel';
+  }
+  return choice === 'a' ? 'adopt' : choice === 'f' ? 'force' : 'cancel';
 }
 
 /** 202 受理型操作：默认挂 SSE 等终态，--no-wait 立即返回。 */
@@ -1069,8 +1088,9 @@ async function runAction(port, name, action, parsed) {
   const adopt = action === 'start' && parsed.flags.adopt === true;
   const endpoint = `/api/hosts/${encodeURIComponent(name)}/${adopt ? 'adopt' : action}`;
   const terminalAction = adopt ? 'adopt' : action;
+  // 一台主机上不止一个手动实例时，后端拒绝替用户猜：--pid 是唯一的指定方式
   const body = adopt
-    ? {}
+    ? (Number.isInteger(parsed.flags.pid) ? { pid: parsed.flags.pid } : {})
     : action === 'start' && parsed.flags['force-new'] === true
       ? { forceNew: true }
       : undefined;
@@ -1524,7 +1544,7 @@ export const COMMANDS = {
 
   ls: { usage: 'dshc ls [--json]', needsServer: true, run: cmdLs },
   probe: { usage: 'dshc probe [<host>]', needsServer: true, run: cmdProbe },
-  start: { usage: 'dshc start <host> [--adopt|--force-new] [--no-wait]', needsServer: true, run: (p) => cmdHostAction('start', p) },
+  start: { usage: 'dshc start <host> [--adopt [--pid <pid>]|--force-new] [--no-wait]', needsServer: true, run: (p) => cmdHostAction('start', p) },
   stop: { usage: 'dshc stop <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('stop', p) },
   reconnect: { usage: 'dshc reconnect <host> [--no-wait]', needsServer: true, run: (p) => cmdHostAction('reconnect', p) },
   cleanup: { usage: 'dshc cleanup [<host>] [--rules LIST] [--apply] [--json]', needsServer: true, run: cmdCleanup },

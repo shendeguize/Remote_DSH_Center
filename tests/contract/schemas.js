@@ -90,7 +90,8 @@ export const hostView = V.obj({
     port,
     startedByUs: V.bool(),
     cmdFingerprint: V.str({ min: 1 }),
-    log: V.str({ min: 1 }),
+    // 领养来的实例日志不归我们管（launcher.adopt 记 null），只有自己拉起的才有日志名
+    log: V.nullable(V.str({ min: 1 })),
     startedAt: iso,
     // 本次实例实际生效的启动目录（与 config.workdir 不等 = 重启后生效）
     workdir: workdirView,
@@ -343,7 +344,7 @@ export const operationDone = V.obj({
   revision,
   operationId: V.str({ min: 1 }),
   host: V.nullable(V.str({ min: 1 })),
-  action: V.enum_(['start', 'stop', 'restart', 'reconnect', 'probe', 'probe-all']),
+  action: V.enum_(['start', 'stop', 'restart', 'reconnect', 'probe', 'probe-all', 'adopt']),
   status: V.enum_(['ok', 'failed']),
   error: V.nullable(V.str()),
   code: V.nullable(V.enum_(ERROR_CODES)),

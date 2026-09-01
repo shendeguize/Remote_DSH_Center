@@ -1590,6 +1590,97 @@ async function main() {
       assert(verdict.ok, verdict.note);
       return verdict.note;
     });
+
+    await check('S15', '六个手动实例：拉起先让人挑领养谁，选中的那一个才被登记', async () => {
+      // 垫片验得了「选项渲染出来」，验不了六行候选在 460px 模态里还看得清、按得动，
+      // 也验不了原生 radio 的 change 真派到组里（真机上是六个候选，见 issue 附图）
+      const host = 'gpu-2';
+      // 前面的场景改过视口（S3-420 / S13 清覆盖），六行候选放不放得下是视口相关判据，
+      // 自己钉一个普通桌面尺寸，别让上一条场景的残留决定结论
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+      });
+      const launcher = await import('../src/launcher.js');
+      launcher._setWait((ms) => new Promise((r) => { setTimeout(r, Math.min(ms, 60)); }));
+      const phaseOf = async () => (await rig.api('GET', '/api/hosts')).json.hosts.find((h) => h.name === host);
+      if (['running', 'degraded', 'starting'].includes((await phaseOf()).phase)) {
+        await rig.api('POST', `/api/hosts/${host}/stop`);
+        await waitHost(rig, host, ['ready', 'crashed']);
+      }
+
+      const manual = [];
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 逐个占端口再拉起
+        const port = await pickPort(43_000);
+        // eslint-disable-next-line no-await-in-loop -- 同上；manager 不知情，正是「手动实例」
+        const res = await launcher.runLaunchSequence(host, { port });
+        manual.push({ pid: res.pid, port: res.actualPort });
+      }
+      await rig.api('POST', `/api/hosts/${host}/probe`);
+      for (let i = 0; i < 120; i += 1) {
+        // eslint-disable-next-line no-await-in-loop -- 等探测把手动实例并进 HostView
+        if (((await phaseOf()).manualInstances ?? []).length === manual.length) break;
+        // eslint-disable-next-line no-await-in-loop -- 同上
+        await sleep(120);
+      }
+      assert(((await phaseOf()).manualInstances ?? []).length === 6,
+        `探测只认出 ${((await phaseOf()).manualInstances ?? []).length} 个手动实例`);
+
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+      await cdp.waitFor(`document.querySelector('[data-host="${host}"] [data-act="start"]')`, '目标行就位');
+      await cdp.eval(`document.querySelector('[data-host="${host}"] [data-act="start"]').click(); return true;`);
+      await cdp.waitFor(
+        "document.querySelector('.confirm-dialog')?.open === true && document.querySelectorAll('.confirm-choice').length === 6",
+        '六个候选摆进确认框',
+      );
+      const shot = await screenshot(cdp, 'adopt-picker');
+
+      const view = await cdp.eval(`
+        const dlg = document.querySelector('.confirm-dialog');
+        const box = dlg.getBoundingClientRect();
+        const rows = [...dlg.querySelectorAll('.confirm-choice')].map((l) => {
+          const r = l.getBoundingClientRect();
+          const input = l.querySelector('input');
+          return {
+            text: l.textContent.trim(), right: r.right, bottom: r.bottom, height: r.height,
+            checked: input.checked, disabled: input.disabled,
+          };
+        });
+        const listNode = dlg.querySelector('.confirm-choices');
+        const list = listNode.getBoundingClientRect();
+        return {
+          right: box.right, bottom: box.bottom, viewportH: innerHeight,
+          listBottom: list.bottom, listH: Math.round(list.height), listScrollH: listNode.scrollHeight, rows,
+          confirmDisabled: [...dlg.querySelectorAll('.confirm-actions .btn')]
+            .find((b) => /只读领养/.test(b.textContent)).disabled,
+        };
+      `);
+      assert(view.rows.filter((r) => r.checked).length === 1, '必须且只能预选一个候选');
+      assert(!view.confirmDisabled, '有可领养候选却把确认按钮锁着');
+      assert(view.bottom <= view.viewportH + 1, `六行候选把对话框顶出视口（bottom=${view.bottom} > ${view.viewportH}）`);
+      for (const row of view.rows) {
+        assert(/PID \d+/.test(row.text) && /端口/.test(row.text), `候选缺 PID 或端口：${row.text}`);
+        assert(row.right <= view.right + 1, `候选行横向溢出对话框：${row.text}`);
+        assert(row.height >= 20, `候选行只有 ${row.height}px 高，点不准`);
+        // 六行是真机常态；末行被滚动框切成半截会让人以为只有五个候选
+        assert(row.bottom <= view.listBottom + 1,
+          `候选行被滚动框切掉（视口高 ${view.viewportH}，列表 ${view.listH}px 装 ${view.listScrollH}px）：${row.text}`);
+      }
+
+      const target = manual[3];
+      await cdp.eval(`
+        const dlg = document.querySelector('.confirm-dialog');
+        [...dlg.querySelectorAll('.confirm-choice input')][3].click();
+        [...dlg.querySelectorAll('.confirm-actions .btn')].find((b) => /只读领养/.test(b.textContent)).click();
+        return true;
+      `);
+      const adopted = await waitHost(rig, host, ['running']);
+      assert(adopted.web.pid === target.pid,
+        `登记的是 pid=${adopted.web.pid}，选中的是 pid=${target.pid}`);
+      assert(adopted.web.startedByUs === false, '领养来的实例不许被记成自己拉起的');
+      assert(adopted.manualInstances.length === 5, `其余手动实例应剩 5 个，实测 ${adopted.manualInstances.length}`);
+      return `${path.relative(REPO, shot)}；领养 pid=${target.pid}，另 5 个照旧只读`;
+    });
   } finally {
     cdp.close();
     await chrome.kill();
