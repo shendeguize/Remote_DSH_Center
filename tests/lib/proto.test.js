@@ -19,8 +19,13 @@ import {
   parseProtoOutput,
   parseLaunchUrl,
   kvOne,
+  MANUAL_WEB_GREP,
+  MANUAL_WEB_SCAN,
 } from '../../src/lib/proto.js';
 import { localExec, SSH_OUTPUT_CAP_BYTES } from '../../src/lib/ssh.js';
+
+/** 判据取自协议自身（ERE 与 JS 同形），只还原躲 grep 用的 `[d]sh`。 */
+const MANUAL_WEB_JS = new RegExp(MANUAL_WEB_GREP.replace('[d]', 'd'));
 
 // ── §7 解析器 ────────────────────────────────────────────────────────────
 
@@ -139,6 +144,58 @@ test('§1.1 版本探测带上 dsh 自己的 bin 目录（#!/usr/bin/env node �
   assert.ok(s.includes('PATH="${DSH_DIR:-/}:$PATH" "$RESOLVED_DSH" --version'));
   assert.ok(s.includes('SNIFF_DIR="${SNIFF_PATH%/*}"'));
   assert.ok(s.includes('PATH="${SNIFF_DIR:-/}:$PATH" timeout 5 "$SNIFF_PATH" --version'));
+});
+
+test('§1.1 手动实例扫描要求 dsh web 相邻，不认只是「提到」两个词的命令行', () => {
+  const s = buildProbeScript();
+  assert.ok(s.includes(MANUAL_WEB_SCAN), '探测模板必须复用同一条扫描，不许各写一份');
+  // 宽模式（[d]sh.*web）会把本机上 Center 自己派出去的 ssh 探测算成手动实例：那条
+  // 命令行原样带着这份脚本，里面既有 command -v dsh 又有 profiles/web
+  const sibling = `4242 ssh -o BatchMode=yes other-host sh -c ${s}`;
+  assert.ok(/dsh.*web/.test(sibling), '前提：宽模式确实会命中兄弟 ssh，否则这条判据在空转');
+  assert.ok(!MANUAL_WEB_JS.test(sibling), '并发探测的 ssh 不是手动实例');
+  assert.ok(MANUAL_WEB_JS.test('64498 node /opt/homebrew/bin/dsh web --port 9013 --no-open'));
+  assert.ok(
+    !MANUAL_WEB_JS.test("777 ssh h sh -c nohup '/usr/bin/dsh' web --port 8899"),
+    '在飞的拉起 ssh 里路径带引号（shq），不该被当成已在跑的实例',
+  );
+});
+
+test('§1.1 手动实例扫描在真 shell 上认真实例、放过旁观进程', async (t) => {
+  // 这条流水线此前只有垫片对译过，从没在真 ps/grep 上跑过——幻影实例就是这么漏的
+  const dir = await mkdtemp(join(tmpdir(), 'proto-scan-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fakeDsh = join(dir, 'dsh');
+  await writeFile(fakeDsh, '#!/bin/sh\nexec sleep 30\n');
+  await chmod(fakeDsh, 0o755);
+
+  // 旁观者照 Center 在本机的真实形状造：argv 里原样驮着整份探测脚本的 ssh。
+  // 注意不能用 `sh -c 'sleep 30'`——shell 会 exec 掉自己，ps 里只剩 `sleep 30`，
+  // 脚本文本根本不在进程表里，陷阱等于没布。
+  const fakeSsh = join(dir, 'ssh');
+  await writeFile(fakeSsh, '#!/bin/sh\nsleep 30\n');
+  await chmod(fakeSsh, 0o755);
+
+  const script = buildProbeScript();
+  const children = [
+    spawn(fakeDsh, ['web', '--no-open', '--host', '127.0.0.1', '--port', '65001'], { stdio: 'ignore' }),
+    spawn(fakeSsh, ['-o', 'BatchMode=yes', 'other-host', 'sh', '-c', script], { stdio: 'ignore' }),
+  ];
+  t.after(() => { for (const child of children) child.kill('SIGKILL'); });
+  const [real, bystander] = children;
+  await new Promise((resolve) => { setTimeout(resolve, 200); });
+
+  const table = await localExec('ps -eo pid,args');
+  const lineOf = (pid) => table.stdout.split('\n').find((l) => Number(l.trim().split(/\s+/)[0]) === pid) ?? '';
+  assert.match(lineOf(bystander.pid), /dsh/, '前提：旁观者的命令行确实驮着脚本，陷阱布好了');
+  assert.match(lineOf(bystander.pid), /web/, '前提：脚本里的 profiles/web 也在 ps 可见范围内');
+
+  const scan = await localExec(MANUAL_WEB_SCAN);
+  assert.equal(scan.code, 0);
+  const pids = scan.stdout.trim().split('\n')
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+  assert.ok(pids.includes(real.pid), `真 dsh web（pid ${real.pid}）必须被扫到：\n${scan.stdout}`);
+  assert.ok(!pids.includes(bystander.pid), `旁观进程（pid ${bystander.pid}）不该算成实例：\n${scan.stdout}`);
 });
 
 test('§1.2 拉起模板：双层算例逐字一致（12 §2.5）', () => {

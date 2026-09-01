@@ -13,6 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { MANUAL_WEB_GREP } from '../../src/lib/proto.js';
 import { posixCksum, SETTINGS_MAX_BYTES } from '../../src/settings-file.js';
 import { host as hostState, mutate, readState } from './state.js';
 import { unshq, unshqWorkdir } from './shell-word.js';
@@ -212,12 +213,21 @@ function sleepBlocking(ms) {
 }
 
 /**
+ * 判据取自协议自身而非另抄一份：ERE 与 JS 正则在这条模式上同形，只需把躲 grep 用的
+ * `[d]sh` 还原成 `dsh`。脚本里的模式一旦放宽，假远端立刻跟着放宽——于是「幻影实例」
+ * 这类缺陷在垫片上也会现形，而不是被一份手写对译悄悄兜住。
+ */
+const MANUAL_WEB_RE = new RegExp(MANUAL_WEB_GREP.replace('[d]', 'd'));
+
+/**
  * 还原远端 `ps -eo pid,args | grep …` 那条流水线。
  *
- * 关键点：真远端的 ps 表里**也有执行本脚本的那层 `sh -c`**，它的命令行就是脚本自身，
- * 于是可能被脚本自己的 grep 命中（真机验收发现的自匹配）。垫片必须一并回放这一行，
- * 否则这类自匹配缺陷在假远端永远测不出来。自身 pid 借用垫片进程号，不会与登记的假
- * 远端 pid 相撞。
+ * 回放两类「命令行里带着这份脚本」的旁观进程，它们都真实存在且都曾被误算成实例：
+ *   - 执行本脚本的那层 `sh -c`（真机验收发现的自匹配，靠 `$$` 排掉）；
+ *   - Center 派给**其他**主机的 `ssh <host> sh -c '<同一份脚本>'`——本机探测扫的是
+ *     整台机器的进程表，一轮 14 台的并发探测于是在本机凭空变出五个「手动实例」。
+ * 不回放这两行，这类缺陷在假远端永远测不出来。旁观 pid 借用垫片进程号一带，不会与
+ * 登记的假远端 pid 相撞。
  */
 function psMatches(h, body) {
   const rows = [];
@@ -225,9 +235,10 @@ function psMatches(h, body) {
     if (alive(Number(pid), h)) rows.push({ pid: Number(pid), args: p.args });
   }
   rows.push({ pid: process.pid, args: `sh -c ${body}` });
+  rows.push({ pid: process.pid + 1, args: `ssh -o BatchMode=yes other-host sh -c ${body}` });
 
   const excludesSelf = body.includes('grep -v "^ *$$ "');
-  return rows.filter((r) => /dsh.*web/.test(`${r.pid} ${r.args}`))
+  return rows.filter((r) => MANUAL_WEB_RE.test(`${r.pid} ${r.args}`))
     .filter((r) => !(excludesSelf && r.pid === process.pid));
 }
 

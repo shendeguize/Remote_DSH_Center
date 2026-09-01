@@ -43,6 +43,22 @@ function binDir(value) {
   return cut <= 0 ? '/' : value.slice(0, cut);
 }
 
+/**
+ * 手动 dsh web 扫描（进程表 → RUNNING_DSH_WEB 块）。
+ *
+ * `dsh` 与 `web` 必须紧挨着：宽模式（`[d]sh.*web`）会把「命令行里同时提到 dsh 和
+ * web 的进程」全算成实例——本机探测尤甚，Center 派给其他主机的 `ssh <host> sh -c
+ * '<本脚本>'` 原样带着 `command -v dsh` 与 `profiles/web`，于是一轮 14 台的探测能在
+ * 本机凭空变出五个「手动实例」，还会让本机的一步拉起变成领养对话框。
+ *
+ * 真实例的命令行里 `dsh web` 是相邻的两个词（`node /opt/homebrew/bin/dsh web …`）；
+ * 拉起脚本里的路径经 shq 加了引号（`'/usr/bin/dsh' web …`），因此在飞的拉起 ssh 也
+ * 不会被误命中。`[d]sh` 躲开 grep 自己，`$$` 排掉执行本脚本的那层 shell。
+ */
+export const MANUAL_WEB_GREP = '(^|[ /])[d]sh +web( |$)';
+
+export const MANUAL_WEB_SCAN = `ps -eo pid,args | grep -E "${MANUAL_WEB_GREP}" | grep -v "^ *$$ " || true`;
+
 /** 配置路径由 manager 注入，其余候选均在目标 shell 内按优先级解析。 */
 export function buildProbeScript({ dshPath = null } = {}) {
   const configured = dshPathToken(dshPath);
@@ -78,10 +94,7 @@ export function buildProbeScript({ dshPath = null } = {}) {
     'if [ -z "$SNIFF_PATH" ] && [ -n "$LOGIN_DSH" ]; then SNIFF_PATH="$LOGIN_DSH"; fi',
     'if command -v timeout >/dev/null 2>&1 && [ -n "$SNIFF_PATH" ]; then SNIFF_DIR="${SNIFF_PATH%/*}"; DSH_SNIFF_VERSION=$(PATH="${SNIFF_DIR:-/}:$PATH" timeout 5 "$SNIFF_PATH" --version 2>/dev/null | head -n 1); printf "DSH_SNIFF_VERSION=%s\\n" "$DSH_SNIFF_VERSION"; fi',
     'echo "RUNNING_DSH_WEB<<EOF"',
-    // `[d]sh` 只躲过 grep 自己；执行本脚本的那层 sh -c 仍会被命中——它的命令行里
-    // 既有 command -v dsh 又有 profiles/web。故再按 $$（本 shell 的 pid，子 shell 中
-    // 不变）排掉自身那行，否则每次探测都凭空多出一个「手动实例」。
-    'ps -eo pid,args | grep "[d]sh.*web" | grep -v "^ *$$ " || true',
+    MANUAL_WEB_SCAN,
     'echo "EOF"',
     'echo "PROBE_DONE=yes"',
   ].join('; ');

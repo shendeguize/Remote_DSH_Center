@@ -404,6 +404,24 @@ test('探测不把自己那层 sh -c 记成手动实例（真机自匹配回归�
   assert.deepEqual(noDsh.manualInstances, []);
 });
 
+test('探测不把 Center 派给别台的 ssh 探测记成手动实例（本机幻影回归）', async (t) => {
+  harnessFixture(t);
+
+  // 本机探测扫的是整台机器的进程表，里头有 Center 同时派给其他主机的
+  // `ssh <host> sh -c '<同一份探测脚本>'`：修前的宽模式（[d]sh.*web）把它们全算成
+  // 手动实例，一轮 14 台的探测能在本机凭空变出五个，且因为 manualInstances 非空，
+  // 本机的一步拉起会被 ADOPTION_AVAILABLE 拦成领养对话框——而那几行还按不动。
+  // 垫片按 psMatches 回放这类旁观进程，判据直接取自协议模板。
+  const r = await runLaunchSequence('gpu-1', { port: 18911 });
+  const result = await probeOnce('gpu-1');
+
+  assert.deepEqual(
+    result.manualInstances.map((m) => m.pid),
+    [r.pid],
+    `只有真跑着的那个算实例：${JSON.stringify(result.manualInstances)}`,
+  );
+});
+
 test('slow-probe 场景不阻塞其他主机（并行探测）', async (t) => {
   const h = harnessFixture(t, {});
   h.scenario('slow', 'slow-probe', 700);
