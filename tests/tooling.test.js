@@ -19,7 +19,8 @@ import { gzipSync } from 'node:zlib';
 import { isMainEntry } from '../src/lib/entry.js';
 import { parseVersion } from '../src/lib/semver.js';
 import {
-  PACK_RULES, STAGES as CHECK_STAGES, selectStages, summarize, verifyPackFiles,
+  PACK_RULES, STAGES as CHECK_STAGES, packFilesFromJson, selectStages, summarize,
+  verifyPackFiles,
 } from '../scripts/check.mjs';
 import { countDeclaredTests, parseTapCensus, shortfall } from '../scripts/coverage-gate.mjs';
 import {
@@ -680,6 +681,13 @@ test('verifyPackFiles：该进的都在、tests 与 .local 不许混进去', () 
   const short = verifyPackFiles(good.filter((f) => f !== 'src/cli.js'));
   assert.equal(short.ok, false);
   assert.deepEqual(short.missing, ['src/cli.js']);
+});
+
+test('packFilesFromJson：兼容 npm 10 数组与 npm 11 对象输出', () => {
+  const files = [...PACK_RULES.required].map((path_) => ({ path: path_ }));
+  assert.deepEqual(packFilesFromJson(JSON.stringify([{ files }])), [...PACK_RULES.required]);
+  assert.deepEqual(packFilesFromJson(JSON.stringify({ files })), [...PACK_RULES.required]);
+  assert.throws(() => packFilesFromJson(JSON.stringify({})), /无法解析/);
 });
 
 test('summarize 三种状态各有记号', () => {

@@ -14,6 +14,9 @@ export const FACTORY_DEFAULTS = Object.freeze({
     remoteWebPort: 8899,
     localPortRange: Object.freeze([17701, 17799]),
   }),
+  cleanup: Object.freeze({
+    rules: Object.freeze(['owned-web', 'test-workdir']),
+  }),
   hostDefaults: Object.freeze({
     local: false,
     enabled: true,
@@ -55,6 +58,7 @@ export function newFactoryConfig() {
       remoteWebPort: FACTORY_DEFAULTS.defaults.remoteWebPort,
       localPortRange: [...FACTORY_DEFAULTS.defaults.localPortRange],
     },
+    cleanup: { rules: [...FACTORY_DEFAULTS.cleanup.rules] },
     hosts: {},
   };
 }

@@ -214,6 +214,8 @@ function migrateConfig(raw) {
   cfg.defaults ??= factory.defaults;
   cfg.defaults.remoteWebPort ??= factory.defaults.remoteWebPort;
   cfg.defaults.localPortRange ??= factory.defaults.localPortRange;
+  cfg.cleanup ??= factory.cleanup;
+  cfg.cleanup.rules ??= [...factory.cleanup.rules];
   cfg.hosts ??= {};
   for (const [name, host] of Object.entries(cfg.hosts)) {
     cfg.hosts[name] = { ...newHostConfig(), ...host, inject: { ...newHostConfig().inject, ...host.inject } };

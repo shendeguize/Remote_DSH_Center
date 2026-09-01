@@ -187,6 +187,8 @@ const enc = encodeURIComponent;
 
 export const api = {
   managerInfo: () => call('GET', '/api/manager/info'),
+  sidecarStatus: () => call('GET', '/api/sidecar/status'),
+  fleetAnalysis: () => call('POST', '/api/analysis/fleet', { body: {} }),
   hosts: () => call('GET', '/api/hosts'),
   config: () => call('GET', '/api/config'),
 
@@ -195,7 +197,12 @@ export const api = {
     body: name === undefined ? {} : { name },
   }),
   probeHost: (name) => call('POST', `/api/hosts/${enc(name)}/probe`),
-  startHost: (name) => call('POST', `/api/hosts/${enc(name)}/start`),
+  startHost: (name, { forceNew = false } = {}) => call('POST', `/api/hosts/${enc(name)}/start`, {
+    body: forceNew ? { forceNew: true } : {},
+  }),
+  adoptHost: (name, { pid = null, port = null } = {}) => call('POST', `/api/hosts/${enc(name)}/adopt`, {
+    body: { pid, port },
+  }),
   stopHost: (name) => call('POST', `/api/hosts/${enc(name)}/stop`),
   restartHost: (name) => call('POST', `/api/hosts/${enc(name)}/restart`),
   reconnectHost: (name) => call('POST', `/api/hosts/${enc(name)}/reconnect`),

@@ -11,6 +11,7 @@ import { phaseMeta } from './utils.js';
 
 const CALL = {
   start: api.startHost,
+  adopt: api.adoptHost,
   stop: api.stopHost,
   restart: api.restartHost,
   reconnect: api.reconnectHost,
@@ -166,6 +167,33 @@ export function createActions({ store, confirm, navigate }) {
       if (!ok) return null;
     }
 
+    if (action === 'start') {
+      return guarded({
+        action,
+        host: name,
+        run: () => CALL.start(name),
+        onError: async (toast) => {
+          if (toast.code !== 'ADOPTION_AVAILABLE') return;
+          store.dismissToast(toast.id);
+          const choice = await confirm({
+            title: `主机 ${name} 已有手动 dsh web`,
+            lines: [
+              '只读领养只登记现有进程并建立映射，不会停止或重启它。',
+              '强拉会启动第二个实例；取消则保持当前状态。',
+            ],
+            confirmLabel: '只读领养',
+            secondaryLabel: '强拉第二份',
+            cancelLabel: '取消',
+            danger: false,
+          });
+          if (choice === true) {
+            await guarded({ action: 'adopt', host: name, run: () => CALL.adopt(name) });
+          } else if (choice === 'secondary') {
+            await guarded({ action: 'start', host: name, run: () => CALL.start(name, { forceNew: true }) });
+          }
+        },
+      });
+    }
     return guarded({ action, host: name, run: () => CALL[action](name) });
   }
 

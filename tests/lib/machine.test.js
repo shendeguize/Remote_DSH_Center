@@ -14,11 +14,11 @@ test('8×8 全组合与 §2.1 迁移表一致（快照）', () => {
     unknown: ['unknown', 'unreachable', 'no_dsh', 'ready'],
     unreachable: ['unreachable', 'no_dsh', 'ready'],
     no_dsh: ['unreachable', 'no_dsh', 'ready'],
-    ready: ['unreachable', 'no_dsh', 'ready', 'starting'],
+    ready: ['unreachable', 'no_dsh', 'ready', 'starting', 'running'],
     starting: ['ready', 'starting', 'running'],
     running: ['ready', 'running', 'degraded', 'crashed'],
     degraded: ['ready', 'running', 'degraded', 'crashed'],
-    crashed: ['unreachable', 'no_dsh', 'ready', 'starting', 'crashed'],
+    crashed: ['unreachable', 'no_dsh', 'ready', 'starting', 'running', 'crashed'],
   });
 });
 

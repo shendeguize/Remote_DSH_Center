@@ -21,9 +21,11 @@ import { DshError, asDshError } from './lib/errors.js';
 import { bus, emitOperationDone, logEvent, recentLogs } from './lib/bus.js';
 import {
   assertValid,
+  adoptHostBodySchema,
   defaultsPatchSchema,
   dshSettingsPutSchema,
   dshWorkspaceCreateSchema,
+  emptyBodySchema,
   hostConfigPatchSchema,
   localHostCreateSchema,
   setupBodySchema,
@@ -501,6 +503,17 @@ export function createHandler({ managerCtl }) {
       sendJson(res, 200, managerCtl.info());
     }],
 
+    ['GET', /^\/api\/sidecar\/status$/, async (req, res) => {
+      sendJson(res, 200, await managerCtl.sidecarStatus());
+    }],
+
+    ['POST', /^\/api\/analysis\/fleet$/, async (req, res, _groups, url) => {
+      rejectQuery(req, url);
+      const body = await readJsonBody(req);
+      assertValid(emptyBodySchema, body, '舰队分析请求体必须为空对象');
+      sendJson(res, 200, await managerCtl.fleetAnalysis());
+    }],
+
     ['GET', /^\/api\/events$/, (req, res) => {
       sseHub.attach(req, res);
     }],
@@ -670,13 +683,36 @@ export function createHandler({ managerCtl }) {
       accept(res, { host: view.name, action: 'probe' }, () => prober.probeHost(view.name));
     }],
 
-    ['POST', /^\/api\/hosts\/([^/]+)\/start$/, (req, res, [name]) => {
+    ['POST', /^\/api\/hosts\/([^/]+)\/start$/, async (req, res, [name]) => {
       const view = requireRemoteHost(decodeURIComponent(name), '启动');
+      const body = await readJsonBody(req);
+      assertValid(adoptHostBodySchema, body, '启动请求体校验失败');
       if (!view.config.enabled) {
         throw new DshError('NOT_ALLOWED', `主机 ${view.name} 已在配置中停用`, { host: view.name });
       }
       requirePhase(view, ['ready', 'crashed'], '启动');
+      if ((view.manualInstances?.length ?? 0) > 0 && body.forceNew !== true) {
+        const candidates = view.manualInstances
+          .map((item) => `pid=${item.pid} port=${item.port ?? 'unknown'}`)
+          .join('、');
+        throw new DshError(
+          'ADOPTION_AVAILABLE',
+          `主机 ${view.name} 已有手动 dsh web（${candidates}），请确认只读领养或显式强拉`,
+          { host: view.name, detail: '领养：POST /api/hosts/:name/adopt；强拉：请求体 {"forceNew":true}' },
+        );
+      }
       accept(res, { host: view.name, action: 'start' }, () => launcher.start(view.name));
+    }],
+
+    ['POST', /^\/api\/hosts\/([^/]+)\/adopt$/, async (req, res, [name]) => {
+      const view = requireRemoteHost(decodeURIComponent(name), '领养');
+      const body = await readJsonBody(req);
+      assertValid(adoptHostBodySchema, body, '领养请求体校验失败');
+      requirePhase(view, ['ready', 'crashed'], '领养');
+      accept(res, { host: view.name, action: 'adopt' }, () => launcher.adopt(view.name, {
+        pid: body.pid ?? null,
+        port: body.port ?? null,
+      }));
     }],
 
     ['POST', /^\/api\/hosts\/([^/]+)\/stop$/, (req, res, [name]) => {

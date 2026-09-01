@@ -245,6 +245,31 @@ git_install() {
   INSTALLER="${APP_DIR}/scripts/install.mjs"
 }
 
+install_sidecar_best_effort() {
+  if command -v agent-sidecar >/dev/null 2>&1; then
+    local current
+    current="$(agent-sidecar --version 2>/dev/null || true)"
+    if printf '%s\n' "${current}" | awk 'match($0, /0\.9\.[0-9]+/) { ok=1 } END { exit ok ? 0 : 1 }'; then
+      info "已发现 agent-sidecar：${current}"
+      return 0
+    fi
+    info "Agent Sidecar 版本过低，尝试自动升级"
+  fi
+  command -v curl >/dev/null 2>&1 || {
+    info '警告：未找到 curl，跳过 Agent Sidecar 安装（Center 仍可继续使用）'
+    return 0
+  }
+  local installer tmp
+  installer="${DSH_SIDECAR_INSTALLER_URL:-https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh}"
+  tmp="$(mktemp)"
+  if curl -fsSL -o "${tmp}" "${installer}" && sh "${tmp}" --prefix "${HOME}/.local"; then
+    info 'Agent Sidecar 已通过官方校验和安装器安装'
+  else
+    info '警告：Agent Sidecar 安装失败，Center 安装继续；可稍后手动运行 AgentSideCar/install.sh'
+  fi
+  rm -f "${tmp}"
+}
+
 if [ "${CHANNEL}" = 'standalone' ]; then
   standalone_install
 else
@@ -256,6 +281,7 @@ fi
 printf '\n'
 # --no-next-steps：收尾提示由下面第 4 段统一印，别让 install.mjs 再来一份（issue #17）
 "${NODE_BIN}" "${INSTALLER}" --no-next-steps ${PASS[@]+"${PASS[@]}"}
+install_sidecar_best_effort
 
 # ── 4. 下一步 ────────────────────────────────────────────────────────────
 

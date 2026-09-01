@@ -70,6 +70,33 @@ export function buildProbeScript({ dshPath = null } = {}) {
   ].join('; ');
 }
 
+/** 发现 --port 0/缺失端口的手动 dsh web 实例实际监听端口。 */
+export function buildManualPortProbeScript(pids) {
+  if (!Array.isArray(pids) || pids.length === 0 || pids.length > 256) {
+    throw new DshError('VALIDATION', '手动实例 PID 列表无效');
+  }
+  const pidTokens = pids.map((pid) => assertInt(pid, { min: 1, max: 4_294_967_295 }));
+  return [
+    'echo "MANUAL_PORTS<<EOF"',
+    `for P in ${pidTokens.join(' ')}; do if command -v ss >/dev/null 2>&1; then ss -ltnp 2>/dev/null | awk -v p="$P" 'index($0, "pid=" p ",") || index($0, "pid=" p ")") { n=split($4,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; elif command -v lsof >/dev/null 2>&1; then lsof -nP -a -p "$P" -iTCP -sTCP:LISTEN -F n 2>/dev/null | awk -v p="$P" '/^n/ { n=split($0,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; fi; done`,
+    'echo "EOF"',
+    'echo "MANUAL_PORTS_DONE=yes"',
+  ].join('; ');
+}
+
+/** 解析 MANUAL_PORTS 块；坏行丢弃，探测失败按未知处理。 */
+export function parseManualPortBlock(raw) {
+  const ports = new Map();
+  for (const line of String(raw ?? '').split('\n')) {
+    const match = /^\s*(\d+)=(\d{1,5})\s*$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const port = Number(match[2]);
+    if (pid > 0 && port >= 1 && port <= 65535) ports.set(pid, port);
+  }
+  return ports;
+}
+
 // ── §1.2 拉起协议 ────────────────────────────────────────────────────────
 
 /**

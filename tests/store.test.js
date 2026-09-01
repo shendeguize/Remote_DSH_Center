@@ -335,7 +335,7 @@ test('setPhase 守卫非法迁移：抛错且状态零改动', async (t) => {
 
   assert.equal(store.setPhase('gpu-1', 'ready', 'test'), 'ready');
   assert.throws(
-    () => store.setPhase('gpu-1', 'running', 'test'),
+    () => store.setPhase('gpu-1', 'degraded', 'test'),
     (e) => e.code === 'STATE_ILLEGAL_TRANSITION',
   );
   assert.equal(store.getPhase('gpu-1'), 'ready', '非法迁移不改状态');
