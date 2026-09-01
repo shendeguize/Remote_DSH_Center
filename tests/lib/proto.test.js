@@ -114,6 +114,33 @@ test('§1.1 探测模板逐字一致（含非交互 PATH 与 login-shell 嗅探�
   assert.ok(s.indexOf('LOGIN_DSH=') < s.indexOf('RESOLVED_DSH='));
 });
 
+test('§1.1 嗅探覆盖只在交互 rc 里现身的安装（canon 前缀 + bash -lic）', () => {
+  const s = buildProbeScript();
+  assert.ok(
+    s.includes('"$HOME/.canon/node/bin" "$HOME/.canon/bin"'),
+    'canon 把 dsh 装进自己的 node 前缀，不扫这里的话装好的 pod 会被判成未安装',
+  );
+  assert.ok(s.includes("bash -lic 'command -v dsh'"), '~/.bashrc 顶部的非交互守卫让 -lc 读不到 export PATH');
+  assert.ok(
+    s.indexOf("bash -lc 'command -v dsh'") < s.indexOf("bash -lic 'command -v dsh'"),
+    '交互 shell 更贵也更吵，只在 login shell 空手而归后兜底',
+  );
+  assert.ok(s.includes('[ -z "$LOGIN_DSH" ] && command -v timeout'), '兜底须带 timeout，交互 rc 可能挂住');
+  assert.ok(
+    s.includes('timeout 3 bash -lic'),
+    '两次嗅探共用一条 15s 的 ssh 预算，交互那次的上限必须比 login shell 更紧',
+  );
+  assert.ok(s.includes('grep "^/" | tail -n 1'), '交互 rc 可能先打印横幅，只收绝对路径行');
+});
+
+test('§1.1 版本探测带上 dsh 自己的 bin 目录（#!/usr/bin/env node 找得到解释器）', () => {
+  const s = buildProbeScript();
+  assert.ok(s.includes('DSH_DIR="${RESOLVED_DSH%/*}"'));
+  assert.ok(s.includes('PATH="${DSH_DIR:-/}:$PATH" "$RESOLVED_DSH" --version'));
+  assert.ok(s.includes('SNIFF_DIR="${SNIFF_PATH%/*}"'));
+  assert.ok(s.includes('PATH="${SNIFF_DIR:-/}:$PATH" timeout 5 "$SNIFF_PATH" --version'));
+});
+
 test('§1.2 拉起模板：双层算例逐字一致（12 §2.5）', () => {
   const s = buildLaunchScript({
     logName: 'web-8899.log',
@@ -135,6 +162,22 @@ test('§1.2 拉起模板使用已解析的绝对 dsh 路径并拒绝相对路径
     () => buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: 'dsh' }),
     (err) => err.code === 'VALIDATION',
   );
+});
+
+test('§1.2 拉起把 dsh 自己的 bin 目录并入 PATH（解释器与它同住）', () => {
+  const s = buildLaunchScript({
+    logName: 'web-8899.log',
+    port: 8899,
+    dshPath: '/root/.canon/node/bin/dsh',
+  });
+  noRawNewline(s, 'launch+path');
+  assert.ok(
+    s.includes('PATH=\'/root/.canon/node/bin\':"$PATH"; export PATH; nohup '),
+    'PATH 必须在 nohup 之前就绪，否则 `env node` 找不到解释器，日志里只剩一行报错',
+  );
+
+  const legacy = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
+  assert.ok(!legacy.includes('PATH='), '兼容形态的 dsh 没有可推导的目录，模板逐字不变');
 });
 
 test('§1.2 前置语句用 "; " 连接、& 后直接跟 echo $!', () => {

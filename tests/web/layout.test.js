@@ -117,6 +117,25 @@ test('620px 以下页头动作独占一行且不撑宽文档', () => {
   assert.doesNotMatch(actions, /gap\s*:/, '窄屏动作行应继承既有按钮 gap');
 });
 
+test('可排序表头与列内容压在同一条左边界上', () => {
+  // .btn / .btn-compact 的 padding、border、color 都写在 .host-sort-button 之后，
+  // 同优先级下后来者胜：这条规则必须靠 th 后代提权，否则可排序列的表头会比其余
+  // 表头右移一个按钮内边距，也比它们亮一档。
+  const sortButton = blockFor(CSS, '.host-table th .host-sort-button');
+  assert.equal(declaration(sortButton, 'padding'), '0', '表头按钮的横向内边距会把标签推离列内容');
+  assert.equal(declaration(sortButton, 'border'), '0');
+  assert.equal(declaration(sortButton, 'font'), 'inherit');
+  assert.equal(declaration(sortButton, 'color'), 'inherit', '表头颜色必须与不可排序的表头一致');
+  assert.equal(declaration(sortButton, 'background'), 'none');
+
+  const cells = blockFor(CSS, '.host-table th, .host-table td');
+  assert.equal(declaration(cells, 'padding'), '8px 10px', '表头与单元格必须共用同一组内边距');
+
+  // 排序方向的可见指示只能向右长，向左动一个像素就又破坏对齐
+  assert.match(CSS, /\.host-table th \.host-sort-button\[aria-sort="asc"\]::after/);
+  assert.match(CSS, /\.host-table th \.host-sort-button\[aria-sort="desc"\]::after/);
+});
+
 test('620px 以下双卡单列并允许卡片宽度链收缩', () => {
   const desktop = blockFor(CSS, '.side-by-side');
   assert.equal(

@@ -445,6 +445,27 @@ test('pending start 遇到 running 快照后解除行忙态', async (t) => {
     'running 到达后应展示可用的下一步动作');
 });
 
+test('两行同为「运行中」就必须给同一排按钮，领养行只是按不动并写明原因', async (t) => {
+  const adopted = running('adopted');
+  adopted.web = { ...adopted.web, pid: 777, startedByUs: false };
+  const { dom } = await mount(t, { hosts: [running('managed'), adopted] });
+
+  const labels = (name) => [...dom.app
+    .querySelector(`[data-host="${name}"] .row-actions`)
+    .querySelectorAll('.btn')]
+    .map((b) => b.textContent);
+
+  assert.deepEqual(labels('adopted'), labels('managed'), '状态列写着同一个词，操作列不能一行四个一行两个');
+  assert.deepEqual(labels('managed'), ['打开', '重启', '关停', '探测']);
+
+  for (const act of ['restart', 'stop']) {
+    const btn = dom.app.querySelector(`[data-host="adopted"] [data-act="${act}"]`);
+    assert.equal(btn.disabled, true, `领养实例的${act}仍须禁用（不误杀契约）`);
+    assert.match(btn.title, /非本工具拉起/, '按不动的按钮要自己解释为什么');
+    assert.equal(dom.app.querySelector(`[data-host="managed"] [data-act="${act}"]`).disabled, false);
+  }
+});
+
 test('点 ready 标签一步拉起：慢 SSE 首帧显示可访问占位，phase 不乐观改写', async (t) => {
   const ready = hostView('gpu-ready');
   const { app, dom, calls, es } = await mount(t, { hosts: [ready] });

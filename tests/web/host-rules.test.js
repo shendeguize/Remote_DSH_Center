@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   PRIMARY_HOST_PHASES,
   allowedHostActions,
+  hostActionBlockReason,
+  hostActionSlots,
   isHostActionAllowed,
   isHostEnabled,
   isManagedHost,
@@ -150,6 +152,56 @@ test('allowedHostActions 返回不可变值，调用方不能污染后续结果'
     allowedHostActions(managed('degraded')),
     ['open', 'reconnect', 'restart', 'stop', 'probe'],
   );
+});
+
+test('同一 phase 的受管/手动实例给出同一排按钮，差异只落在禁用与理由上', () => {
+  for (const [phase] of ACTION_MATRIX) {
+    assert.deepEqual(
+      hostActionSlots(manual(phase)).map(({ action }) => action),
+      hostActionSlots(managed(phase)).map(({ action }) => action),
+      `${phase}：两行都写着同一个状态，按钮数量与顺序不能不一样`,
+    );
+  }
+
+  const running = hostActionSlots(manual('running'));
+  assert.deepEqual(running.map(({ action }) => action), ['open', 'restart', 'stop', 'probe']);
+  assert.deepEqual(
+    running.filter(({ enabled }) => !enabled).map(({ action }) => action),
+    ['restart', 'stop'],
+    '手动实例照旧不许被关停或重启（不误杀契约）',
+  );
+  for (const slot of running.filter(({ enabled }) => !enabled)) {
+    assert.match(slot.reason, /非本工具拉起/, `${slot.action} 必须说明为什么按不动`);
+  }
+  for (const slot of running.filter(({ enabled }) => enabled)) {
+    assert.equal(slot.reason, null, '可用动作不应挂禁用理由');
+  }
+});
+
+test('槽位可用性与 allowedHostActions 逐项一致，理由覆盖每个禁用项', () => {
+  for (const [phase] of ACTION_MATRIX) {
+    for (const host of [managed(phase), manual(phase)]) {
+      for (const { action, enabled, reason } of hostActionSlots(host)) {
+        assert.equal(enabled, isHostActionAllowed(host, action), `${host.name} / ${action}`);
+        assert.equal(
+          typeof reason === 'string' && reason !== '',
+          !enabled,
+          `${host.name} / ${action} 的理由应仅在禁用时出现`,
+        );
+      }
+    }
+  }
+
+  assert.match(hostActionBlockReason(managed('crashed'), 'start'), /重启/);
+  assert.match(hostActionBlockReason(manual('crashed', { web: null }), 'open'), /拉起/);
+  assert.equal(hostActionBlockReason(managed('running'), 'stop'), null);
+});
+
+test('orphaned 主机不摆一排按不动的按钮，只留查看入口', () => {
+  const host = managed('running', { orphaned: true, local: false });
+  assert.deepEqual(hostActionSlots(host).map(({ action }) => action), ['open']);
+  assert.equal(hostActionSlots(host)[0].enabled, true);
+  assert.match(hostActionBlockReason(host, 'stop'), /ssh config 已消失/);
 });
 
 test('isHostActionAllowed 与动作矩阵使用同一规则', () => {

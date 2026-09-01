@@ -6,12 +6,12 @@
  */
 
 import {
-  ACTION_LABEL, DASH, button, clear, el, fmtAgo, isManaged, phaseBadge, rowActions, text,
+  ACTION_LABEL, DASH, button, clear, el, fmtAgo, isManaged, phaseBadge, text,
 } from '../utils.js';
 import {
   hostDshSummary, hostMappingSummary, hostPhaseHint, hostPhaseMeta,
 } from '../host-presentation.js';
-import { isHostEnabled } from '../host-rules.js';
+import { hostActionSlots, isHostEnabled } from '../host-rules.js';
 import { field, input } from '../form.js';
 
 const COLUMNS = ['主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
@@ -306,14 +306,15 @@ export function createHostTable({ store, actions }) {
   function renderActions(host) {
     const busy = store.hostBusy(host.name);
     const writable = store.canWrite();
-    return rowActions(host).map((action) => {
+    const orphaned = !host.local && host.orphaned;
+    return hostActionSlots(host).map(({ action, enabled, reason }) => {
       if (action === 'open') {
         return markAct('open', button(ACTION_LABEL.open, {
           variant: 'primary',
-          disabled: !writable || (!host.local && host.orphaned),
+          disabled: !enabled || !writable || orphaned,
           title: !writable
             ? '与 manager 失联，写操作已暂停'
-            : ((!host.local && host.orphaned) ? 'ssh config 已消失，远程主机不可打开' : null),
+            : (orphaned ? 'ssh config 已消失，远程主机不可打开' : reason),
           // 「打开」通常是读操作；orphaned 没有可验证的远端身份，不能打开旧映射。
           onClick: (e) => {
             e.stopPropagation();
@@ -323,10 +324,10 @@ export function createHostTable({ store, actions }) {
       }
       return markAct(action, button(ACTION_LABEL[action], {
         variant: action === 'stop' ? 'danger' : 'default',
-        disabled: busy || !writable || (!host.local && host.orphaned),
+        disabled: !enabled || busy || !writable || orphaned,
         title: !writable
           ? '与 manager 失联，写操作已暂停'
-          : ((!host.local && host.orphaned) ? 'ssh config 已消失，远程动作已禁用' : null),
+          : (orphaned ? 'ssh config 已消失，远程动作已禁用' : reason),
         onClick: (e) => {
           e.stopPropagation();
           actions.hostAction(action, host.name);

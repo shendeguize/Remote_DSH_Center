@@ -43,6 +43,11 @@
 也不会代为安装；Center 会展示可复制的安装/配置指引。若 dsh 只在 login shell 可见，
 还会报告嗅探到的路径与非交互 SSH PATH，帮助修正环境。
 
+嗅探不止看非交互 PATH：常见安装目录（含 canon 的 `~/.canon/node/bin`）逐个试，
+再退到 login shell，最后退到交互 shell —— 装在 `~/.bashrc` 里的 PATH 只有交互 shell
+看得见。解析出的 `dsh` 常是 `#!/usr/bin/env node` 脚本，解释器与它同住一个 bin 目录，
+故版本探测与拉起都会先把该目录并入 `PATH`。
+
 ## Agent Sidecar 集成
 
 [Agent Sidecar](https://github.com/shendeguize/AgentSideCar) 是 DSH Center 的下游观察消费者。

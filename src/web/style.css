@@ -267,7 +267,20 @@ body {
 .host-table tbody tr:hover { background: var(--surface-2); }
 .host-table tbody tr:focus-visible { outline: 2px solid var(--ready); outline-offset: -2px; }
 .host-table small { display: block; color: var(--text-dim); font-size: 11px; }
-.host-sort-button { color: inherit; font-weight: inherit; }
+/*
+ * 表头文字必须和列内容压在同一条左边界上。排序控件是 .btn.btn-compact，自带
+ * 1px 边框 + 8px 内边距，把标签整体右推 9px；而 .btn 的 padding/color 都写在本段
+ * 之后，同优先级下后来者胜，于是「主机/状态/dsh/PID」比「本机映射/自启/操作」
+ * 既偏右又偏亮——一行表头两种基线。故按 th 后代提权，把按钮压成裸文字，
+ * 可点性交给 hover 下划线与排序箭头（箭头只向右延伸，不动左边界）。
+ */
+.host-table th .host-sort-button {
+  padding: 0; border: 0; border-radius: 0; background: none;
+  font: inherit; color: inherit; text-align: left;
+}
+.host-table th .host-sort-button:hover:not(:disabled) { background: none; text-decoration: underline; }
+.host-table th .host-sort-button[aria-sort="asc"]::after { content: " ▲"; }
+.host-table th .host-sort-button[aria-sort="desc"]::after { content: " ▼"; }
 .host-cell strong { font-weight: 600; }
 .dsh-cell, .mapping-cell, .pid-cell { font-family: var(--mono); font-size: 12px; }
 .mono-link { font-family: var(--mono); color: var(--ready); }
