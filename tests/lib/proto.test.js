@@ -10,6 +10,7 @@ import {
   buildLaunchScript,
   buildLaunchPollScript,
   buildVerifyScript,
+  buildManualPortProbeScript,
   buildStopScript,
   buildLogTailScript,
   buildPatchCleanupScript,
@@ -255,8 +256,69 @@ test('§1.3 VERIFY 模板逐字一致（ARGS 包进 heredoc、LISTEN 三态、CW
   noRawNewline(s, 'verify');
   assert.equal(
     s,
-    'A=$(ps -p 60768 -o args= 2>/dev/null); if [ -n "$A" ]; then echo "ALIVE=yes"; echo "ARGS<<EOF"; printf \'%s\\n\' "$A"; echo "EOF"; else echo "ALIVE=no"; fi; if command -v ss >/dev/null 2>&1; then if ss -ltn 2>/dev/null | grep -q ":8899 "; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; else echo "LISTEN=unknown"; fi; if [ -r /proc/60768/cwd ]; then printf \'CWD=%s\\n\' "$(readlink /proc/60768/cwd 2>/dev/null || echo unknown)"; else echo "CWD=unknown"; fi; echo "VERIFY_DONE=yes"',
+    'A=$(ps -p 60768 -o args= 2>/dev/null); if [ -n "$A" ]; then echo "ALIVE=yes"; echo "ARGS<<EOF"; printf \'%s\\n\' "$A"; echo "EOF"; else echo "ALIVE=no"; fi; if command -v ss >/dev/null 2>&1; then if ss -ltn 2>/dev/null | grep -q ":8899 "; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; elif [ -r /proc/net/tcp ]; then if cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v h="22C3" \'$4=="0A" { n=split($2,a,":"); if (toupper(a[n])==h) f=1 } END { exit f?0:1 }\'; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; else echo "LISTEN=unknown"; fi; if [ -r /proc/60768/cwd ]; then printf \'CWD=%s\\n\' "$(readlink /proc/60768/cwd 2>/dev/null || echo unknown)"; else echo "CWD=unknown"; fi; echo "VERIFY_DONE=yes"',
   );
+});
+
+test('§1.3 LISTEN：无 ss 的机器回落 /proc/net/tcp，端口按大写四位十六进制匹配', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile);
+
+  // 端口十六进制位是判据本身：写错就会把在听的端口判成没在听。
+  for (const [port, hex] of [[8899, '22C3'], [1, '0001'], [65535, 'FFFF'], [4096, '1000']]) {
+    assert.match(buildVerifyScript({ pid: 60768, port }), new RegExp(`awk -v h="${hex}"`, 'u'));
+  }
+
+  const segmentOf = (port) => /(if command -v ss [\s\S]*?fi); if \[ -r \/proc\/\d+\/cwd \]/
+    .exec(buildVerifyScript({ pid: 60768, port }))[1];
+
+  const dir = await mkdtemp(join(tmpdir(), 'dshc-proc-net-'));
+  try {
+    // 造一份内核格式的 /proc/net/tcp：8899 在听（0A），8900 是 ESTABLISHED（01）。
+    const header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+    await writeFile(join(dir, 'tcp'), [
+      header,
+      '   0: 0100007F:22C3 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 940440931 1',
+      '   1: 0100007F:22C4 0100007F:9E12 01 00000000:00000000 00:00000000 00000000     0        0 940440932 1',
+      '',
+    ].join('\n'), 'utf8');
+
+    // 指向夹具，并强制关掉 ss 探测：装了 ss 的 Linux 与没装的 macOS 都只跑回落分支。
+    const withFixture = (port) => segmentOf(port)
+      .replace('command -v ss >/dev/null 2>&1', 'false')
+      .replaceAll('/proc/net/tcp6', join(dir, 'tcp6'))
+      .replaceAll('/proc/net/tcp', join(dir, 'tcp'));
+
+    const listening = await run('sh', ['-c', withFixture(8899)]);
+    assert.equal(listening.stdout.trim(), 'LISTEN=yes');
+
+    const established = await run('sh', ['-c', withFixture(8900)]);
+    assert.equal(established.stdout.trim(), 'LISTEN=no', 'ESTABLISHED（01）不是 LISTEN');
+
+    const absent = await run('sh', ['-c', withFixture(9999)]);
+    assert.equal(absent.stdout.trim(), 'LISTEN=no');
+
+    // 夹具整体不可读时必须回 unknown，而不是被判成「没在听」。
+    const unknown = await run('sh', ['-c', segmentOf(8899)
+      .replace('command -v ss >/dev/null 2>&1', 'false')
+      .replaceAll('/proc/net/tcp6', join(dir, 'absent6'))
+      .replaceAll('/proc/net/tcp', join(dir, 'absent'))]);
+    assert.equal(unknown.stdout.trim(), 'LISTEN=unknown');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('§1.2 手动端口发现：无 ss/lsof 时经 /proc/<pid>/fd inode 反查回落', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const script = buildManualPortProbeScript([4242]);
+
+  await promisify(execFile)('sh', ['-n', '-c', script]);
+  assert.match(script, /elif \[ -r \/proc\/net\/tcp \]/u, 'ss 与 lsof 都缺时必须还有一档');
+  assert.match(script, /function hex2dec/u, 'mawk 没有 strtonum，必须自带十六进制转换');
+  assert.match(script, /\$4=="0A" && index\(ino, "," \$10 ","\)/u, 'inode 必须与 LISTEN 行对齐');
 });
 
 test('§1.3 CWD 回读段在本机 sh 下不报错（无 /proc 的 macOS 也回 unknown）', async () => {

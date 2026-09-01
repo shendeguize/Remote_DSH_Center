@@ -70,6 +70,15 @@ export function buildProbeScript({ dshPath = null } = {}) {
   ].join('; ');
 }
 
+/**
+ * /proc/net/tcp 的端口是十六进制，而 mawk 没有 strtonum，故自带可移植转换。
+ * 非法字符回 -1，落在端口区间校验之外，等同于「未探到」。
+ */
+const AWK_HEX2DEC = 'function hex2dec(s, i, c, v, d) { v = 0; s = toupper(s);'
+  + ' for (i = 1; i <= length(s); i++) { c = substr(s, i, 1);'
+  + ' d = index("0123456789ABCDEF", c) - 1; if (d < 0) return -1; v = v * 16 + d }'
+  + ' return v }';
+
 /** 发现 --port 0/缺失端口的手动 dsh web 实例实际监听端口。 */
 export function buildManualPortProbeScript(pids) {
   if (!Array.isArray(pids) || pids.length === 0 || pids.length > 256) {
@@ -78,7 +87,7 @@ export function buildManualPortProbeScript(pids) {
   const pidTokens = pids.map((pid) => assertInt(pid, { min: 1, max: 4_294_967_295 }));
   return [
     'echo "MANUAL_PORTS<<EOF"',
-    `for P in ${pidTokens.join(' ')}; do if command -v ss >/dev/null 2>&1; then ss -ltnp 2>/dev/null | awk -v p="$P" 'index($0, "pid=" p ",") || index($0, "pid=" p ")") { n=split($4,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; elif command -v lsof >/dev/null 2>&1; then lsof -nP -a -p "$P" -iTCP -sTCP:LISTEN -F n 2>/dev/null | awk -v p="$P" '/^n/ { n=split($0,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; fi; done`,
+    `for P in ${pidTokens.join(' ')}; do if command -v ss >/dev/null 2>&1; then ss -ltnp 2>/dev/null | awk -v p="$P" 'index($0, "pid=" p ",") || index($0, "pid=" p ")") { n=split($4,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; elif command -v lsof >/dev/null 2>&1; then lsof -nP -a -p "$P" -iTCP -sTCP:LISTEN -F n 2>/dev/null | awk -v p="$P" '/^n/ { n=split($0,a,":"); port=a[n]; gsub(/[^0-9]/, "", port); if (port >= 1 && port <= 65535) print p "=" port; }'; elif [ -r /proc/net/tcp ]; then I=$(ls -l /proc/"$P"/fd 2>/dev/null | awk 'match($0, /socket:\\[[0-9]+\\]/) { print substr($0, RSTART + 8, RLENGTH - 9) }' | tr '\\n' ','); if [ -n "$I" ]; then cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p="$P" -v ino=",$I" '${AWK_HEX2DEC} $4=="0A" && index(ino, "," $10 ",") { n=split($2,a,":"); port=hex2dec(a[n]); if (port >= 1 && port <= 65535) print p "=" port; }'; fi; fi; done`,
     'echo "EOF"',
     'echo "MANUAL_PORTS_DONE=yes"',
   ].join('; ');
@@ -174,8 +183,17 @@ export function parseLaunchUrl(url) {
 // ── §1.3 复核与停止协议 ──────────────────────────────────────────────────
 
 /**
+ * 内核 /proc/net/tcp 的 local_address 端口写法：大写四位十六进制。
+ * assertInt 返回的是已校验的字符串，这里显式转数值再取十六进制。
+ */
+function portHex(port) {
+  return Number(port).toString(16).toUpperCase().padStart(4, '0');
+}
+
+/**
  * ALIVE（PID 存活）+ ARGS 块（指纹，manager 侧全等比对）+ LISTEN 三态
- * （ss 非必然存在，unknown 不作否定证据）+ CWD（进程实际工作目录）。
+ * （ss 与 /proc/net/tcp 均不可得时才 unknown，unknown 不作否定证据）
+ * + CWD（进程实际工作目录）。
  *
  * CWD 是 best-effort 的**展示与诊断**字段：/proc 不存在或无权读时回 unknown。
  * 它绝不进不误杀判据集——判据只有 PID 存活与 ARGS 逐字全等（12 §1.3）。
@@ -186,7 +204,7 @@ export function buildVerifyScript({ pid, port }) {
   return [
     `A=$(ps -p ${pidTok} -o args= 2>/dev/null)`,
     'if [ -n "$A" ]; then echo "ALIVE=yes"; echo "ARGS<<EOF"; printf \'%s\\n\' "$A"; echo "EOF"; else echo "ALIVE=no"; fi',
-    `if command -v ss >/dev/null 2>&1; then if ss -ltn 2>/dev/null | grep -q ":${portTok} "; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; else echo "LISTEN=unknown"; fi`,
+    `if command -v ss >/dev/null 2>&1; then if ss -ltn 2>/dev/null | grep -q ":${portTok} "; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; elif [ -r /proc/net/tcp ]; then if cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v h="${portHex(portTok)}" '$4=="0A" { n=split($2,a,":"); if (toupper(a[n])==h) f=1 } END { exit f?0:1 }'; then echo "LISTEN=yes"; else echo "LISTEN=no"; fi; else echo "LISTEN=unknown"; fi`,
     `if [ -r /proc/${pidTok}/cwd ]; then printf 'CWD=%s\\n' "$(readlink /proc/${pidTok}/cwd 2>/dev/null || echo unknown)"; else echo "CWD=unknown"; fi`,
     'echo "VERIFY_DONE=yes"',
   ].join('; ');

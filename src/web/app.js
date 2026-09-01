@@ -345,7 +345,7 @@ export function bootApp({ root = document.getElementById('app') } = {}) {
       detachLifecycle();
       sse.close();
       for (const c of [
-        hub, hostTable, managerCard, defaultsCard, eventPanel, tabbar, panes, drawer, wizard, toasts,
+        hub, hostTable, managerCard, defaultsCard, eventPanel, fleetAnalysis, tabbar, panes, drawer, wizard, toasts,
         configSyncDialog,
       ]) c.destroy();
     },

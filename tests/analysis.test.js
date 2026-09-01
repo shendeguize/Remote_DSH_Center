@@ -4,6 +4,8 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import {
+  ANALYSIS_SEMANTIC_TIMEOUT_MS,
+  ANALYSIS_TIMEOUT_MS,
   createAnalysisService,
   isCompatibleVersion,
   selectAnalysisRows,
@@ -47,6 +49,56 @@ test('舰队分析按需执行并缓存结果', async () => {
   assert.equal(first.report, '摘要 [path] 不应被返回');
   assert.equal(second.cached, true);
   assert.equal(calls.filter((call) => call[1] === 'cluster').length, 1);
+});
+
+test('语义摘要的上界必须宽于通用子命令上界', async () => {
+  // 它是唯一跑本机模型的一步：给它比 --version / cluster 更紧的上界，
+  // 正常舰队规模下就会常态超时降级，功能表面「通过」实则不可用。
+  assert.ok(
+    ANALYSIS_SEMANTIC_TIMEOUT_MS > ANALYSIS_TIMEOUT_MS,
+    `语义上界 ${ANALYSIS_SEMANTIC_TIMEOUT_MS} 必须大于通用上界 ${ANALYSIS_TIMEOUT_MS}`,
+  );
+
+  const timeouts = [];
+  const spawnImpl = (file, args) => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    queueMicrotask(() => {
+      if (args[0] === '--version') child.stdout.end('agent-sidecar 0.9.0\n');
+      else if (args[0] === 'cluster') child.stdout.end('[]');
+      else {
+        // 记录语义步骤实际拿到的上界：由 setTimeout 的延时反推。
+        timeouts.push(args[0]);
+        child.stdout.end('摘要');
+      }
+      child.stderr.end();
+      child.emit('close', 0, null);
+    });
+    return child;
+  };
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const observed = [];
+  globalThis.setTimeout = (handler, delay, ...rest) => {
+    observed.push(delay);
+    return originalSetTimeout(handler, delay, ...rest);
+  };
+  try {
+    await createAnalysisService({
+      env: { AGENT_SIDECAR_BIN: 'sidecar', DSH_BIN: 'dsh' },
+      spawnImpl,
+    }).analyze();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.deepEqual(timeouts, ['--profile'], '语义步骤必须真的被调用过');
+  assert.ok(
+    observed.includes(ANALYSIS_SEMANTIC_TIMEOUT_MS),
+    `语义步骤应使用 ${ANALYSIS_SEMANTIC_TIMEOUT_MS}ms 上界，实际用了 ${observed.join(',')}`,
+  );
 });
 
 test('语义载荷选择器按规则排序并限制数量', () => {

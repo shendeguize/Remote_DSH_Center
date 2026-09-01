@@ -15,6 +15,11 @@ import { monotonicMs } from './lib/clock.js';
 
 export const MIN_SIDECAR_VERSION = '0.9.0';
 export const ANALYSIS_TIMEOUT_MS = 90_000;
+/**
+ * 语义摘要是唯一走本机模型的一步，比其余子命令慢一个量级：一份 100 组的脱敏
+ * 载荷实测约 50s，因此上界必须明显高于通用上界，否则正常舰队规模下会常态降级。
+ */
+export const ANALYSIS_SEMANTIC_TIMEOUT_MS = 120_000;
 export const ANALYSIS_OUTPUT_LIMIT = 4 * 1024 * 1024;
 export const ANALYSIS_CACHE_TTL_MS = 5 * 60_000;
 export const ANALYSIS_MAX_GROUPS = 100;
@@ -255,7 +260,7 @@ export function createAnalysisService({
         const semantic = await runBounded(
           executable,
           ['--profile', 'headless', `根据以下脱敏聚类元数据，给出不超过三条的中文摘要；不要猜测缺失字段：${reportInput}`],
-          { spawnImpl, timeoutMs: 60_000 },
+          { spawnImpl, timeoutMs: ANALYSIS_SEMANTIC_TIMEOUT_MS },
         );
         if (semantic.ok && redacted(semantic.stdout, 4_000)) {
           report = redacted(semantic.stdout, 4_000);
