@@ -46,6 +46,22 @@ test(`${HOSTS} 条隧道同时断：并发有界且全部自愈（issue #100）`
     try { process.kill(pid, 'SIGKILL'); } catch { /* 已退 */ }
   }
 
+  const reconnectTries = () => sse.of('log-line')
+    .filter((f) => /隧道重连尝试/.test(f.data.msg ?? ''))
+    .map((f) => Date.parse(f.data.ts));
+
+  // 先等「掉线确实被看见」。monitor 还没扫到这一拍时，下面那圈 waitPhase('running')
+  // 会因为相位从未离开 running 而立刻返回，peak 于是在任何重连发生之前就被读走——
+  // CI 上偶发的「装置没记到并发数，判据失效」正是这个顺序问题，不是并发真的没界。
+  const deadline = Date.now() + 120_000;
+  while (reconnectTries().length < HOSTS / 2) {
+    if (Date.now() > deadline) {
+      throw new Error(`等待多数主机进入重连环超时，实得 ${reconnectTries().length} 条`);
+    }
+    // eslint-disable-next-line no-await-in-loop -- 轮询
+    await new Promise((r) => { const t = setTimeout(r, 50); t.unref?.(); });
+  }
+
   // 预算：退避上界 30s，带抖动后最坏两三拍，给足余量
   for (const name of ctx.hostNames) {
     // eslint-disable-next-line no-await-in-loop -- 逐台等
@@ -60,9 +76,7 @@ test(`${HOSTS} 条隧道同时断：并发有界且全部自愈（issue #100）`
   );
 
   // 散开的直接证据：重连不是挤在同一毫秒发生的
-  const tries = sse.of('log-line')
-    .filter((f) => /隧道重连尝试/.test(f.data.msg ?? ''))
-    .map((f) => Date.parse(f.data.ts));
+  const tries = reconnectTries();
   assert.ok(tries.length >= HOSTS / 2, `前提：多数主机确实进过重连环，实得 ${tries.length} 条`);
   assert.ok(
     Math.max(...tries) - Math.min(...tries) > 200,
