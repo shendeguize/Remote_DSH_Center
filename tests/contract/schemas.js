@@ -48,8 +48,10 @@ const hostConfigView = V.obj({
   localPort: V.nullable(port),
   remoteWebPort: V.nullable(port),
   workdir: workdirView,
+  sshUser: V.nullable(V.str({ min: 1 })),
+  dshPath: workdirView,
   inject: injectView,
-}, { optional: ['dshPath'] });
+}, { optional: ['sshUser', 'dshPath'] });
 
 export const hostView = V.obj({
   name: V.str({ min: 1 }),

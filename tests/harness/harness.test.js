@@ -243,6 +243,38 @@ test('workdir-missing 场景对 workdir=null 无效（没有 cd 就没有 cd 失
   assert.equal(r.actualPort, 18918);
 });
 
+test('no-dsh-unusual-path：PATH 之外的 dsh 用嗅探绝对路径拉起，指纹随 argv[0] 变', async (t) => {
+  const h = harnessFixture(t);
+  h.scenario('gpu-1', 'no-dsh-unusual-path');
+
+  const r = await runLaunchSequence('gpu-1', { port: 18919 });
+  assert.equal(r.actualPort, 18919);
+  assert.ok(
+    r.fingerprint.startsWith('/root/.canon/node/bin/dsh web '),
+    `兜底路径应成为 argv[0] 并回采进指纹：${r.fingerprint}`,
+  );
+
+  // 指纹回采自 ps 实测，STOP 全等照常成立（不误杀契约不受兜底影响）
+  const stop = await stopRemote('gpu-1', { pid: r.pid, fingerprint: r.fingerprint });
+  assert.ok(['term', 'force'].includes(stop.killed));
+  assert.deepEqual(h.liveProcesses('gpu-1'), []);
+});
+
+test('no-dsh-missing-bin：ERR=no-dsh + 退出码 7 → LAUNCH_FAILED（不再把 nohup 报错埋进日志尾）', async (t) => {
+  const h = harnessFixture(t);
+  h.scenario('gpu-1', 'no-dsh-missing-bin');
+
+  await assert.rejects(
+    () => runLaunchSequence('gpu-1', { port: 18920 }),
+    (err) => {
+      assert.equal(err.code, 'LAUNCH_FAILED', '退出码 7 不该被归成 SSH_UNREACHABLE');
+      assert.match(err.message, /找不到 dsh/);
+      return true;
+    },
+  );
+  assert.deepEqual(h.liveProcesses('gpu-1'), [], '没找到 dsh 即无进程可孤儿');
+});
+
 test('STOP：指纹全等 → term；再停一次 → already-dead', async (t) => {
   const h = harnessFixture(t);
   const r = await runLaunchSequence('gpu-1', { port: 18904 });

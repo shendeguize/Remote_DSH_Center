@@ -660,16 +660,17 @@ test('POST /api/hosts/local：缺省名称取 hostname，并以 201 持久化本
   assert.equal(config.hosts[os.hostname()].localPort, null);
 });
 
-test('POST /api/hosts/local：显式名称成功，第二台本机以 409 拒绝', async (t) => {
+test('POST /api/hosts/local：允许创建多个具名本机实例', async (t) => {
   const ctx = await bootServer(t);
   const created = await ctx.api('POST', '/api/hosts/local', { name: 'workstation' });
   assertRest(created, { status: 201, schema: localHostCreateResponse, label: 'POST local(explicit)' });
   assert.equal(created.json.host.name, 'workstation');
 
-  const duplicate = await ctx.api('POST', '/api/hosts/local', { name: 'workstation-2' });
-  assert.equal(duplicate.status, 409);
-  assert.equal(duplicate.json.code, 'LOCAL_HOST_EXISTS');
-  assert.equal(Object.hasOwn((await ctx.get('/api/config')).json.hosts, 'workstation-2'), false);
+  const second = await ctx.api('POST', '/api/hosts/local', { name: 'workstation-2' });
+  assertRest(second, { status: 201, schema: localHostCreateResponse, label: 'POST local(second)' });
+  const hosts = (await ctx.get('/api/config')).json.hosts;
+  assert.equal(hosts.workstation.local, true);
+  assert.equal(hosts['workstation-2'].local, true);
 });
 
 test('POST /api/hosts/local：与现有主机重名以 409 拒绝', async (t) => {

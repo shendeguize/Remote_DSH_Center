@@ -1,45 +1,5 @@
 [
   {
-    "id": "FZ-VALID-001",
-    "target": "validate-mutation",
-    "signature": "validate-mutation|seed|two-locals",
-    "input": {
-      "config": {
-        "configVersion": 1,
-        "setupCompleted": true,
-        "manager": { "port": 7788 },
-        "defaults": { "remoteWebPort": 8899, "localPortRange": [20000, 20050] },
-        "hosts": {
-          "gpu-1": {
-            "enabled": true,
-            "autoStart": false,
-            "localPort": null,
-            "remoteWebPort": 8899,
-            "workdir": null,
-            "inject": { "env": {}, "extraArgs": [], "patches": [] }
-          },
-          "gpu-2": {
-            "enabled": true,
-            "autoStart": true,
-            "localPort": 20001,
-            "remoteWebPort": null,
-            "workdir": "~",
-            "inject": { "env": { "DSH_DEBUG": "1" }, "extraArgs": ["--verbose"], "patches": ["a.patch"] }
-          }
-        }
-      },
-      "mutator": "two-locals",
-      "mutatorSeed": 1,
-      "garbage": [
-        { "__proto__": { "polluted": true } },
-        { "hosts": { "x": { "phase": "__proto__" } } },
-        [null, { "constructor": { "prototype": { "polluted": 1 } } }]
-      ]
-    },
-    "origin": "人工种入（P3 落地）：两台 local:true 是跨主机约束里最容易被漏掉的一条",
-    "note": "垃圾输入那三条专打原型污染：__proto__ 作为字段名、嵌在 hosts 里、以及 constructor.prototype 链"
-  },
-  {
     "id": "FZ-VALID-002",
     "target": "validate-mutation",
     "signature": "validate-mutation|seed|range-reversed",
@@ -70,5 +30,34 @@
     },
     "origin": "人工种入（P3 落地）：边界值 config（端口取 1 与 65535、区间退化成单点）+ 区间反转",
     "note": "退化区间 [1024,1024] 合法（start<=end 取等号），别在收紧判据时把它一起拦掉"
+  },
+  {
+    "id": "FZ-VALID-003",
+    "target": "validate-mutation",
+    "signature": "validate-mutation|seed|local-with-port",
+    "input": {
+      "config": {
+        "configVersion": 1,
+        "setupCompleted": true,
+        "manager": { "port": 7788 },
+        "defaults": { "remoteWebPort": 8899, "localPortRange": [20000, 20050] },
+        "hosts": {
+          "local-dcs": {
+            "local": true,
+            "enabled": true,
+            "autoStart": false,
+            "localPort": null,
+            "remoteWebPort": 3083,
+            "workdir": null,
+            "inject": { "env": {}, "extraArgs": ["--profile", "dcs"], "patches": [] }
+          }
+        }
+      },
+      "mutator": "local-with-port",
+      "mutatorSeed": 9,
+      "garbage": [null, { "hosts": [] }, { "manager": { "port": "7788" } }]
+    },
+    "origin": "本机多 profile 功能：允许多个 local:true 后，继续锁定本机实例不得持久化映射端口",
+    "note": "remoteWebPort 是 dsh web 监听端口；localPort 对本机实例仍必须为 null"
   }
 ]

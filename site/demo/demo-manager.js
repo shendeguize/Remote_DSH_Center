@@ -579,6 +579,7 @@ export function createFakeManager({
       localPort: seed.localPort,
       remoteWebPort: seed.remoteWebPort,
       workdir: seed.workdir,
+      sshUser: null,
       inject: seed.inject ? clone(seed.inject) : { env: {}, extraArgs: [], patches: [] },
     };
     const host = {
@@ -796,9 +797,6 @@ export function createFakeManager({
     const name = requestedName ?? DEFAULT_LOCAL_NAME;
     if (typeof name !== 'string' || !SAFE_HOST_RE.test(name) || name.startsWith('-')) {
       throw new FakeApiError(400, 'VALIDATION', '本机主机名须由字母、数字、点、下划线或连字符组成，且不以 - 开头');
-    }
-    if ([...hosts.values()].some((host) => host.local)) {
-      throw new FakeApiError(409, 'LOCAL_HOST_EXISTS', '已经存在本机主机，不能重复添加');
     }
     if (hosts.has(name)) {
       throw new FakeApiError(409, 'LOCAL_NAME_CONFLICT', `本机名称 ${name} 已被现有主机使用`);
@@ -1124,7 +1122,7 @@ export function createFakeManager({
     return { created: true, ...workspace };
   }
 
-  const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'inject']);
+  const PATCHABLE = new Set(['enabled', 'autoStart', 'remoteWebPort', 'workdir', 'sshUser', 'inject']);
 
   function saveHostConfig(name, patch) {
     gate();
@@ -1218,6 +1216,7 @@ export function createFakeManager({
         localPort: hostCfg.localPort ?? null,
         remoteWebPort: hostCfg.remoteWebPort ?? null,
         workdir: hostCfg.workdir ?? null,
+        sshUser: hostCfg.sshUser ?? null,
         inject: clone(hostCfg.inject ?? { env: {}, extraArgs: [], patches: [] }),
       };
       host.effectiveRemotePort = host.config.remoteWebPort ?? config.defaults.remoteWebPort;

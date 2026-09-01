@@ -290,9 +290,9 @@ function replyLaunch(name, body, { home }) {
   const workdir = workdirOf(body, home);
   // 真机形态：--patch（启动器旗标）紧跟 web，--no-open 等 app 旗标在其后
   const patchNames = [...body.matchAll(/--patch "\$HOME\/\.dsh_center_remote\/patches\/([^"]+)"/g)].map((m) => m[1]);
-  const portTok = must(/dsh web(?: --patch "[^"]+")* --no-open --host 127\.0\.0\.1 --port (\d+)/, body, '端口')[1];
+  const portTok = must(/"\$DSH" web(?: --patch "[^"]+")* --no-open --host 127\.0\.0\.1 --port (\d+)/, body, '端口')[1];
 
-  const envSeg = /nohup env ((?:[A-Za-z_][A-Za-z0-9_]*='(?:[^']|'\\'')*' )+)dsh web/.exec(body);
+  const envSeg = /nohup env ((?:[A-Za-z_][A-Za-z0-9_]*='(?:[^']|'\\'')*' )+)"\$DSH" web/.exec(body);
   const envPairs = envSeg
     ? [...envSeg[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)=('(?:[^']|'\\'')*')/g)].map(([, k, v]) => [k, unshq(v)])
     : [];
@@ -305,11 +305,23 @@ function replyLaunch(name, body, { home }) {
   const file = logPath(name, logName);
   fs.writeFileSync(file, ''); // 真脚本里 `: > "$LOG"` 排在 cd 之前，失败也已截断
 
+  const hBefore = hostState({ hosts: readState().hosts ?? {} }, name);
+
   // cd 失败：脚本以 8 退出且不产生 PID，日志停留在空文件
-  if (workdir !== null && hostState({ hosts: readState().hosts ?? {} }, name).faults.badWorkdir) {
+  if (workdir !== null && hBefore.faults.badWorkdir) {
     out('ERR=workdir\n');
     out(`WD=${workdir}\n`);
     process.exit(8);
+  }
+
+  // dsh 解析仿真（与模板同序，排在 cd 之后）：PATH 在 → 字面 dsh；否则嗅探目录 →
+  // login shell；都没有 → ERR=no-dsh + 退出码 7，在 nohup 之前快败（不产生 PID）。
+  const dshBin = hBefore.dshInstalled
+    ? 'dsh'
+    : (hBefore.dshSniffPaths?.[0] ?? hBefore.dshLoginPath ?? null);
+  if (!dshBin) {
+    out('ERR=no-dsh\n');
+    process.exit(7);
   }
 
   // 故障判定按「第几次拉起」而非端口：bindBusyTimes=1 只影响首拍（覆盖降级成功路径），
@@ -342,9 +354,10 @@ function replyLaunch(name, body, { home }) {
   child.unref();
   fs.closeSync(fd);
 
-  // 合成 ps 指纹：nohup/env 均 exec 链传递，最终 args 是 dsh web … 形态（12 §5.2）
+  // 合成 ps 指纹：nohup/env 均 exec 链传递，args 即 argv[0] 起手的 `<dshBin> web …`
+  // 形态（12 §5.2）——PATH 在时是 `dsh web …`，嗅探兜底时是绝对路径起手
   const fingerprint = [
-    'dsh web',
+    `${dshBin} web`,
     ...patchNames.map((n) => `--patch ${home}/.dsh_center_remote/patches/${n}`),
     '--no-open --host 127.0.0.1 --port',
     portTok,

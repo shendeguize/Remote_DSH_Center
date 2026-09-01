@@ -12,7 +12,7 @@ import path from 'node:path';
 import { REMOTE_DIR } from '../defaults.js';
 import { createTailCapture } from './capture.js';
 import { DshError } from './errors.js';
-import { assertSafeHost, shq } from './shq.js';
+import { assertSafeHost, assertSshUser, shq } from './shq.js';
 import { PROTO_TIMING } from './proto.js';
 
 export const COMMON_SSH_OPTS = Object.freeze([
@@ -258,7 +258,7 @@ function runChild(bin, args, {
  * @param {string} host 经 assertSafeHost 校验（防 ssh 参数位注入，12 §2.4）
  * @param {string} remoteCmd
  * @param {{timeoutMs?:number, signal?:AbortSignal, extraOpts?:string[],
- *   input?:Buffer|Uint8Array}} [opts]
+ *   input?:Buffer|Uint8Array, user?:string|null}} [opts]
  * @returns {Promise<ExecResult>}
  */
 export async function sshExec(
@@ -269,11 +269,14 @@ export async function sshExec(
     signal,
     extraOpts = [],
     input,
+    user = null,
   } = {},
 ) {
   assertSafeHost(host);
+  if (user !== null) assertSshUser(user);
   const { bin, prefixArgs } = sshBin();
-  const args = [...prefixArgs, ...COMMON_SSH_OPTS, ...extraOpts, host, `sh -c ${shq(remoteCmd)}`];
+  const userOpts = user === null ? [] : ['-o', `User=${user}`];
+  const args = [...prefixArgs, ...COMMON_SSH_OPTS, ...userOpts, ...extraOpts, host, `sh -c ${shq(remoteCmd)}`];
   return runChild(bin, args, { timeoutMs, signal, input });
 }
 
@@ -302,10 +305,12 @@ export async function localExec(
  * scp 单文件上载（12 §4）。remoteRelPath 相对远端 $HOME。
  * @returns {Promise<ExecResult>}
  */
-export async function scpTo(host, localPath, remoteRelPath, { timeoutMs = PROTO_TIMING.scpTimeoutMs, signal } = {}) {
+export async function scpTo(host, localPath, remoteRelPath, { timeoutMs = PROTO_TIMING.scpTimeoutMs, signal, user = null } = {}) {
   assertSafeHost(host);
+  if (user !== null) assertSshUser(user);
   const { bin, prefixArgs } = scpBin();
-  const args = [...prefixArgs, ...COMMON_SSH_OPTS, '--', localPath, `${host}:${remoteRelPath}`];
+  const userOpts = user === null ? [] : ['-o', `User=${user}`];
+  const args = [...prefixArgs, ...COMMON_SSH_OPTS, ...userOpts, '--', localPath, `${host}:${remoteRelPath}`];
   return runChild(bin, args, { timeoutMs, signal });
 }
 

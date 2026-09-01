@@ -82,7 +82,7 @@ test('configSchema：local 缺省兼容旧配置，true/false 均接受且类型
   assert.match(validate(configSchema, invalid).errors.join(), /expected boolean/);
 });
 
-test('configSchema/setupBodySchema：本机最多一个且 localPort 必须为 null', () => {
+test('configSchema/setupBodySchema：允许多个本机实例，但 localPort 必须为 null', () => {
   const badPort = goodConfig();
   badPort.hosts['gpu-1'].local = true;
   assert.match(validate(configSchema, badPort).errors.join(), /localPort.*null/);
@@ -92,8 +92,8 @@ test('configSchema/setupBodySchema：本机最多一个且 localPort 必须为 n
   duplicate.hosts['gpu-1'].local = true;
   duplicate.hosts['gpu-1'].localPort = null;
   duplicate.hosts.localhost = { ...newHostConfig(), local: true };
-  assert.match(validate(configSchema, duplicate).errors.join(), /最多.*一个.*local:true/);
-  assert.match(validate(setupBodySchema, duplicate).errors.join(), /最多.*一个.*local:true/);
+  assert.equal(validate(configSchema, duplicate).ok, true);
+  assert.equal(validate(setupBodySchema, duplicate).ok, true);
 });
 
 test('configSchema：localPortRange 必须 lo<=hi 且在 1024..65535', () => {

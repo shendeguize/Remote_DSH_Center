@@ -383,6 +383,23 @@ export function createSetupWizard({
     }));
     if (total === 0) return;
 
+    panel.append(el('div.row-actions.setup-host-bulk', {}, [
+      button('全部纳管', {
+        compact: true,
+        onClick: () => {
+          for (const host of hosts) ui.selection = nextSelection(ui.selection, host.name, { enabled: true }, host);
+          render();
+        },
+      }),
+      button('全部取消', {
+        compact: true,
+        onClick: () => {
+          for (const host of hosts) ui.selection = nextSelection(ui.selection, host.name, { enabled: false }, host);
+          render();
+        },
+      }),
+    ]));
+
     const table = el('table.setup-hosts', {}, [
       el('thead', {}, [el('tr', {}, [
         el('th', { text: '主机' }),
@@ -442,7 +459,7 @@ export function createSetupWizard({
       ensureAnswers(),
       hosts.map((host) => ({ name: host.name, local: host.local === true })),
       probeResults,
-      { hostDefaults: { localPort: null, remoteWebPort: null, workdir: null } },
+      { hostDefaults: { localPort: null, remoteWebPort: null, workdir: null, sshUser: null, dshPath: null } },
       { selection: ui.selection },
     );
   }

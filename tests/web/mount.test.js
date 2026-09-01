@@ -177,7 +177,7 @@ test('添加本机：名称输入可留空，默认名冲突后可填自定义�
   const nameLabel = card.querySelector('.field label');
   assert.ok(nameInput && addButton && nameLabel, '无本机时应同时显示名称输入与添加按钮');
   assert.equal(nameLabel.getAttribute('for'), nameInput.id, '名称输入必须有显式 label');
-  assert.equal(addButton.getAttribute('aria-label'), '添加本机');
+  assert.equal(addButton.getAttribute('aria-label'), '添加本机实例');
 
   addButton.click();
   await flush();
@@ -193,6 +193,13 @@ test('添加本机：名称输入可留空，默认名冲突后可填自定义�
   const creates = calls.filter((c) => c.path === '/api/hosts/local');
   assert.deepEqual(creates[1].body, { name: 'workstation-local' });
   assert.equal(dom.app.querySelector('.host-table tbody tr[data-host]').dataset.host, 'workstation-local');
+});
+
+test('已有本机时仍显示添加本机实例入口', async (t) => {
+  const { dom } = await mount(t, { hosts: [localHostView('local-default')] });
+  const addButton = dom.app.querySelector('[data-act="add-local"]');
+  assert.equal(addButton.hidden, false);
+  assert.equal(addButton.textContent, '添加本机实例');
 });
 
 test('本机行使用共享状态、提示与直连映射语义', async (t) => {
@@ -251,8 +258,8 @@ test('本机抽屉 badge 复用共享文案，不渗入 SSH/远端措辞', async
   const drawer = dom.app.querySelector('.host-drawer');
   assert.equal(drawer.querySelector('.drawer-badge .phase-badge').textContent, '本机不可用');
   const remoteConfigNote = drawer.querySelector('.remote-config-note');
-  assert.equal(remoteConfigNote.hidden, true);
-  assert.equal(remoteConfigNote.textContent, '', '本机抽屉不应保留远端 headless 操作说明');
+  assert.equal(remoteConfigNote.hidden, false);
+  assert.match(remoteConfigNote.textContent, /本机多 profile.*--profile/);
   assert.doesNotMatch(drawer.textContent, /SSH|远端/);
 });
 

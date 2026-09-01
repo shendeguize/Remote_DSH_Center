@@ -222,6 +222,49 @@ export function createActions({ store, confirm, navigate }) {
     return created;
   }
 
+  async function addRemoteHost(name, options = {}) {
+    const requestedName = typeof name === 'string' ? name.trim() : '';
+    if (!requestedName) {
+      store.addToast({ level: 'error', summary: '请填写远端主机名' });
+      return null;
+    }
+    const created = await guarded({
+      action: 'remote:create',
+      settleOnResolve: true,
+      run: () => api.createRemoteHost(requestedName, options),
+    });
+    if (!created?.host) return created;
+    store.upsertHost(created.host);
+    store.addToast({ level: 'success', summary: `已添加远端 ${created.host.name}` });
+    return created;
+  }
+
+  async function removeHosts(names) {
+    const unique = [...new Set(names)].filter((name) => store.getHost(name));
+    if (unique.length === 0) return null;
+    const ok = await confirm({
+      title: `删除 ${unique.length} 台主机？`,
+      lines: [
+        unique.join('、'),
+        '只会从 DSH Center 配置中移除；不会修改 ~/.ssh/config，也不会删除远端文件。运行中的主机请先关停。',
+      ],
+      confirmLabel: '删除',
+      danger: true,
+    });
+    if (!ok) return null;
+    const result = await guarded({
+      action: 'hosts:remove',
+      settleOnResolve: true,
+      failureMessage: '批量删除主机失败',
+      run: () => api.removeHosts(unique),
+    });
+    if (result?.removed) {
+      for (const name of result.removed) store.removeHost(name);
+      store.addToast({ level: 'success', summary: `已删除 ${result.removed.length} 台主机`, timeoutMs: 4_000 });
+    }
+    return result;
+  }
+
   /** toggle 走 config:save 通道；失败时用响应/回滚保持与服务端一致（10 §7 第 4 条）。 */
   async function setAutoStart(name, value) {
     const host = store.getHost(name);
@@ -481,6 +524,8 @@ export function createActions({ store, confirm, navigate }) {
     hostAction,
     probeAll,
     addLocalHost,
+    addRemoteHost,
+    removeHosts,
     setAutoStart,
     saveHostConfig,
     syncConfig,

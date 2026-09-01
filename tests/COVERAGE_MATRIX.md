@@ -87,7 +87,7 @@
 | `localCopy` 目标只许在真实 HOME 的 `.dsh_center_remote/` 内：拒绝绝对路径、`..`、NUL、中间目录 symlink；同目录临时文件提交，源失败/预中止不留正式文件，rename 后迟到 abort 不回滚 | `tests/lib/ssh.test.js`（正常复制 / 提交点 / 路径穿越 / symlink / 失败与中止） |
 | ssh / localExec / localCopy 共用在飞账本与关停闩：关停收敛、闩后不启动、`reopenSsh` 恢复；本机 copy/exec 错误不伪装成 SSH 错误 | `tests/lib/ssh.test.js`（`shutdownSsh`、`liveChildCount`、共享闩、`execFailure`） |
 | PROBE 与 LAUNCH/POLL/VERIFY/STOP/LOG 只按显式 `local` 分流；同一 proto builder 输出逐字一致，普通主机名不触发本机猜测 | `tests/prober.test.js`、`tests/launcher.test.js` |
-| 配置身份：旧 config 缺 `local` 按 false 迁移且不升版本；`local:true` 要求 `localPort:null`、全配置最多一条，HostView 顶层回传身份；本机不与 SSH Host 合并 | `tests/lib/validate.test.js`、`tests/store.test.js`、`tests/contract/schemas.test.js` |
+| 配置身份：旧 config 缺 `local` 按 false 迁移且不升版本；允许多个具名 `local:true` 实例且均要求 `localPort:null`，HostView 顶层回传身份；本机不与 SSH Host 合并 | `tests/lib/validate.test.js`、`tests/store.test.js`、`tests/contract/schemas.test.js` |
 | `localExec` 以 `-c <raw proto body>` 进入本机垫片；与 fake-ssh 共用唯一协议 dispatcher，远端 HOME 仍为 `/root`、本机 HOME 为隔离临时目录 | `tests/harness/harness.test.js`（远端 `/root` 快照回归）、`tests/harness/local-flow.test.js` |
 | 本机 PROBE ready → LAUNCH/POLL/VERIFY → direct entry → `/api/health` 200 → HostView.mappedUrl 恒等映射 → STOP 后 ready 且进程/state 清空 | `tests/harness/local-flow.test.js`「本机全链」 |
 | 本机不 spawn fake-ssh `-N -L`、`tunnel._childPid() === null`；不调用映射端口池且 `config.localPort` 始终为 null | `tests/harness/local-flow.test.js`（transport 账本 + 端口池注入计数） |
@@ -187,7 +187,7 @@
 | 请求体解析边界（空体 / 非法 JSON / 超限 → VALIDATION） | `tests/api.test.js` |
 | 错误码族与 HTTP 状态映射（VALIDATION/PHASE_CONFLICT/KILL_REFUSED/NOT_FOUND/SETUP_REQUIRED…） | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
 | setup 门禁：未初始化时白名单外全 409 | `tests/integration/setup.test.js`、IT-12（页面侧人工） |
-| `POST /api/hosts/local`：缺省 hostname / 自定义名的 201、单例与名称冲突 409、setup gate 拒绝；创建后 HostView 与 SSE 都带 `local:true` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/hub.test.js`、`tests/web/mount.test.js` |
+| `POST /api/hosts/local`：缺省 hostname / 自定义名的 201、允许多个具名实例、名称冲突 409、setup gate 拒绝；创建后 HostView 与 SSE 都带 `local:true` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/hub.test.js`、`tests/web/mount.test.js` |
 | 本机/SSH 身份不可经 host config patch 翻转；setup 只信内置 canonical 本机候选，重跑保留既有身份且拒绝伪装 SSH 主机 | `tests/api.test.js`、`tests/integration/setup.test.js`、`tests/cli.test.js` |
 | setup 模式注入一台本机候选，probe-all 同时覆盖 local 与 ssh；提交后最多一台 local，普通已初始化启动不凭空新增 | `tests/integration/setup.test.js`、`tests/setup-wizard.test.js` |
 
@@ -547,6 +547,8 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | `API:PUT /api/hosts/:name/dsh-settings` | `tests/api.test.js`、`tests/integration/settings.test.js`、`tests/settings-file.test.js` |
 | `API:POST /api/hosts/:name/dsh-workspace` | `tests/api.test.js`、`tests/dsh-workspace.test.js`、`tests/integration/workspace.test.js` |
 | `API:POST /api/hosts/local` | `tests/api.test.js`、`tests/demo-contract.test.js` |
+| `API:POST /api/hosts` | `tests/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js` |
+| `API:POST /api/hosts/remove` | `tests/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js` |
 | `API:POST /api/hosts/sync-config` | `tests/api.test.js`、`tests/config-sync.test.js`、`tests/integration/ui-live.test.js` |
 | `API:POST /api/hosts/clear-orphaned` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/actions.test.js` |
 | `API:PUT /api/hosts/:name/config` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
@@ -569,6 +571,7 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | ID | 语义 | 覆盖 |
 |---|---|---|
 | `EXIT:1` | settings 能力不满足 / 读取失败的通用失败 | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+| `EXIT:7` | LAUNCH 的 dsh 解析失败（`ERR=no-dsh`，PATH/嗅探/login shell 均无） | `tests/lib/proto.test.js`、`tests/launcher.test.js`、`tests/harness/harness.test.js` |
 | `EXIT:8` | LAUNCH 的 workdir 进不去（`ERR=workdir`） | `tests/lib/proto.test.js`、`tests/harness/harness.test.js` |
 | `EXIT:9` | patches 目录 mkdir 失败（LAUNCH 与 CLEAN 共用） | `tests/lib/proto.test.js`、`tests/launcher.test.js` |
 | `EXIT:10` | settings 超过 512 KiB | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
@@ -592,7 +595,6 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | `ERR:LOCAL_TIMEOUT` | `tests/lib/ssh.test.js`、`tests/harness/local-flow.test.js` |
 | `ERR:LOCAL_EXEC_FAILED` | `tests/lib/ssh.test.js`、`tests/settings-file.test.js` |
 | `ERR:LOCAL_COPY_FAILED` | `tests/lib/ssh.test.js`、`tests/patchsync.test.js` |
-| `ERR:LOCAL_HOST_EXISTS` | `tests/api.test.js` |
 | `ERR:LOCAL_NAME_CONFLICT` | `tests/api.test.js` |
 | `ERR:PROTO_PARSE` | `tests/lib/proto.test.js`、`tests/monitor.test.js` |
 | `ERR:SETTINGS_TOO_LARGE` | `tests/settings-file.test.js`、`tests/integration/settings.test.js` |
