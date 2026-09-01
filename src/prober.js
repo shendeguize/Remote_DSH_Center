@@ -162,37 +162,14 @@ export function interpretProbe(res, { local = false } = {}) {
  * 「操作收敛到 server」的前提不成立，见 11 §1.3 例外条款）。
  * @returns {Promise<ProbeResult>}
  */
-export async function probeOnce(host, { local = false, timeoutMs, signal, dshPath } = {}) {
-  const configuredPath = dshPath === undefined
-    ? (store.getHostView(host)?.config?.dshPath ?? null)
-    : dshPath;
-  const command = buildProbeScript({ dshPath: configuredPath });
+export async function probeOnce(host, {
+  local = false, timeoutMs, signal, user = null, dshPath = null,
+} = {}) {
+  const command = buildProbeScript({ dshPath });
   const res = local
     ? await localExec(command, { timeoutMs, signal })
-    : await sshExec(host, command, { timeoutMs, signal });
-  const result = interpretProbe(res, { local });
-  const ambiguous = result.manualInstances.filter((item) => item.port === null);
-  if (ambiguous.length === 0) return result;
-  const portProbe = local
-    ? await localExec(buildManualPortProbeScript(ambiguous.map((item) => item.pid)), { timeoutMs, signal })
-    : await sshExec(host, buildManualPortProbeScript(ambiguous.map((item) => item.pid)), { timeoutMs, signal });
-  if (portProbe.code !== 0 || portProbe.timedOut || portProbe.aborted) return result;
-  let ports;
-  try {
-    ports = parseManualPortBlock(
-      parseProtoOutput(portProbe.stdout, { requireDone: 'MANUAL_PORTS_DONE' }).blocks.MANUAL_PORTS ?? '',
-    );
-  } catch {
-    return result;
-  }
-  return {
-    ...result,
-    manualInstances: result.manualInstances.map((item) => (
-      item.port === null && ports.has(item.pid)
-        ? { ...item, port: ports.get(item.pid) }
-        : item
-    )),
-  };
+    : await sshExec(host, command, { timeoutMs, signal, user });
+  return interpretProbe(res, { local });
 }
 
 /** 单行 stderr 摘要（长文本不进环形缓冲，11 §7.2）。 */
@@ -210,12 +187,10 @@ export async function probeHost(name) {
   return hostQueue(name).run('probe', async (signal) => {
     // 队首才重取 HostView：排队期间 reload 可能已换了配置快照，运输类型只认当前 config。
     const view = store.getHostView(name);
-    if (!view) throw new DshError('NOT_FOUND', `未知主机 ${name}`, { host: name });
-    if (!view.local && view.orphaned) {
-      throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止探测`, { host: name });
-    }
-    const local = view.local === true;
-    const result = await probeOnce(name, { local, signal });
+    const local = view?.local === true;
+    const result = await probeOnce(name, {
+      local, signal, user: store.effectiveSshUser(name), dshPath: view?.config.dshPath ?? null,
+    });
     applyProbe(name, result);
     return result;
   });

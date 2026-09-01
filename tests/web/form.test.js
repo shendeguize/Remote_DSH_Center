@@ -66,6 +66,8 @@ test('buildHostPatch 组装 PUT 请求体', () => {
   });
   assert.deepEqual(built.value, {
     enabled: true,
+    sshUser: null,
+    dshPath: null,
     remoteWebPort: 9001,
     workdir: '~/proj',
     inject: { env: { G: 'hi' }, extraArgs: ['--verbose'], patches: ['/tmp/p.yml'] },

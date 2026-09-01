@@ -375,7 +375,7 @@ test('updateConfig 改全局默认 → config-changed 且带点路径', async (t
   assert.deepEqual(changes, [['defaults.remoteWebPort']]);
 });
 
-test('mergeSshHosts：新主机进 config，消失的标 orphaned 但不删配置', async (t) => {
+test('mergeSshHosts：setup 完成后不自动加回新主机', async (t) => {
   const { paths } = fixture(t, { config: fullConfig() });
   await store.init({ pathsOverride: paths });
 
@@ -383,14 +383,13 @@ test('mergeSshHosts：新主机进 config，消失的标 orphaned 但不删配�
     { name: 'gpu-1', hostName: '10.0.0.1', user: 'root', port: 22 },
     { name: 'gpu-2', hostName: '10.0.0.2' },
   ]);
-  assert.deepEqual(r.added, ['gpu-2']);
+  assert.deepEqual(r.added, []);
   assert.deepEqual(r.orphaned, []);
-  assert.equal(store.getConfig().hosts['gpu-2'].enabled, true);
+  assert.equal(store.getConfig().hosts['gpu-2'], undefined);
 
   const r2 = store.mergeSshHosts([{ name: 'gpu-1' }]);
-  assert.deepEqual(r2.orphaned, ['gpu-2']);
-  assert.ok('gpu-2' in store.getConfig().hosts, 'orphaned 不删配置');
-  assert.equal(store.getHostView('gpu-2').orphaned, true);
+  assert.deepEqual(r2.orphaned, []);
+  assert.equal(store.getHostView('gpu-2'), null);
 });
 
 test('clearOrphanedHosts：原子删除配置、调用 state 清理且不影响本机主机', async (t) => {

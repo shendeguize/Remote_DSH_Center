@@ -5,7 +5,7 @@
 
 import { DshError } from './errors.js';
 import { PHASES } from './machine.js';
-import { isWorkdirPath, SAFE_HOST_RE } from './shq.js';
+import { isWorkdirPath, isValidSshUser, SAFE_HOST_RE } from './shq.js';
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const CLEANUP_RULE_RE = /^(owned-web|test-workdir|stale-age|orphan-process)$/u;
@@ -181,6 +181,9 @@ const injectSchema = V.obj({
 const workdirSchema = V.nullable(V.custom(
   (v) => isWorkdirPath(v) || '须为绝对路径（/ 开头）或 ~、~/… 形态',
 ));
+const dshPathSchema = V.nullable(V.custom(
+  (v) => isWorkdirPath(v) || '须为绝对路径（/ 开头）或 ~、~/… 形态',
+));
 
 /** dshPath 只接受显式绝对路径，避免把命令名或换行带入远端脚本。 */
 const dshPathSchema = V.nullable(V.custom(
@@ -201,26 +204,13 @@ const hostConfigSchema = V.obj(
     localPort: V.nullable(port),
     remoteWebPort: V.nullable(port),
     workdir: workdirSchema,
+    sshUser: V.nullable(V.custom(
+      (v) => isValidSshUser(v) || '须为合法 ssh 登录用户名（只填用户部分，不以 - 开头）',
+    )),
+    dshPath: dshPathSchema,
     inject: injectSchema,
   },
-  { optional: ['local', 'dshPath', 'workdir'] },
-);
-
-export const adoptHostBodySchema = V.obj(
-  {
-    pid: V.nullable(V.int({ min: 1, max: 4_294_967_295 })),
-    port: V.nullable(port),
-    forceNew: V.bool(),
-  },
-  { optional: ['pid', 'port', 'forceNew'] },
-);
-export const emptyBodySchema = V.obj({}, { extra: false });
-export const cleanupBodySchema = V.obj(
-  {
-    rules: V.arr(V.str({ min: 1, max: 32 })),
-    apply: V.bool(),
-  },
-  { optional: ['rules', 'apply'] },
+  { optional: ['local', 'workdir', 'sshUser', 'dshPath'] },
 );
 
 const hostsSchema = V.all(
@@ -322,9 +312,13 @@ export const hostConfigPatchSchema = V.obj(
     dshPath: dshPathSchema,
     remoteWebPort: V.nullable(port),
     workdir: workdirSchema,
+    sshUser: V.nullable(V.custom(
+      (v) => isValidSshUser(v) || '须为合法 ssh 登录用户名（只填用户部分，不以 - 开头）',
+    )),
+    dshPath: dshPathSchema,
     inject: injectSchema,
   },
-  { optional: ['local', 'enabled', 'autoStart', 'dshPath', 'remoteWebPort', 'workdir', 'inject'] },
+  { optional: ['local', 'enabled', 'autoStart', 'remoteWebPort', 'workdir', 'sshUser', 'dshPath', 'inject'] },
 );
 
 const safeHostNameSchema = V.all(
@@ -339,6 +333,20 @@ export const localHostCreateSchema = V.obj(
   },
   { optional: ['name'] },
 );
+
+export const remoteHostCreateSchema = V.obj(
+  {
+    name: safeHostNameSchema,
+    sshUser: V.nullable(V.custom((v) => isValidSshUser(v) || '须为合法 ssh 登录用户名')),
+    dshPath: dshPathSchema,
+  },
+  { optional: ['sshUser', 'dshPath'] },
+);
+
+/** POST /api/hosts/remove：一次原子移除多台；运行中的主机由 route 层拒绝。 */
+export const hostsRemoveSchema = V.obj({
+  hosts: V.arr(safeHostNameSchema, { min: 1, max: 200 }),
+});
 
 /** POST /api/hosts/:name/dsh-workspace：路径只取后端 HostView，正文必须是空对象。 */
 export const dshWorkspaceCreateSchema = V.obj({});

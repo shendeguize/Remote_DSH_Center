@@ -87,14 +87,22 @@ export function parseWorkdir(raw) {
   return { ok: true, value: s };
 }
 
-/** 可选的 dsh 可执行文件路径；留空交给探测优先级自动解析。 */
+/** dsh 可执行文件路径；与启动目录一样允许绝对路径和当前用户的 ~/。 */
 export function parseDshPath(raw) {
-  const s = String(raw ?? '').trim();
-  if (s === '') return { ok: true, value: null };
-  if (!/^\/[^\0\r\n]*$/u.test(s)) {
-    return { ok: false, error: 'dsh 路径须是不含换行的绝对路径' };
+  const parsed = parseWorkdir(raw);
+  if (!parsed.ok) return { ok: false, error: `dsh 路径${parsed.error}` };
+  return parsed;
+}
+
+export const SSH_USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+
+export function parseSshUser(raw) {
+  const value = String(raw ?? '').trim();
+  if (value === '') return { ok: true, value: null };
+  if (!SSH_USER_RE.test(value) || value.startsWith('-')) {
+    return { ok: false, error: '只填 SSH 用户名（例如 alice），不要填写 user@server' };
   }
-  return { ok: true, value: s };
+  return { ok: true, value };
 }
 
 /** patches 必须是绝对路径（本机文件才可能被 scp 上去）。 */
@@ -107,7 +115,7 @@ export function validatePatches(list) {
 
 /**
  * 主机注入表单 → PUT /api/hosts/:name/config 请求体。
- * @param {{enabled:boolean, dshPath:string, remoteWebPort:string, workdir:string,
+ * @param {{enabled:boolean, remoteWebPort:string, workdir:string, sshUser:string, dshPath:string,
  *          env:string, extraArgs:string, patches:string}} raw
  */
 export function buildHostPatch(raw) {
@@ -117,6 +125,9 @@ export function buildHostPatch(raw) {
 
   const workdir = parseWorkdir(raw.workdir);
   if (!workdir.ok) errors.workdir = workdir.error;
+
+  const sshUser = parseSshUser(raw.sshUser);
+  if (!sshUser.ok) errors.sshUser = sshUser.error;
 
   const dshPath = parseDshPath(raw.dshPath);
   if (!dshPath.ok) errors.dshPath = dshPath.error;
@@ -128,11 +139,16 @@ export function buildHostPatch(raw) {
   if (!patches.ok) errors.patches = patches.error;
 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
-  const value = {
-    enabled: Boolean(raw.enabled),
-    remoteWebPort: port.value,
-    workdir: workdir.value,
-    inject: { env: env.value, extraArgs: parseLines(raw.extraArgs), patches: patches.value },
+  return {
+    ok: true,
+    value: {
+      enabled: Boolean(raw.enabled),
+      remoteWebPort: port.value,
+      workdir: workdir.value,
+      sshUser: sshUser.value,
+      dshPath: dshPath.value,
+      inject: { env: env.value, extraArgs: parseLines(raw.extraArgs), patches: patches.value },
+    },
   };
   if (Object.hasOwn(raw, 'dshPath')) value.dshPath = dshPath.value;
   return { ok: true, value };

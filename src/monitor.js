@@ -141,7 +141,7 @@ async function deepCheck(name) {
       const command = buildVerifyScript({ pid: web.pid, port: web.port ?? 1 });
       const res = local
         ? await localExec(command, { signal })
-        : await sshExec(name, command, { signal });
+        : await sshExec(name, command, { signal, user: store.effectiveSshUser(name) });
       if (execFailure(name, '巡检复核', res)) return null;
       const out = parseProtoOutput(res.stdout, { requireDone: 'VERIFY_DONE' });
       if (kvOne(out, 'ALIVE') !== 'yes') return false;

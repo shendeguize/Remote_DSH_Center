@@ -547,6 +547,8 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | `API:PUT /api/hosts/:name/dsh-settings` | `tests/api.test.js`、`tests/integration/settings.test.js`、`tests/settings-file.test.js` |
 | `API:POST /api/hosts/:name/dsh-workspace` | `tests/api.test.js`、`tests/dsh-workspace.test.js`、`tests/integration/workspace.test.js` |
 | `API:POST /api/hosts/local` | `tests/api.test.js`、`tests/demo-contract.test.js` |
+| `API:POST /api/hosts` | `tests/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js` |
+| `API:POST /api/hosts/remove` | `tests/store.test.js`、`tests/web/actions.test.js`、`tests/web/mount.test.js` |
 | `API:POST /api/hosts/sync-config` | `tests/api.test.js`、`tests/config-sync.test.js`、`tests/integration/ui-live.test.js` |
 | `API:POST /api/hosts/clear-orphaned` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/actions.test.js` |
 | `API:PUT /api/hosts/:name/config` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
@@ -569,6 +571,7 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | ID | 语义 | 覆盖 |
 |---|---|---|
 | `EXIT:1` | settings 能力不满足 / 读取失败的通用失败 | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |
+| `EXIT:7` | LAUNCH 的 dsh 解析失败（`ERR=no-dsh`，PATH/嗅探/login shell 均无） | `tests/lib/proto.test.js`、`tests/launcher.test.js`、`tests/harness/harness.test.js` |
 | `EXIT:8` | LAUNCH 的 workdir 进不去（`ERR=workdir`） | `tests/lib/proto.test.js`、`tests/harness/harness.test.js` |
 | `EXIT:9` | patches 目录 mkdir 失败（LAUNCH 与 CLEAN 共用） | `tests/lib/proto.test.js`、`tests/launcher.test.js` |
 | `EXIT:10` | settings 超过 512 KiB | `tests/lib/proto.test.js`、`tests/integration/settings.test.js` |

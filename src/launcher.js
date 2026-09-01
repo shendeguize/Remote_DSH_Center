@@ -47,7 +47,7 @@ function isLocalHost(host, local) {
 function execHost(host, command, { local, signal, timeoutMs }) {
   return local
     ? localExec(command, { signal, timeoutMs })
-    : sshExec(host, command, { signal, timeoutMs });
+    : sshExec(host, command, { signal, timeoutMs, user: store.effectiveSshUser(host) });
 }
 
 // ── RMT-05 复核与停止 ────────────────────────────────────────────────────
@@ -87,8 +87,10 @@ export async function verifyRemote(host, { pid, port, fingerprint = null }, { si
 
 /**
  * 指纹采集（12 §5.2）：用 ps 的**实测输出**，不是 manager 拼装的命令行——
- * nohup/env 均 exec 链传递，最终 args 是 `dsh web …` 形态；`--port 0` 拉起的进程
- * args 里就是 `0`（这正是「命令行含记录端口」不可实现的原因，契约疑议 1）。
+ * nohup/env 均 exec 链传递，最终 args 是 `dsh web …` 形态（dsh 经嗅探兜底拉起时
+ * argv[0] 是绝对路径，args 随之变成 `/abs/path/dsh web …`，两种形态都以实测为准）；
+ * `--port 0` 拉起的进程 args 里就是 `0`（这正是「命令行含记录端口」不可实现的原因，
+ * 契约疑议 1）。
  *
  * 顺带回带 cwd（同一次 VERIFY 往返，不多花一趟 ssh）——纯展示用。
  * @returns {Promise<{fingerprint:string, cwd:string|null}>}
@@ -174,16 +176,23 @@ export function autoLogName(token = launchToken()) {
 }
 
 /**
- * 前置语句（mkdir / cd）的失败：脚本以非零码退出，若先过 execFailure 会被归成
- * SSH_UNREACHABLE——「远端连不上」和「目录进不去」对用户是两件事，故先认标记。
+ * 前置语句（mkdir / cd / dsh 解析）的失败：脚本以非零码退出，若先过 execFailure 会被归成
+ * SSH_UNREACHABLE——「远端连不上」和「目录进不去」「找不到 dsh」对用户是三件事，故先认标记。
  * 用正则而非 parseProtoOutput：此时 stdout 可能只有半截，解析器不该在这里抛。
  * @returns {DshError|null}
  */
 function preludeFailure(host, stdout, { local = false } = {}) {
-  const marker = /^ERR=(mkdir|workdir)$/m.exec(stdout ?? '');
+  const marker = /^ERR=(mkdir|workdir|no-dsh)$/m.exec(stdout ?? '');
   if (!marker) return null;
   const subject = local ? '本机' : '远端';
   // message 不带主机名：调用方 failure() 会包成「拉起失败（host）：<message>」
+  if (marker[1] === 'no-dsh') {
+    return new DshError('LAUNCH_FAILED', `${subject}找不到 dsh 命令`, {
+      host,
+      detail: '非交互 PATH、常见安装目录（~/.local/bin、~/bin 等）与 login shell 里都没有 dsh。\n'
+        + `请先在${subject}安装 dsh，再重试启动；主机详情里的探测信息可确认安装位置。`,
+    });
+  }
   if (marker[1] === 'workdir') {
     const wd = /^WD=(.*)$/m.exec(stdout)?.[1] ?? '(未回显)';
     return new DshError('LAUNCH_FAILED', `${subject}工作目录不存在或不可进入`, {
@@ -263,14 +272,14 @@ async function tailQuiet(host, logName, signal, local) {
  * S0–S5 全路径。S0（patch 同步）由调用方在此之前完成。
  *
  * @param {string} host
- * @param {{port:number, dshPath:string, env?:Record<string,string>, extraArgs?:string[], patchRemoteNames?:string[],
- *          workdir?:string|null}} spec workdir=null 表示不注入 cd（远端 $HOME 启动）
+ * @param {{port:number, env?:Record<string,string>, extraArgs?:string[], patchRemoteNames?:string[],
+ *          workdir?:string|null, dshPath?:string|null}} spec workdir=null 表示不注入 cd（远端 $HOME 启动）
  * @returns {Promise<{pid:number, actualPort:number, logName:string, fingerprint:string, cwd:string|null}>}
  * @throws {DshError} LAUNCH_FAILED（detail 含一到两份日志尾）
  */
 export async function runLaunchSequence(host, spec, { signal, local } = {}) {
   const {
-    port, env = {}, extraArgs = [], patchRemoteNames = [], workdir = null,
+    port, env = {}, extraArgs = [], patchRemoteNames = [], workdir = null, dshPath = null,
   } = spec;
   const useLocal = isLocalHost(host, local);
   const attempts = [];
@@ -280,7 +289,7 @@ export async function runLaunchSequence(host, spec, { signal, local } = {}) {
 
   for (;;) {
     const launchSpec = {
-      logName, port: usePort, env, extraArgs, patchRemoteNames, workdir,
+      logName, port: usePort, env, extraArgs, patchRemoteNames, workdir, dshPath,
     };
     // S1
     let pid;
@@ -423,7 +432,7 @@ export function start(name) {
         name,
         view.config.inject.patches,
         view.patchSync,
-        { local, signal },
+        { local, signal, user: store.effectiveSshUser(name) },
       );
       if (sync.uploaded > 0 || sync.skipped > 0) {
         store.mutateHostState(name, (st) => { st.patchSync = sync.patchSync; });
@@ -443,6 +452,7 @@ export function start(name) {
         extraArgs: view.config.inject.extraArgs,
         patchRemoteNames: sync.remoteNames,
         workdir,
+        dshPath: view.config.dshPath ?? null,
       }, { local, signal });
 
       store.mutateHostState(name, (st) => {

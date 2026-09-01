@@ -1179,7 +1179,7 @@ async function cmdConfig(parsed) {
 
     const body = buildDefaultsPatchFor(key, parsedValue);
     if (!body) {
-      errOut(`不支持直接 set ${key}；可写：manager.port、defaults.remoteWebPort、defaults.localPortRange、hosts.<主机>.workdir`);
+      errOut(`不支持直接 set ${key}；可写：manager.port、defaults.remoteWebPort、defaults.localPortRange、hosts.<主机>.workdir、hosts.<主机>.dshPath、hosts.<主机>.sshUser`);
       return EXIT.usage;
     }
     const res = await apiRequest(port, 'PUT', '/api/config/defaults', body);
@@ -1203,11 +1203,10 @@ export function coerceConfigValue(raw) {
  * @returns {{name:string, body:object}|null} null = 不是主机级键
  */
 export function buildHostPatchFor(key, value) {
-  const m = /^hosts\.(.+)\.workdir$/.exec(String(key ?? ''));
+  const m = /^hosts\.(.+)\.(workdir|dshPath|sshUser)$/.exec(String(key ?? ''));
   if (!m || m[1] === '') return null;
-  // 命令行没法直接给 JSON null，故约定空串与字面 null 都表示「回落远端家目录」
-  const wd = value === '' || value === 'null' ? null : value;
-  return { name: m[1], body: { workdir: wd } };
+  const written = value === '' || value === 'null' ? null : value;
+  return { name: m[1], body: { [m[2]]: written } };
 }
 
 export function buildDefaultsPatchFor(key, value) {
@@ -1360,7 +1359,7 @@ export async function runSetupWizard({
   // 本机身份不是普通的 disabled SSH 条目：用户明确“不纳管”就不提交 local:true，
   // 因而最终确认后也不会为了一个未选择的候选去提前创建本机身份。
   const selectedCandidates = candidates.filter(
-    (candidate) => !candidate.local || selection[candidate.name]?.enabled !== false,
+    (candidate) => selection[candidate.name]?.enabled !== false,
   );
   const config = buildConfigFromAnswers(answers, selectedCandidates, probeResults, FACTORY_DEFAULTS, { selection });
   print('');
@@ -1406,9 +1405,8 @@ async function askSelection({ ask, print }, candidates, probeResults) {
 
   const listed = candidates.map((candidate, i) => `${i + 1}) ${candidate.name}${candidate.local ? '（本机）' : ''}`).join('  ');
   print(`  ${listed}`);
-  const skip = await ask('不纳管哪些？输入序号，逗号分隔（回车＝全部纳管） > ');
-  for (const token of skip.split(/[\s,]+/).filter(Boolean)) {
-    const idx = Number(token) - 1;
+  const skip = await ask('不纳管哪些？输入序号或范围（如 1,3-8；回车＝全部纳管） > ');
+  for (const idx of parseIndexSelection(skip, candidates.length)) {
     const name = candidates[idx]?.name;
     if (name) selection[name] = { enabled: false, autoStart: false };
   }
@@ -1418,13 +1416,27 @@ async function askSelection({ ask, print }, candidates, probeResults) {
     .filter((name) => selection[name].enabled && probeResults[name]?.phase === 'ready');
   if (readyHosts.length > 0) {
     print(`  可随 manager 自启（仅 ready）：${readyHosts.map((n, i) => `${i + 1}) ${n}`).join('  ')}`);
-    const off = await ask('不自启哪些？输入序号（回车＝全部自启） > ');
-    for (const token of off.split(/[\s,]+/).filter(Boolean)) {
-      const name = readyHosts[Number(token) - 1];
+    const off = await ask('不自启哪些？输入序号或范围（回车＝全部自启） > ');
+    for (const idx of parseIndexSelection(off, readyHosts.length)) {
+      const name = readyHosts[idx];
       if (name) selection[name].autoStart = false;
     }
   }
   return selection;
+}
+
+/** 将 `1,3-5 8` 解析为零基序号；越界与反向范围忽略，重复自动去重。 */
+export function parseIndexSelection(raw, length) {
+  const indexes = new Set();
+  for (const token of String(raw ?? '').split(/[\s,]+/).filter(Boolean)) {
+    const match = /^(\d+)(?:-(\d+))?$/.exec(token);
+    if (!match) continue;
+    const from = Number(match[1]);
+    const to = Number(match[2] ?? match[1]);
+    if (from < 1 || to < from) continue;
+    for (let value = from; value <= to && value <= length; value += 1) indexes.add(value - 1);
+  }
+  return [...indexes];
 }
 
 /**
@@ -1487,7 +1499,7 @@ export async function persistSetup(config, flags = {}, {
   }
 
   const store = await import('./store.js');
-  await store.init();
+  await store.init({ forSetupOverwrite: true });
   try {
     store.assertSetupLocalIdentities(config, preferredLocalName, sshNames);
     store.saveConfigFromSetup(config);

@@ -82,7 +82,8 @@ const SUSPEND_HINT = {
  *   child:import('node:child_process').ChildProcess|null,
  *   killedByUs:boolean, forcedReason:string|null, connected:boolean, attempt:number,
  *   suspendedReason:string|null, stderrTail:string, denyStamps:number[],
- *   retryTimer:NodeJS.Timeout|null, readyPending:boolean, closed:boolean}} Entry
+ *   retryTimer:NodeJS.Timeout|null, readyPending:boolean, closed:boolean,
+ *   user:string|null}} Entry
  */
 
 /** @type {Map<string, Entry>} */
@@ -126,7 +127,8 @@ function spawnChild(e) {
   assertSafeHost(e.host);
   const { bin, prefixArgs } = sshBin();
   const forward = `127.0.0.1:${e.localPort}:127.0.0.1:${e.remotePort}`;
-  const args = [...prefixArgs, '-N', '-L', forward, ...TUNNEL_SSH_OPTS, e.host];
+  const userOpts = e.user === null ? [] : ['-o', `User=${e.user}`];
+  const args = [...prefixArgs, '-N', '-L', forward, ...TUNNEL_SSH_OPTS, ...userOpts, e.host];
 
   e.stderrTail = '';
   e.denyStamps = [];
@@ -308,6 +310,7 @@ export async function open(name, { localPort, remotePort, direct = false }) {
     retryTimer: null,
     readyPending: false,
     closed: false,
+    user: store.effectiveSshUser(name),
   };
   entries.set(name, e);
 
@@ -549,7 +552,7 @@ async function verifyRemoteAlive(name) {
 
   try {
     return await hostQueue(name).run('tunnel-verify', async (signal) => {
-      const res = await sshExec(name, buildVerifyScript({ pid: web.pid, port: web.port ?? 1 }), { signal });
+      const res = await sshExec(name, buildVerifyScript({ pid: web.pid, port: web.port ?? 1 }), { signal, user: store.effectiveSshUser(name) });
       if (execFailure(name, '重连前复核', res)) return null; // ssh 层故障：不定罪远端，继续重连
       const out = parseProtoOutput(res.stdout, { requireDone: 'VERIFY_DONE' });
       if (kvOne(out, 'ALIVE') !== 'yes') return false;
