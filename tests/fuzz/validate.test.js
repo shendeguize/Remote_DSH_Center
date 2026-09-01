@@ -207,18 +207,6 @@ const MUTATORS = Object.freeze([
     },
   },
   {
-    id: 'two-locals',
-    apply(cfg) {
-      const names = Object.keys(cfg.hosts);
-      if (names.length < 2) return null;
-      for (const name of names.slice(0, 2)) {
-        cfg.hosts[name].local = true;
-        cfg.hosts[name].localPort = null;
-      }
-      return { path: 'hosts', why: '最多只能有一个 local:true 主机' };
-    },
-  },
-  {
     id: 'local-with-port',
     apply(cfg, rng) {
       const name = firstHost(cfg, rng);

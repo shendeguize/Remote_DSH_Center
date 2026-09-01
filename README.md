@@ -40,6 +40,8 @@ dshc open      # 在浏览器打开 Hub
 ## 它解决什么问题
 
 - **本机 + 远端统一入口**：本机浏览器直连实际 web 端口；远端页面走 `ssh -L` 映射端口。
+- **本机多 profile**：管理页可添加多个具名本机实例；为每个实例设置不同 web 端口，并在
+  “追加参数”中逐行填写 `--profile` 与 profile 名称（例如 `dcs`）。各实例独立维护 PID、状态与页面。
 - **远端零常驻、零安装**：控制动作使用单条一次性 SSH；Center 管理的日志、patch 与临时文件在
   `~/.dsh_center_remote/`。唯一显式例外是用户保存 dsh 配置时写入
   `${DSH_HOME:-$HOME/.dsh}/settings.yaml`。

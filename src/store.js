@@ -293,12 +293,32 @@ function loadStateFile() {
 }
 
 /** 加载 + 迁移 + 校验 config；宽容加载 state。 */
-export async function init({ pathsOverride } = {}) {
+export async function init({ pathsOverride, forSetupOverwrite = false } = {}) {
   paths = pathsOverride ?? resolvePaths();
   cleanupTmpLeftovers();
   setupLocalCandidate = null;
 
-  const loaded = loadConfigFile();
+  // 离线 init 的目标正是整份替换配置：旧文件可能能解析 JSON、却不符合当前 schema
+  // （例如历史 bug 写入过 host.dshPath）。不能在用户确认新配置后又要求旧配置先通过
+  // 启动校验。这里只记录旧文件逐字内容供 CONFIG_STALE 防覆盖，内存从出厂骨架起步；
+  // 随后的 saveConfigFromSetup 仍会完整校验用户确认的新配置并原子写入。
+  let loaded;
+  if (forSetupOverwrite) {
+    try {
+      configOnDiskText = fs.readFileSync(paths.config, 'utf8');
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        throw new DshError('CONFIG_WRITE_FAILED', '初始化前无法读取现有配置，本次写入已放弃', {
+          detail: `${err.code ?? ''} ${err.message}`.trim(),
+          cause: err,
+        });
+      }
+      configOnDiskText = null;
+    }
+    loaded = { config: newFactoryConfig(), fresh: configOnDiskText === null, migrated: false };
+  } else {
+    loaded = loadConfigFile();
+  }
   config = loaded.config;
   if (loaded.migrated && !loaded.fresh) {
     writeConfigNow();
@@ -545,7 +565,8 @@ function diffPaths(a, b, prefix = '') {
 // ── ssh config 合并（mergeSshHosts） ────────────────────────────────────
 
 /**
- * 启动/reload 时并入 ssh config 清单：新主机以 hostDefaults 写入 config；
+ * 首次 setup 时并入 ssh config 清单作为候选；setup 完成后只刷新已纳管主机的连接信息，
+ * 不再把全部 SSH Host 自动写回配置（否则向导排除和管理台删除都会在重启后失效）。
  * config 有而 ssh config 无 → 内存标记 orphaned（不持久化，不删配置）。
  * @param {{name:string, hostName?:string, user?:string, port?:number}[]} sshHosts
  * @param {{skipAdding?:Iterable<string}} [options] names explicitly removed by this reload
@@ -556,9 +577,9 @@ export function mergeSshHosts(sshHosts, { skipAdding = [] } = {}) {
   assertNoLocalSshConflict(config, nextSshInfo);
   sshInfoByName = nextSshInfo;
 
-  const added = sshHosts
-    .filter((h) => !skipped.has(h.name) && !Object.hasOwn(config.hosts, h.name))
-    .map((h) => h.name);
+  const added = config.setupCompleted === true
+    ? []
+    : sshHosts.filter((h) => !Object.hasOwn(config.hosts, h.name)).map((h) => h.name);
   if (added.length > 0) {
     updateConfig((draft) => {
       draft.hosts = {
@@ -635,9 +656,6 @@ export function clearSetupLocalCandidate() {
 export function createLocalHost(name) {
   assertSafeHost(name);
   updateConfig((draft) => {
-    if (Object.values(draft.hosts).some((host) => host?.local === true)) {
-      throw new DshError('LOCAL_HOST_EXISTS', '已经存在本机主机，不能重复添加');
-    }
     if (Object.hasOwn(draft.hosts, name) || sshInfoByName.has(name)) {
       throw new DshError('LOCAL_NAME_CONFLICT', `本机名称 ${name} 已被现有主机或 SSH Host 使用`, {
         host: name,
@@ -649,6 +667,35 @@ export function createLocalHost(name) {
     };
   });
   return getHostView(name);
+}
+
+/** 手动登记远端：不要求名称已经存在于 ~/.ssh/config（ssh 仍可自行解析主机名）。 */
+export function createRemoteHost(name, { sshUser = null, dshPath = null } = {}) {
+  assertSafeHost(name);
+  updateConfig((draft) => {
+    if (Object.hasOwn(draft.hosts, name)) {
+      throw new DshError('ALREADY_EXISTS', `主机 ${name} 已存在`, { host: name });
+    }
+    draft.hosts = {
+      ...draft.hosts,
+      [name]: { ...newHostConfig(), local: false, sshUser, dshPath },
+    };
+  });
+  return getHostView(name);
+}
+
+export function removeHosts(names) {
+  const unique = [...new Set(names)];
+  updateConfig((draft) => {
+    for (const name of unique) {
+      if (!Object.hasOwn(draft.hosts, name)) {
+        throw new DshError('NOT_FOUND', `主机 ${name} 不存在`, { host: name });
+      }
+    }
+    for (const name of unique) delete draft.hosts[name];
+  });
+  for (const name of unique) dropHostState(name);
+  return unique;
 }
 
 export function setTunnelStatusProvider(fn) {
@@ -727,6 +774,19 @@ export function effectiveRemotePort(name) {
   return host?.remoteWebPort ?? config.defaults.remoteWebPort;
 }
 
+/**
+ * 生效 ssh 登录用户：config.hosts.<name>.sshUser 覆盖优先，其次 ~/.ssh/config 的 User，
+ * 都没有则 null（由 ssh 按该 Host 的既有约定解析）。
+ * 所有远端 ssh/scp/隧道命令都经此取用户，保证「一处覆盖、处处生效」。
+ * @param {string} name
+ * @returns {string|null}
+ */
+export function effectiveSshUser(name) {
+  const host = hostConfigFor(name);
+  if (host?.sshUser) return host.sshUser;
+  return sshInfoByName.get(name)?.user ?? null;
+}
+
 function hostConfigFor(name) {
   if (config?.hosts && Object.hasOwn(config.hosts, name)) return config.hosts[name];
   return setupLocalCandidate?.name === name ? setupLocalCandidate.config : null;
@@ -741,6 +801,7 @@ export function getHostView(name) {
 
   const local = hostConfig.local === true;
   const ssh = local ? null : (sshInfoByName.get(name) ?? null);
+  const effectiveUser = hostConfig.sshUser ?? ssh?.user ?? null;
   const localPort = tunnelRuntime?.localPort ?? st.tunnel?.localPort ?? hostConfig.localPort ?? null;
   const phase = st.phase ?? 'unknown';
   const tunnelUsable = (phase === 'running' || phase === 'degraded') && localPort !== null;
@@ -749,7 +810,7 @@ export function getHostView(name) {
     name,
     local,
     sshInfo: ssh
-      ? { hostName: ssh.hostName ?? null, user: ssh.user ?? null, port: ssh.port ?? null }
+      ? { hostName: ssh.hostName ?? null, user: effectiveUser, port: ssh.port ?? null }
       : null,
     orphaned: local ? false : orphaned.has(name),
     config: {
@@ -761,6 +822,11 @@ export function getHostView(name) {
       remoteWebPort: hostConfig.remoteWebPort,
       // 下次拉起生效值；本次实例的实际值在 web.workdir，两者不等即「重启后生效」
       workdir: hostConfig.workdir ?? null,
+      // null = 沿用 ssh config 的用户；非 null = 覆盖登录用户（多用户远端）
+      sshUser: hostConfig.sshUser ?? null,
+      dshPath: hostConfig.dshPath ?? null,
+      // null = 用 dsh 的 web profile（默认 `dsh web`）；非 null = 以 `--profile <name>` 启动
+      profile: hostConfig.profile ?? null,
       inject: {
         env: { ...hostConfig.inject.env },
         extraArgs: [...hostConfig.inject.extraArgs],

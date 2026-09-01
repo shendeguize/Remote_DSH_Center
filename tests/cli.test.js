@@ -9,9 +9,14 @@ import test from 'node:test';
 import {
   COMMANDS, EXIT, TERMINAL, UsageError, assertCliSetupLocalIdentities, buildDefaultsPatchFor, buildHostPatchFor,
   classifyConfigFile, coerceConfigValue, createSseParser, exitCodeFor, formatTable, installGuideLines, parseArgv, parseSseFrame,
-  persistSetup, resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
+  parseIndexSelection, persistSetup, resolveHostArg, tailFile, upToDateLines, usageText, withLocalCandidate,
 } from '../src/cli.js';
 import { newFactoryConfig, newHostConfig } from '../src/defaults.js';
+
+test('init 主机选择支持批量范围、去重并忽略越界', () => {
+  assert.deepEqual(parseIndexSelection('1,3-5 5 9', 6), [0, 2, 3, 4]);
+  assert.deepEqual(parseIndexSelection('5-3 bad 0', 6), []);
+});
 
 test('installGuideLines：probe 展开嗅探事实，其他动作只给单行入口', () => {
   const host = {
@@ -223,6 +228,30 @@ test('persistSetup：manager 未运行时原子写入；写盘失败保留原文
 
   stdout = '';
   stderr = '';
+  const legacyDir = path.join(root, 'legacy-invalid');
+  fs.mkdirSync(legacyDir);
+  process.env.DSHC_HOME = legacyDir;
+  fs.writeFileSync(path.join(legacyDir, 'config.json'), JSON.stringify({
+    ...newFactoryConfig(),
+    hosts: { 'bj.jd.ip': { ...newHostConfig(), dshPath: '/opt/dsh/bin/dsh' } },
+  }));
+  const replaced = await persistSetup(config, {}, {
+    preferredLocalName: 'workstation',
+    sshNames: [],
+  });
+  assert.equal(replaced, EXIT.ok, '待替换旧配置含未知字段时，确认后的 init 仍应能原子覆盖');
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(legacyDir, 'config.json'), 'utf8')).hosts.workstation.local,
+    true,
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(legacyDir, 'config.json'), 'utf8')).hosts.workstation.dshPath,
+    null,
+  );
+  assert.equal(stderr, '');
+
+  stdout = '';
+  stderr = '';
   const failureDir = path.join(root, 'failure');
   fs.mkdirSync(failureDir);
   process.env.DSHC_HOME = failureDir;
@@ -307,6 +336,15 @@ test('config set hosts.<主机>.workdir 路由到主机配置端点', () => {
   for (const key of ['manager.port', 'hosts.gpu-1.autoStart', 'hosts..workdir', 'workdir', 'hosts.gpu-1']) {
     assert.equal(buildHostPatchFor(key, 'x'), null, `不该路由：${key}`);
   }
+});
+
+test('config set 支持主机 dshPath 与 sshUser', () => {
+  assert.deepEqual(buildHostPatchFor('hosts.gpu-1.dshPath', '/opt/dsh/bin/dsh'), {
+    name: 'gpu-1', body: { dshPath: '/opt/dsh/bin/dsh' },
+  });
+  assert.deepEqual(buildHostPatchFor('hosts.gpu-1.sshUser', 'alice'), {
+    name: 'gpu-1', body: { sshUser: 'alice' },
+  });
 });
 
 test('coerceConfigValue 识别整数/布尔/区间', () => {

@@ -60,6 +60,14 @@ export function hostDshSummary(host) {
   if (isLocalHost(host) && host?.phase === 'no_dsh') {
     return frozenCopy({ ...summary, line2: hostPhaseHint(host) });
   }
+  // 配置了非默认 profile 时在 dsh 列标注，便于区分多个本机实例
+  const profile = host?.config?.profile;
+  if (typeof profile === 'string' && profile !== '') {
+    return frozenCopy({
+      ...summary,
+      line2: summary.line2 ? `${summary.line2} · profile ${profile}` : `profile ${profile}`,
+    });
+  }
   return frozenCopy(summary);
 }
 

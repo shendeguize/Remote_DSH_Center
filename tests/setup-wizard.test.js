@@ -110,8 +110,7 @@ test('buildConfigFromAnswers 产出的 config 通过后端 configSchema', () => 
   assert.equal(config.setupCompleted, true);
   assert.equal(config.hosts['gpu-1'].autoStart, true);
   assert.equal(config.hosts['gpu-2'].autoStart, false, 'no_dsh 不许自启');
-  assert.equal(config.hosts['gpu-3'].enabled, false);
-  assert.equal(config.hosts['gpu-3'].autoStart, false, '未纳管必然不自启');
+  assert.equal(config.hosts['gpu-3'], undefined, '未纳管主机不写入配置');
   assert.equal(config.hosts['gpu-1'].local, false, '旧 string[] 候选仍按 SSH 主机生成');
   assert.deepEqual(config.hosts['gpu-1'].inject, { env: {}, extraArgs: [], patches: [] });
 });
@@ -241,7 +240,7 @@ test('取消纳管的主机被排除自启候选；ready 也能手动关掉自�
     probeHost: async () => ({ phase: 'ready' }),
   });
 
-  assert.equal(res.config.hosts.drop.enabled, false);
+  assert.equal(res.config.hosts.drop, undefined, '取消纳管的主机不写入配置');
   assert.equal(res.config.hosts.keep.autoStart, false, '序号 1 被取消自启');
   assert.equal(res.config.hosts.keep2.autoStart, true);
 });

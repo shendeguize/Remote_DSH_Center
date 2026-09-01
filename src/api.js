@@ -27,7 +27,9 @@ import {
   dshWorkspaceCreateSchema,
   emptyBodySchema,
   hostConfigPatchSchema,
+  hostsRemoveSchema,
   localHostCreateSchema,
+  remoteHostCreateSchema,
   setupBodySchema,
   syncConfigBodySchema,
 } from './lib/validate.js';
@@ -448,6 +450,28 @@ export function createHandler({ managerCtl }) {
       sendJson(res, 201, { host });
     }],
 
+    ['POST', /^\/api\/hosts$/, async (req, res) => {
+      const body = await readJsonBody(req);
+      assertValid(remoteHostCreateSchema, body, '手动添加主机请求校验失败');
+      const host = store.createRemoteHost(body.name, body);
+      sendJson(res, 201, { host });
+    }],
+
+    ['POST', /^\/api\/hosts\/remove$/, async (req, res) => {
+      const body = await readJsonBody(req);
+      assertValid(hostsRemoveSchema, body, '批量删除主机请求校验失败');
+      const names = [...new Set(body.hosts)];
+      for (const name of names) {
+        const view = requireHost(name);
+        if (['starting', 'running', 'degraded', 'stopping'].includes(view.phase)) {
+          throw new DshError('PHASE_CONFLICT', `主机 ${name} 仍在运行或操作中，请先关停再删除`, { host: name });
+        }
+      }
+      const removed = store.removeHosts(names);
+      await tunnel.closeUnconfigured();
+      sendJson(res, 200, { removed });
+    }],
+
     ['POST', /^\/api\/hosts\/sync-config$/, async (req, res) => {
       const body = await readJsonBody(req);
       assertValid(syncConfigBodySchema, body, '批量配置同步请求校验失败');
@@ -537,6 +561,7 @@ export function createHandler({ managerCtl }) {
       const canonicalName = view.name;
       const result = await readDshSettings(canonicalName, {
         resolveLocal: () => requireHost(canonicalName).local,
+        user: store.effectiveSshUser(canonicalName),
       });
       sendJson(res, 200, result);
     }],
@@ -555,6 +580,7 @@ export function createHandler({ managerCtl }) {
       const result = await writeDshSettings(canonicalName, {
         ...body,
         resolveLocal: () => requireHost(canonicalName).local,
+        user: store.effectiveSshUser(canonicalName),
       });
       sendJson(res, 200, result);
     }],
@@ -619,6 +645,10 @@ export function createHandler({ managerCtl }) {
         if ('remoteWebPort' in body) host.remoteWebPort = body.remoteWebPort;
         // 与 inject 同款语义：落盘即生效于「下一次拉起」，不动正在跑的实例
         if ('workdir' in body) host.workdir = body.workdir;
+        if ('sshUser' in body) host.sshUser = body.sshUser;
+        if ('dshPath' in body) host.dshPath = body.dshPath;
+        // 与 workdir 同款「下次拉起生效」语义：profile 落盘后仍需重启实例才应用
+        if ('profile' in body) host.profile = body.profile;
         if ('inject' in body) {
           host.inject = {
             env: { ...body.inject.env },

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  buildDefaultsPatch, buildHostPatch, deepEqual, diffPatch, formatEnvLines, formatLines, parseEnvLines, parseLines, parsePort, parsePortRange, parseWorkdir, validatePatches,
+  buildDefaultsPatch, buildHostPatch, deepEqual, diffPatch, formatEnvLines, formatLines, parseEnvLines, parseLines, parsePort, parsePortRange, parseProfile, parseWorkdir, validatePatches,
 } from '../../src/web/form.js';
 
 test('parsePort 边界', () => {
@@ -62,10 +62,13 @@ test('parseWorkdir：空 = null，只收绝对路径与 ~ 形态', () => {
 
 test('buildHostPatch 组装 PUT 请求体', () => {
   const built = buildHostPatch({
-    enabled: true, autoStart: true, remoteWebPort: '9001', workdir: '~/proj', env: 'G=hi', extraArgs: '--verbose', patches: '/tmp/p.yml',
+    enabled: true, autoStart: true, remoteWebPort: '9001', workdir: '~/proj', env: 'G=hi', extraArgs: '--verbose', patches: '/tmp/p.yml', profile: 'dcs',
   });
   assert.deepEqual(built.value, {
     enabled: true,
+    sshUser: null,
+    dshPath: null,
+    profile: 'dcs',
     remoteWebPort: 9001,
     workdir: '~/proj',
     inject: { env: { G: 'hi' }, extraArgs: ['--verbose'], patches: ['/tmp/p.yml'] },
@@ -77,12 +80,29 @@ test('buildHostPatch 组装 PUT 请求体', () => {
   });
   assert.equal(empty.value.remoteWebPort, null, '空 = 继承 defaults');
   assert.equal(empty.value.workdir, null, '空 = 远端家目录');
+  assert.equal(empty.value.profile, null, '空 profile = 用 dsh 的 web profile');
+  assert.equal(empty.ok, true);
 
   const bad = buildHostPatch({
     remoteWebPort: '70000', workdir: 'rel/dir', env: 'bad-key=1', patches: 'rel.yml',
   });
   assert.equal(bad.ok, false);
   assert.deepEqual(Object.keys(bad.errors).sort(), ['env', 'patches', 'remoteWebPort', 'workdir']);
+});
+
+test('parseProfile：合法名与非法名（与后端 validate 双层一致）', () => {
+  assert.deepEqual(parseProfile(''), { ok: true, value: null });
+  assert.deepEqual(parseProfile('  '), { ok: true, value: null });
+  assert.deepEqual(parseProfile('dcs'), { ok: true, value: 'dcs' });
+  assert.deepEqual(parseProfile('my.profile_1'), { ok: true, value: 'my.profile_1' });
+  assert.equal(parseProfile('-dcs').ok, false);
+  assert.equal(parseProfile('.hidden').ok, false);
+  assert.equal(parseProfile('a b').ok, false);
+  assert.equal(parseProfile('web;rm').ok, false);
+
+  const bad = buildHostPatch({ profile: '-dcs' });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.profile, '非法 profile 要报字段错误');
 });
 
 test('buildDefaultsPatch 聚合三键并逐字段报错', () => {

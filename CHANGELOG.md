@@ -50,6 +50,39 @@
 - 新增按需舰队聚类分析、Sidecar 最低版本握手、本机 DSH headless 摘要及
   fail-closed 的确定性降级；新增有界的 owned-web/test-workdir 清理预览与显式应用。
 
+### 新增
+
+- 放开本机单例限制：管理页可添加多个具名本机实例，分别配置 web 端口、`dshPath`、启动目录与
+  `extraArgs`；因此同一台机器可用 `--profile` 加 profile 名称管理多套 dsh web。
+
+- 主机详情新增「dsh profile」字段：为单个实例填写 profile 名（如 `dcs`）后，将以
+  `dsh --profile <name> …` 启动（此前 `--profile` 只能塞进「追加参数」，但 `dsh web` 子命令
+  是 `--profile web` 的别名、会把 `--profile` 当 web app 参数透传，无法真正切换 profile）。
+  留空则维持默认 `dsh web`。该改动保存后需在下次拉起/重启实例时生效。
+
+- 主机配置正式支持 `dshPath`：可在详情页或 `dshc config set hosts.<主机>.dshPath <路径>` 指定；留空时继续自动查找。
+- 显式 `dshPath` 现在同时用于探测与启动，并把可执行文件所在目录加入该次命令的 PATH，兼容 `/usr/bin/env node` 等 shebang。
+- 管理页支持手动登记远端主机（可同时填写 SSH 用户与 dsh 路径），并可勾选一台或多台批量删除。
+
+- 修复 manager 未运行时 `dshc init` 已确认新配置，却因待替换的旧 `config.json` 含
+  `hosts.<name>.dshPath` 等当前 schema 未知字段而在写入前失败；离线初始化现在直接校验并
+  原子写入确认后的新配置，同时继续用旧文件逐字快照防止并发外部修改被覆盖。
+
+### 新增
+
+- 初始化向导支持主机一键全选/全不选，CLI 支持 `1,3-8` 范围批选；未纳管的 SSH Host
+  不再写入配置，也不会在 manager 重启后被自动加回。
+- 管理台主机表支持多选并批量删除；运行或操作中的主机会被安全拒绝，删除不会修改
+  `~/.ssh/config` 或远端文件。
+- 每台远端主机新增 `sshUser` 覆盖项，统一作用于探测、启动、巡检、SCP、配置文件操作
+  与 SSH 隧道，支持同一服务器的不同登录用户。
+
+### 修复
+
+- 拉起 dsh web 时，若 dsh 不在非交互 PATH，自动退回与探测一致的嗅探目录和 login
+  shell 里的绝对路径；仍找不到则以「找不到 dsh 命令」直接报错（远端脚本退出码 7），
+  不再表现为「远端进程启动后立即退出」加一行 `nohup: dsh: No such file or directory`。
+
 ## [0.7.1] - 2026-08-29
 
 ### 修复

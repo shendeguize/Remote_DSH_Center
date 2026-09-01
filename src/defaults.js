@@ -26,6 +26,12 @@ export const FACTORY_DEFAULTS = Object.freeze({
     remoteWebPort: null,
     // null = 不注入 cd，远端 dsh 以 sshd 给的初始目录（$HOME）启动
     workdir: null,
+    // null = 沿用 ~/.ssh/config 里该 Host 的 User；非 null = 覆盖登录用户（多用户远端）
+    sshUser: null,
+    // null = 按 PATH / 常见目录 / login shell 自动解析；非 null = 每主机显式 dsh 路径
+    dshPath: null,
+    // null = 用 dsh 的 web profile（默认 `dsh web`）；非 null = 以 `--profile <name>` 启动
+    profile: null,
     inject: Object.freeze({
       env: Object.freeze({}),
       extraArgs: Object.freeze([]),
@@ -44,6 +50,9 @@ export function newHostConfig() {
     localPort: FACTORY_DEFAULTS.hostDefaults.localPort,
     remoteWebPort: FACTORY_DEFAULTS.hostDefaults.remoteWebPort,
     workdir: FACTORY_DEFAULTS.hostDefaults.workdir,
+    sshUser: FACTORY_DEFAULTS.hostDefaults.sshUser,
+    dshPath: FACTORY_DEFAULTS.hostDefaults.dshPath,
+    profile: FACTORY_DEFAULTS.hostDefaults.profile,
     inject: { env: {}, extraArgs: [], patches: [] },
   };
 }

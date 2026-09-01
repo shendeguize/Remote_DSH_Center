@@ -379,7 +379,7 @@ test('全量探测：四台各自出结果，probe-all 收一条汇总 operation
 
 // ── 写端点 ───────────────────────────────────────────────────────────────
 
-test('POST /api/hosts/local：缺省/显式名称、单例约束、HostView 与 SSE 更新均对齐产品', async () => {
+test('POST /api/hosts/local：缺省/显式名称、多本机实例与 SSE 更新均对齐产品', async () => {
   const defaults = rig();
   const created = req(defaults.manager, 'POST', '/api/hosts/local', { body: {} });
   assert.equal(created.status, 201);
@@ -400,9 +400,9 @@ test('POST /api/hosts/local：缺省/显式名称、单例约束、HostView 与 
   await defaults.settle();
   assert.equal(defaults.manager.getHost('local-host').phase, 'ready');
 
-  const duplicate = grab(() => req(defaults.manager, 'POST', '/api/hosts/local', { body: { name: 'second-local' } }));
-  assert.equal(duplicate.status, 409);
-  assert.equal(duplicate.code, 'LOCAL_HOST_EXISTS');
+  const second = req(defaults.manager, 'POST', '/api/hosts/local', { body: { name: 'second-local' } });
+  assert.equal(second.status, 201);
+  assert.equal(second.json.host.local, true);
 
   const explicit = rig();
   const named = req(explicit.manager, 'POST', '/api/hosts/local', { body: { name: 'workstation' } });

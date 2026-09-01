@@ -54,6 +54,47 @@ test('config 不存在 → 出厂默认 + setupCompleted false', async (t) => {
   assert.equal(store.getConfig().manager.port, 7788);
 });
 
+test('createLocalHost 允许多个具名本机实例并保持各自独立配置', async (t) => {
+  const { paths } = fixture(t);
+  await store.init({ pathsOverride: paths });
+
+  const first = store.createLocalHost('local-default');
+  const second = store.createLocalHost('local-dcs');
+  assert.equal(first.local, true);
+  assert.equal(second.local, true);
+  assert.equal(store.getConfig().hosts['local-default'].localPort, null);
+  assert.equal(store.getConfig().hosts['local-dcs'].localPort, null);
+
+  store.updateConfig((draft) => {
+    draft.hosts['local-default'].remoteWebPort = 3080;
+    draft.hosts['local-dcs'].remoteWebPort = 3083;
+    draft.hosts['local-dcs'].inject.extraArgs = ['--profile', 'dcs'];
+  });
+  assert.equal(store.effectiveRemotePort('local-default'), 3080);
+  assert.equal(store.effectiveRemotePort('local-dcs'), 3083);
+  assert.deepEqual(store.getConfig().hosts['local-dcs'].inject.extraArgs, ['--profile', 'dcs']);
+});
+
+test('profile 字段：HostView 透出 config.profile，旧 config 迁移补 null', async (t) => {
+  // 新配置：显式 profile 在 HostView config 中透出
+  const { paths } = fixture(t);
+  await store.init({ pathsOverride: paths });
+  store.createLocalHost('local-dcs');
+  store.updateConfig((draft) => {
+    draft.hosts['local-dcs'].profile = 'dcs';
+    draft.hosts['local-dcs'].remoteWebPort = 3083;
+  });
+  const view = store.getHostView('local-dcs');
+  assert.equal(view.config.profile, 'dcs');
+
+  // 旧式 config（无 profile 键）→ migrate 补上默认值 null，且启动不被拦
+  const legacy = fullConfig();
+  const { paths: p2 } = fixture(t, { config: legacy });
+  await store.init({ pathsOverride: p2 });
+  assert.equal(store.getHostView('gpu-1').config.profile, null);
+  assert.equal(Object.hasOwn(store.getConfig().hosts['gpu-1'], 'profile'), true, 'migrate 应补齐 profile 键');
+});
+
 test('config 非法 JSON → 拒绝启动（不静默兜底）', async (t) => {
   const { paths } = fixture(t, { config: '{ not json' });
   await assert.rejects(
@@ -375,7 +416,7 @@ test('updateConfig 改全局默认 → config-changed 且带点路径', async (t
   assert.deepEqual(changes, [['defaults.remoteWebPort']]);
 });
 
-test('mergeSshHosts：新主机进 config，消失的标 orphaned 但不删配置', async (t) => {
+test('mergeSshHosts：setup 完成后不自动加回新主机', async (t) => {
   const { paths } = fixture(t, { config: fullConfig() });
   await store.init({ pathsOverride: paths });
 
@@ -383,14 +424,13 @@ test('mergeSshHosts：新主机进 config，消失的标 orphaned 但不删配�
     { name: 'gpu-1', hostName: '10.0.0.1', user: 'root', port: 22 },
     { name: 'gpu-2', hostName: '10.0.0.2' },
   ]);
-  assert.deepEqual(r.added, ['gpu-2']);
+  assert.deepEqual(r.added, []);
   assert.deepEqual(r.orphaned, []);
-  assert.equal(store.getConfig().hosts['gpu-2'].enabled, true);
+  assert.equal(store.getConfig().hosts['gpu-2'], undefined);
 
   const r2 = store.mergeSshHosts([{ name: 'gpu-1' }]);
-  assert.deepEqual(r2.orphaned, ['gpu-2']);
-  assert.ok('gpu-2' in store.getConfig().hosts, 'orphaned 不删配置');
-  assert.equal(store.getHostView('gpu-2').orphaned, true);
+  assert.deepEqual(r2.orphaned, []);
+  assert.equal(store.getHostView('gpu-2'), null);
 });
 
 test('clearOrphanedHosts：原子删除配置、调用 state 清理且不影响本机主机', async (t) => {

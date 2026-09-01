@@ -20,7 +20,9 @@ const config = (patch = {}) => ({
 test('draftOf 把 config 摊平成文本表单', () => {
   assert.deepEqual(draftOf(config()), {
     enabled: true,
+    sshUser: '',
     dshPath: '',
+    profile: '',
     remoteWebPort: '',
     workdir: '',
     env: 'A=1',
