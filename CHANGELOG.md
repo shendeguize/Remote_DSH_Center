@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-02
+
 ### 修复
 
 - 拉起真的会用探测解析出的 dsh 绝对路径了。`runLaunchSequence` 重拼内部 spec 时把
