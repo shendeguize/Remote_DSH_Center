@@ -1682,6 +1682,53 @@ async function main() {
       assert(adopted.manualInstances.length === 5, `其余手动实例应剩 5 个，实测 ${adopted.manualInstances.length}`);
       return `${path.relative(REPO, shot)}；领养 pid=${target.pid}，另 5 个照旧只读`;
     });
+
+    await check('S16', '主机表每行的分隔线连成一条：没有哪一格自己退出行高均衡', async () => {
+      // 垫片没有排版引擎，量不出「display:flex 写在 td 上会让这一格不再跟同行拉平高度」。
+      // 真机上的表现是：那一格自带的下边框比同行其他格早二三十像素落笔，一行的分隔线
+      // 断成错位的两段，越往右越像「按钮和勾选框各站一条线」。
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+      });
+      await cdp.send('Page.navigate', { url: `${rig.base}/#/manage` });
+      await cdp.waitFor(
+        "document.querySelectorAll('.host-table tbody tr[data-host]').length >= 2",
+        '主机表至少两行就位',
+      );
+      const rows = await cdp.eval(`
+        const round = (v) => Math.round(v * 100) / 100;
+        return [...document.querySelectorAll('.host-table tbody tr[data-host]')].map((tr) => ({
+          host: tr.dataset.host,
+          rowBottom: round(tr.getBoundingClientRect().bottom),
+          cells: [...tr.children].map((td) => ({
+            cls: td.className || '(无类)',
+            display: getComputedStyle(td).display,
+            bottom: round(td.getBoundingClientRect().bottom),
+          })),
+          controls: [...tr.querySelectorAll('[data-act]')].map((node) => ({
+            act: node.dataset.act,
+            top: round(node.getBoundingClientRect().top),
+          })),
+        }));
+      `);
+      for (const row of rows) {
+        for (const cell of row.cells) {
+          assert(cell.display === 'table-cell',
+            `${row.host} 的 ${cell.cls} 是 display:${cell.display}，表格单元格改了 display 就退出行高均衡`);
+          assert(Math.abs(cell.bottom - row.rowBottom) <= 0.5,
+            `${row.host} 的 ${cell.cls} 下边框在 ${cell.bottom}，同行行底在 ${row.rowBottom}：分隔线断成两段`);
+        }
+        // 勾选框与操作按钮同属一行的顶部，差半像素以上在 2x 屏上就看得出来
+        const tops = row.controls.map((c) => c.top);
+        if (tops.length > 1) {
+          const spread = Math.max(...tops) - Math.min(...tops);
+          assert(spread <= 0.5,
+            `${row.host} 行内控件顶边差 ${spread}px：${row.controls.map((c) => `${c.act}@${c.top}`).join(' ')}`);
+        }
+      }
+      const shot = await screenshot(cdp, 'row-separator');
+      return `${rows.length} 行 × ${rows[0].cells.length} 格共用同一条行底；${path.relative(REPO, shot)}`;
+    });
   } finally {
     cdp.close();
     await chrome.kill();

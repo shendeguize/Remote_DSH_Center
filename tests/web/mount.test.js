@@ -466,6 +466,31 @@ test('两行同为「运行中」就必须给同一排按钮，领养行只是�
   }
 });
 
+test('操作按钮包在格子里的一层 div 里，td 自己不当 flex 容器', async (t) => {
+  // .row-actions 带着 display:flex；这个类挂到 td 上，那一格就不再是 table-cell，
+  // 不跟同行其他格拉平高度，自带的下边框早落笔——行分隔线断成错位两段（真机截图）。
+  const { dom } = await mount(t, { hosts: [running('managed')] });
+  const row = dom.app.querySelector('.host-table tbody tr[data-host="managed"]');
+
+  for (const cell of row.children) {
+    assert.equal(cell.tagName, 'TD');
+    assert.equal(cell.classList.contains('row-actions'), false,
+      '带 flex 的 .row-actions 不许落在 td 上');
+  }
+
+  const cell = row.querySelector('.actions-cell');
+  assert.ok(cell, '操作列应是 td.actions-cell');
+  assert.equal(cell.children.length, 1, '操作格里只放一层包装');
+  const inner = cell.children[0];
+  assert.equal(inner.tagName, 'DIV');
+  assert.equal(inner.classList.contains('row-actions'), true);
+  assert.deepEqual(
+    [...inner.querySelectorAll('.btn')].map((b) => b.textContent),
+    ['打开', '重启', '关停', '探测'],
+    '按钮必须挂在包装里，而不是散在 td 上',
+  );
+});
+
 test('六个手动实例：拉起弹出候选单选，选中的那一个才被领养', async (t) => {
   const manualInstances = Array.from({ length: 6 }, (_, i) => ({
     pid: 3000 + i,

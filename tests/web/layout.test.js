@@ -117,6 +117,24 @@ test('620px 以下页头动作独占一行且不撑宽文档', () => {
   assert.doesNotMatch(actions, /gap\s*:/, '窄屏动作行应继承既有按钮 gap');
 });
 
+test('操作列的 flex 待在格子里面，td 保持表格单元格', () => {
+  // display:flex 写在 td 上，这一格就不再是 table-cell：它不跟同行其他格拉平高度，
+  // 自带的 border-bottom 于是比别人早二三十像素落笔，一行的分隔线断成错位两段。
+  // 卡片头那个 .row-actions 是 div，flex 归它；表格里只能由内层包装消费。
+  const shared = blockFor(CSS, '.row-actions');
+  assert.equal(declaration(shared, 'display'), 'flex');
+
+  const cell = blockFor(CSS, '.host-table .actions-cell');
+  assert.doesNotMatch(cell, /display\s*:/, '操作格不得改 display，否则退出行高均衡');
+  assert.equal(declaration(cell, 'white-space'), 'nowrap');
+  assert.equal(declaration(cell, 'min-width'), '260px');
+
+  const inner = blockFor(CSS, '.host-table .actions-cell > .row-actions');
+  assert.equal(declaration(inner, 'flex-wrap'), 'nowrap', '行内按钮换行会把行高撑成两档');
+  assert.doesNotMatch(CSS, /\.host-table \.row-actions\s*\{/,
+    '不得再按表格后代改 .row-actions：那条规则当年就是落在 td 上的');
+});
+
 test('可排序表头与列内容压在同一条左边界上', () => {
   // .btn / .btn-compact 的 padding、border、color 都写在 .host-sort-button 之后，
   // 同优先级下后来者胜：这条规则必须靠 th 后代提权，否则可排序列的表头会比其余

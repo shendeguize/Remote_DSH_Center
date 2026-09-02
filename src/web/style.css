@@ -285,7 +285,11 @@ body {
 .dsh-cell, .mapping-cell, .pid-cell { font-family: var(--mono); font-size: 12px; }
 .mono-link { font-family: var(--mono); color: var(--ready); }
 .row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.host-table .row-actions { flex-wrap: nowrap; min-width: 260px; white-space: nowrap; }
+/* 操作列的 flex 必须待在 td 里面。display:flex 直接写在 td 上会把它从 table-cell
+   变成普通盒子，不再跟同行其他格拉平高度，于是它自带的下边框比别人早二三十像素
+   落笔——一行的分隔线被劈成错位的两段，正是「对齐不对」的真身。 */
+.host-table .actions-cell { min-width: 260px; white-space: nowrap; }
+.host-table .actions-cell > .row-actions { flex-wrap: nowrap; }
 
 .tag {
   display: inline-block; margin-top: 2px; padding: 0 5px;
