@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-03
+
 ### 新增
 
 - `defaults.hostFilter` 用正则决定哪些 `~/.ssh/config` 条目值得纳管，白名单与黑名单
