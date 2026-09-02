@@ -3903,3 +3903,32 @@ test('manager 不可达：给可重试的错误页', async (t) => {
   assert.ok(skeleton.querySelectorAll('.btn').find((b) => b.textContent === '重试'));
   assert.equal(dom.app.querySelector('.toast-error') !== null, true);
 });
+
+test('被名单挡下的主机：自启开关按死并写明原因，界面不谎报「已开自启」', async (t) => {
+  // runAutoStart 会跳过 blocked 主机。留一个可勾的 autoStart 就是让界面撒谎：
+  // 勾着的意思是「开机会拉起」，而它永远不会被拉起。
+  const blockedHost = hostView('git.example.com', {
+    blocked: { rule: 'deny', pattern: 'git\\..*', reason: '命中黑名单 git\\..*' },
+  });
+  blockedHost.config.autoStart = true;
+  const { dom } = await mount(t, { hosts: [blockedHost, hostView('gpu-1')] });
+
+  // 「已屏蔽」出厂折叠，先展开才看得到行
+  dom.app.querySelector('button[data-group="blocked"]').dispatchEvent({
+    type: 'click',
+    target: dom.app.querySelector('button[data-group="blocked"]'),
+  });
+  await flush();
+
+  const rows = [...dom.app.querySelectorAll('tbody tr')];
+  const blockedRow = rows.find((row) => /git\.example\.com/.test(row.textContent));
+  const toggle = blockedRow.querySelector('.autostart-cell input');
+  assert.equal(toggle.checked, true, '存的值照原样显示，不偷偷改用户的配置');
+  assert.equal(toggle.disabled, true, '不参与自启就不许再勾');
+  assert.match(toggle.title, /命中黑名单/u);
+  assert.match(toggle.title, /不参与自启/u);
+
+  // 没被挡下的那台一切照旧
+  const okRow = rows.find((row) => /gpu-1/.test(row.textContent));
+  assert.equal(okRow.querySelector('.autostart-cell input').disabled, false);
+});

@@ -323,10 +323,14 @@ export function createHostTable({ store, actions }) {
   /** 即改即存；服务端确认前保持 pending，失败由 actions 层回滚并 toast。 */
   function renderAutoStart(host) {
     const busy = store.isPending('config:save', host.name);
+    // 名单挡下的主机不参与自启（server.js 的 runAutoStart 直接跳过）。这里不改存的值，
+    // 只把开关按死并说明原因——留着一个可勾的「已开自启」等于让界面撒谎。
+    const blocked = isBlockedHost(host);
     const input = el('input', {
       type: 'checkbox',
       checked: host.config.autoStart,
-      disabled: busy || !store.canWrite(),
+      disabled: busy || blocked || !store.canWrite(),
+      title: blocked ? `${host.blocked.reason}，不参与自启；改名单见「全局默认」` : null,
       'aria-label': `${host.name} 开机自启`,
       dataset: { act: 'autostart' },
       on: {
@@ -334,7 +338,11 @@ export function createHostTable({ store, actions }) {
         change: (e) => actions.setAutoStart(host.name, e.target.checked),
       },
     });
-    return el('label.switch', { on: { click: (e) => e.stopPropagation() } }, [input, el('span.switch-track')]);
+    // 标题也挂在外层：多数浏览器不给 disabled 的 input 显示 tooltip
+    return el('label.switch', {
+      title: input.title || null,
+      on: { click: (e) => e.stopPropagation() },
+    }, [input, el('span.switch-track')]);
   }
 
   function renderActions(host) {
