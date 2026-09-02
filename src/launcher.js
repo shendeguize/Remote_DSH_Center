@@ -270,7 +270,7 @@ async function tailQuiet(host, logName, signal, local) {
  */
 export async function runLaunchSequence(host, spec, { signal, local } = {}) {
   const {
-    port, env = {}, extraArgs = [], patchRemoteNames = [], workdir = null,
+    port, dshPath, env = {}, extraArgs = [], patchRemoteNames = [], workdir = null,
   } = spec;
   const useLocal = isLocalHost(host, local);
   const attempts = [];
@@ -279,8 +279,11 @@ export async function runLaunchSequence(host, spec, { signal, local } = {}) {
   let fallbackUsed = false;
 
   for (;;) {
+    // dshPath 必须一路传到模板：漏掉它，模板只能按 PATH 找 dsh，而 canon 那类
+    // 装法（$HOME/.canon/node/bin）不在非交互 SSH 的 PATH 里，日志里只会留下
+    // 一行 `nohup: failed to run command 'dsh'` 然后当场退出。
     const launchSpec = {
-      logName, port: usePort, env, extraArgs, patchRemoteNames, workdir,
+      logName, port: usePort, dshPath, env, extraArgs, patchRemoteNames, workdir,
     };
     // S1
     let pid;

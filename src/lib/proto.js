@@ -27,9 +27,10 @@ const remotePath = (rel) => `$HOME/${REMOTE_DIR}/${rel}`;
 // ── §1.1 探测协议 ────────────────────────────────────────────────────────
 
 function dshPathToken(value) {
-  // 省略仅保留给底层模板兼容调用；manager 的 start 路径总会传入已解析绝对路径。
-  if (value === undefined) return 'dsh';
-  if (value === null || value === '') return '';
+  // 省略与 null 同义（探测里表示「没有配置路径」，拉起里表示「缺路径」并被拒）。
+  // 曾经省略会退回裸 `dsh` 交给 PATH 找：调用方漏传一层就静默降级成 PATH 查找，
+  // 而 canon 那类装法不在非交互 PATH 里——故障只在真机上现形（issue: 拉起失败）。
+  if (value === undefined || value === null || value === '') return '';
   if (typeof value !== 'string' || !/^\/[^\0\r\n]*$/u.test(value)) {
     throw new DshError('VALIDATION', 'dshPath 必须是不含换行的绝对路径');
   }

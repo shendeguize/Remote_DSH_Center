@@ -296,14 +296,41 @@ function workdirOf(body, home) {
   return unshqWorkdir(seg[1], home);
 }
 
+/**
+ * 被拉起的 dsh 命令词：`'/abs/path'`（已解析绝对路径，manager 正常形态）或裸 `dsh`
+ * （交给 PATH 查找）。两种都要认——只认一种，另一种要么被 die 挡住、要么被静默放过。
+ */
+const DSH_TOK = "(?:'[^']*'|dsh)";
+
+/**
+ * 还原 nohup 的命令查找：绝对路径要真在那儿，裸 `dsh` 要在生效 PATH 的某个目录里
+ * （脚本前置的 `PATH=<dir>:"$PATH"` 也算）。找不到就照真机那样只往日志写一行
+ * `nohup: failed to run command …` 然后什么也不启动。
+ */
+function resolveDshCommand(h, body, token) {
+  const prelude = /; PATH='([^']*)':"\$PATH"; export PATH/.exec(body);
+  const dirs = [...(prelude ? [prelude[1]] : []), ...String(h.probePath ?? '').split(':')].filter(Boolean);
+  if (token.startsWith("'")) {
+    const abs = unshq(token);
+    return { word: abs, found: h.dshInstalled && abs === h.dshPath };
+  }
+  const dir = h.dshInstalled ? h.dshPath.slice(0, h.dshPath.lastIndexOf('/')) : null;
+  return { word: 'dsh', found: dir !== null && dirs.includes(dir) };
+}
+
 function replyLaunch(name, body, { home }) {
   const logName = logNameOf(body);
   const workdir = workdirOf(body, home);
   // 真机形态：--patch（启动器旗标）紧跟 web，--no-open 等 app 旗标在其后
   const patchNames = [...body.matchAll(/--patch "\$HOME\/\.dsh_center_remote\/patches\/([^"]+)"/g)].map((m) => m[1]);
-  const portTok = must(/dsh web(?: --patch "[^"]+")* --no-open --host 127\.0\.0\.1 --port (\d+)/, body, '端口')[1];
+  const portTok = must(
+    new RegExp(`${DSH_TOK} web(?: --patch "[^"]+")* --no-open --host 127\\.0\\.0\\.1 --port (\\d+)`),
+    body,
+    '端口',
+  )[1];
+  const dshTok = must(new RegExp(`nohup (?:env (?:[A-Za-z_][A-Za-z0-9_]*='(?:[^']|'\\\\'')*' )+)?(${DSH_TOK}) web`), body, 'dsh 命令词')[1];
 
-  const envSeg = /nohup env ((?:[A-Za-z_][A-Za-z0-9_]*='(?:[^']|'\\'')*' )+)dsh web/.exec(body);
+  const envSeg = new RegExp(`nohup env ((?:[A-Za-z_][A-Za-z0-9_]*='(?:[^']|'\\\\'')*' )+)${DSH_TOK} web`).exec(body);
   const envPairs = envSeg
     ? [...envSeg[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)=('(?:[^']|'\\'')*')/g)].map(([, k, v]) => [k, unshq(v)])
     : [];
@@ -315,6 +342,17 @@ function replyLaunch(name, body, { home }) {
 
   const file = logPath(name, logName);
   fs.writeFileSync(file, ''); // 真脚本里 `: > "$LOG"` 排在 cd 之前，失败也已截断
+
+  // 命令找不到：nohup 已被后台化，$! 照样有值，进程随即消失，日志只留一行报错。
+  // 这是真机上「远端进程启动后立即退出」的原样形态（canon 装法 + 裸 dsh 即此症）。
+  const cmd = resolveDshCommand(hostState({ hosts: readState().hosts ?? {} }, name), body, dshTok);
+  if (!cmd.found) {
+    fs.appendFileSync(file, `nohup: failed to run command '${cmd.word}': No such file or directory\n`);
+    const dead = spawn(process.execPath, ['-e', ''], { detached: true, stdio: 'ignore' });
+    dead.unref();
+    out(`PID=${dead.pid}\n`);
+    return;
+  }
 
   // cd 失败：脚本以 8 退出且不产生 PID，日志停留在空文件
   if (workdir !== null && hostState({ hosts: readState().hosts ?? {} }, name).faults.badWorkdir) {

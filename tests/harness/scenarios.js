@@ -113,6 +113,19 @@ export const SCENARIOS = {
     dshSniffVersion: 'dsh 0.1.1-rc.2',
   }),
 
+  /**
+   * canon 装法：dsh 真在 $HOME/.canon/node/bin，但那个目录不在非交互 SSH 的 PATH 里
+   * → 探测（目录扫描 + login 嗅探）解析得出，拉起必须用绝对路径，裸 `dsh` 会被
+   * nohup 判为「命令找不到」而当场退出。
+   */
+  'canon-login-only': () => newHostState({
+    dshPath: '/root/.canon/node/bin/dsh',
+    probePath: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+    dshSniffPaths: ['/root/.canon/node/bin/dsh'],
+    dshLoginPath: '/root/.canon/node/bin/dsh',
+    dshSniffVersion: '0.1.1-rc.2',
+  }),
+
   /** dsh 在但 web profile 未配置 → no_dsh(no-web-profile)。 */
   'no-dsh-no-profile': () => newHostState({ profileWeb: false }),
 

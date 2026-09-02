@@ -99,6 +99,9 @@ test('parseLaunchUrl 精析并校验端口范围', () => {
 
 // ── §1 模板快照 ─────────────────────────────────────────────────────────
 
+/** 拉起模板要求已解析绝对路径；缺路径是 VALIDATION，不再退回裸 dsh。 */
+const DSH_ABS = '/usr/bin/dsh';
+
 const noRawNewline = (s, label) => assert.ok(!s.includes('\n'), `${label} 产物应为单行`);
 
 test('§1.1 探测模板逐字一致（含非交互 PATH 与 login-shell 嗅探）', () => {
@@ -204,13 +207,14 @@ test('§1.2 拉起模板：双层算例逐字一致（12 §2.5）', () => {
   const s = buildLaunchScript({
     logName: 'web-8899.log',
     port: 8899,
+    dshPath: DSH_ABS,
     env: { GREETING: 'hi there' },
     extraArgs: ['--verbose'],
   });
   noRawNewline(s, 'launch');
   assert.equal(
     s,
-    'mkdir -p "$HOME/.dsh_center_remote/patches" || { echo "ERR=mkdir"; exit 9; }; LOG="$HOME/.dsh_center_remote/web-8899.log"; : > "$LOG"; nohup env GREETING=\'hi there\' dsh web --no-open --host 127.0.0.1 --port 8899 \'--verbose\' > "$LOG" 2>&1 < /dev/null & echo "PID=$!"',
+    'mkdir -p "$HOME/.dsh_center_remote/patches" || { echo "ERR=mkdir"; exit 9; }; LOG="$HOME/.dsh_center_remote/web-8899.log"; : > "$LOG"; PATH=\'/usr/bin\':"$PATH"; export PATH; nohup env GREETING=\'hi there\' \'/usr/bin/dsh\' web --no-open --host 127.0.0.1 --port 8899 \'--verbose\' > "$LOG" 2>&1 < /dev/null & echo "PID=$!"',
   );
 });
 
@@ -235,44 +239,56 @@ test('§1.2 拉起把 dsh 自己的 bin 目录并入 PATH（解释器与它同�
     'PATH 必须在 nohup 之前就绪，否则 `env node` 找不到解释器，日志里只剩一行报错',
   );
 
-  const legacy = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
-  assert.ok(!legacy.includes('PATH='), '兼容形态的 dsh 没有可推导的目录，模板逐字不变');
+});
+
+test('§1.2 缺 dshPath 直接拒绝拼装，不退回裸 dsh 走 PATH 查找（真机故障回归）', () => {
+  // 曾经省略路径会退回裸 `dsh`：调用方漏传一层（runLaunchSequence 重拼 spec 时丢了
+  // dshPath）就静默降级成 PATH 查找，而 canon 装法不在非交互 PATH 里——远端日志只留
+  // 一行 `nohup: failed to run command 'dsh'`，页面上只看到「启动后立即退出」。
+  for (const dshPath of [undefined, null, '']) {
+    assert.throws(
+      () => buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath }),
+      (err) => err.code === 'VALIDATION' && /缺少已解析的 dsh 绝对路径/.test(err.message),
+      `dshPath=${JSON.stringify(dshPath)} 应被拒`,
+    );
+  }
 });
 
 test('§1.2 前置语句用 "; " 连接、& 后直接跟 echo $!', () => {
-  const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899 });
+  const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS });
   assert.ok(s.includes('< /dev/null & echo "PID=$!"'), '& 本身是分隔符，其后不能再跟 ;');
   assert.ok(!s.includes('&& echo "PID'), 'AND 链接会让 $! 变成子壳 PID');
-  assert.ok(s.includes('"$LOG"; nohup '), '前置语句与 nohup 之间用 "; "');
+  assert.ok(s.includes('"$LOG"; PATH='), '前置语句之间用 "; "');
+  assert.ok(s.includes('export PATH; nohup '), 'PATH 前置与 nohup 之间同样用 "; "');
   assert.ok(s.includes('< /dev/null'), 'stdin 必须重定向，否则 sshd 等后台进程释放通道');
 });
 
 test('§1.2 workdir=null 时模板逐字不含 cd（回归锁，补丁 01 §4.1）', () => {
-  const withNull = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: null });
-  assert.equal(withNull, buildLaunchScript({ logName: 'web-8899.log', port: 8899 }));
+  const withNull = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: null });
+  assert.equal(withNull, buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS }));
   assert.ok(!withNull.includes('cd '), 'null 必须退回补丁前的模板形态');
   assert.ok(!withNull.includes('ERR=workdir'));
 });
 
 test('§1.2 workdir 注入 cd 段：绝对路径、~ 拼接与退出码 8', () => {
-  const abs = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: '/root/my proj' });
+  const abs = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: '/root/my proj' });
   noRawNewline(abs, 'launch+workdir');
   assert.ok(
-    abs.includes(`: > "$LOG"; cd -- '/root/my proj' || { echo "ERR=workdir"; printf 'WD=%s\\n' '/root/my proj'; exit 8; }; nohup `),
+    abs.includes(`: > "$LOG"; cd -- '/root/my proj' || { echo "ERR=workdir"; printf 'WD=%s\\n' '/root/my proj'; exit 8; }; PATH=`),
     `cd 段应排在日志截断之后、nohup 之前：${abs}`,
   );
 
   // ~ 不能进单引号（引号内不展开），必须是 "$HOME" 与 shq 段相邻拼接
-  const tilde = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: '~/proj' });
+  const tilde = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: '~/proj' });
   assert.ok(tilde.includes(`cd -- "$HOME"'/proj' || { echo "ERR=workdir"`), tilde);
-  const home = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: '~' });
+  const home = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: '~' });
   assert.ok(home.includes('cd -- "$HOME" || { echo "ERR=workdir"'), home);
 });
 
 test('§1.2 workdir 形态非法即抛 VALIDATION（不拼装脚本）', () => {
   for (const bad of ['', 'proj', './proj', '~user/proj', 'a\nb', 42]) {
     assert.throws(
-      () => buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: bad }),
+      () => buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: bad }),
       (e) => e.code === 'VALIDATION',
       `应拒绝：${JSON.stringify(bad)}`,
     );
@@ -285,7 +301,7 @@ test('§1.2 cd 段在真实 sh 下逐字还原目标目录（含空格与引号�
   const run = promisify(execFile);
 
   for (const wd of ['/tmp/a b', "/tmp/it's", '~/x y']) {
-    const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899, workdir: wd });
+    const s = buildLaunchScript({ logName: 'web-8899.log', port: 8899, dshPath: DSH_ABS, workdir: wd });
     await run('sh', ['-n', '-c', s]);
     // 只跑 cd 段的回显部分：把 cd 换成必败的 false，验证 WD= 的还原值
     const probe = /cd -- (.*?) \|\| \{/.exec(s)[1];
@@ -302,6 +318,7 @@ test('§1.2 拉起模板可被真实 sh 解析（语法正确性冒烟）', asyn
   const s = buildLaunchScript({
     logName: 'web-8899.log',
     port: 8899,
+    dshPath: DSH_ABS,
     env: { GREETING: "it's" },
     extraArgs: ['--verbose', 'x; rm -rf ~'],
     patchRemoteNames: ['aaa-a.yml'],
@@ -314,16 +331,17 @@ test('§1.2 patch 与 extraArgs 拼装、--port 0 降级、注入值转义', () 
   const s = buildLaunchScript({
     logName: 'web-auto-m1x2.log',
     port: '0',
+    dshPath: DSH_ABS,
     env: { A_B: "it's" },
     patchRemoteNames: ['3f9c0d12ab34-a.yml', 'aabbccddeeff-b.yml'],
     extraArgs: ['--verbose', 'x; rm -rf ~'],
   });
   assert.ok(s.includes('--port 0 '), '降级路径命令行只含字面 0');
-  assert.ok(s.includes("env A_B='it'\\''s' dsh web"));
+  assert.ok(s.includes("env A_B='it'\\''s' '/usr/bin/dsh' web"));
   assert.ok(s.includes(' --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'));
   assert.ok(s.includes(' --patch "$HOME/.dsh_center_remote/patches/aabbccddeeff-b.yml"'));
   assert.ok(
-    s.includes('dsh web --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'
+    s.includes("'/usr/bin/dsh' web" + ' --patch "$HOME/.dsh_center_remote/patches/3f9c0d12ab34-a.yml"'
       + ' --patch "$HOME/.dsh_center_remote/patches/aabbccddeeff-b.yml" --no-open'),
     '--patch 是启动器旗标，必须紧跟 web 排在 web app 旗标之前（真机 dsh 0.1.0-rc.7 否则报 unknown option）',
   );
@@ -332,14 +350,15 @@ test('§1.2 patch 与 extraArgs 拼装、--port 0 降级、注入值转义', () 
 });
 
 test('§1.2 非法注入值/文件名/端口一律拒绝拼装', () => {
-  assert.throws(() => buildLaunchScript({ logName: 'a b.log', port: 8899 }), (e) => e.code === 'VALIDATION');
-  assert.throws(() => buildLaunchScript({ logName: 'x.log', port: 'abc' }), (e) => e.code === 'VALIDATION');
+  const base = { dshPath: DSH_ABS };
+  assert.throws(() => buildLaunchScript({ ...base, logName: 'a b.log', port: 8899 }), (e) => e.code === 'VALIDATION');
+  assert.throws(() => buildLaunchScript({ ...base, logName: 'x.log', port: 'abc' }), (e) => e.code === 'VALIDATION');
   assert.throws(
-    () => buildLaunchScript({ logName: 'x.log', port: 8899, env: { '1BAD': 'v' } }),
+    () => buildLaunchScript({ ...base, logName: 'x.log', port: 8899, env: { '1BAD': 'v' } }),
     (e) => e.code === 'VALIDATION',
   );
   assert.throws(
-    () => buildLaunchScript({ logName: 'x.log', port: 8899, patchRemoteNames: ['../escape'] }),
+    () => buildLaunchScript({ ...base, logName: 'x.log', port: 8899, patchRemoteNames: ['../escape'] }),
     (e) => e.code === 'VALIDATION',
   );
 });

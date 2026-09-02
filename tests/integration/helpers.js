@@ -420,7 +420,7 @@ export async function spawnManualWeb(name, { count = 1 } = {}) {
     // eslint-disable-next-line no-await-in-loop -- 逐个占端口再拉起，个位数
     const port = await nextRemotePort();
     // eslint-disable-next-line no-await-in-loop -- 同上
-    const res = await launcher.runLaunchSequence(name, { port });
+    const res = await launcher.runLaunchSequence(name, { port, dshPath: '/usr/bin/dsh' });
     spawned.push({ pid: res.pid, port: res.actualPort, args: res.fingerprint });
   }
   return spawned;

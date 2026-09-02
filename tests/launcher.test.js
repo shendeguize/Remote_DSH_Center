@@ -144,7 +144,7 @@ test('launcher：LAUNCH/POLL/VERIFY/STOP/LOG 按 local 选运输且模板逐字�
   _setWait(() => Promise.resolve());
   const fingerprint = 'dsh web --no-open --host 127.0.0.1 --port 19001';
 
-  const localLaunch = await runLaunchSequence('not-a-magic-host', { port: 19001 }, { local: true });
+  const localLaunch = await runLaunchSequence('not-a-magic-host', { port: 19001, dshPath: '/usr/bin/dsh' }, { local: true });
   assert.equal(localLaunch.fingerprint, fingerprint);
   assert.equal((await stopRemote(
     'not-a-magic-host',
@@ -162,6 +162,7 @@ test('launcher：LAUNCH/POLL/VERIFY/STOP/LOG 按 local 选运输且模板逐字�
     buildLaunchScript({
       logName: 'web-19001.log',
       port: 19001,
+      dshPath: '/usr/bin/dsh',
       env: {},
       extraArgs: [],
       patchRemoteNames: [],
@@ -175,7 +176,7 @@ test('launcher：LAUNCH/POLL/VERIFY/STOP/LOG 按 local 选运输且模板逐字�
   assert.deepEqual(fixture.calls('local').map(commandOf), expected);
 
   fixture.clear('local');
-  const remoteLaunch = await runLaunchSequence('gpu-1', { port: 19001 }, { local: false });
+  const remoteLaunch = await runLaunchSequence('gpu-1', { port: 19001, dshPath: '/usr/bin/dsh' }, { local: false });
   await stopRemote('gpu-1', { pid: remoteLaunch.pid, fingerprint }, { local: false });
   await tailRemoteLog('gpu-1', { logName: remoteLaunch.logName, lines: 7 }, { local: false });
 
@@ -371,7 +372,7 @@ test('runLaunchSequence：落地目录创建失败保留原始诊断，不误报
   _setWait(() => Promise.resolve());
 
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 19001 }),
+    () => runLaunchSequence('gpu-1', { port: 19001, dshPath: '/usr/bin/dsh' }),
     (err) => err?.code === 'LAUNCH_FAILED'
       && /无法创建落地目录/.test(err.message)
       && /ERR=mkdir/.test(err.detail),
@@ -385,7 +386,7 @@ test('runLaunchSequence：LAUNCH 缺 PID 时快败并附日志', async (t) => {
   _setWait(() => Promise.resolve());
 
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 19001 }),
+    () => runLaunchSequence('gpu-1', { port: 19001, dshPath: '/usr/bin/dsh' }),
     (err) => err?.code === 'LAUNCH_FAILED'
       && /未返回 PID/.test(err.message)
       && /demo-log/.test(err.detail),
@@ -401,7 +402,7 @@ test('runLaunchSequence：POLL 运输失败时清孤儿；复核与取日志再�
   _setWait(() => Promise.resolve());
 
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 19001 }),
+    () => runLaunchSequence('gpu-1', { port: 19001, dshPath: '/usr/bin/dsh' }),
     (err) => err?.code === 'LAUNCH_FAILED'
       && /拉起轮询/.test(err.message)
       && /取日志失败/.test(err.detail),
