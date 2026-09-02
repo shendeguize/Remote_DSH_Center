@@ -50,6 +50,7 @@
 | PROBE 不把 Center 派给别台的 `ssh … sh -c '<探测脚本>'` 记成手动实例（本机幻影：判据要求 `dsh web` 相邻；假 `ps` 回放兄弟 ssh 行，且判据取自协议模板而非手写对译） | `tests/harness/harness.test.js`、`tests/lib/proto.test.js` §1.1（含真 `ps`/`grep` 上的布陷阱验证） |
 | LISTEN=unknown（远端无 ss）不作否定证据 | `tests/harness/harness.test.js`（no-ss） |
 | LAUNCH 模板逐字一致 + 双层转义算例 + `sh -n` 语法 | `tests/lib/proto.test.js` §1.2 |
+| LAUNCH 必须带探测解析出的绝对路径：缺路径拒绝拼装（不退回裸 `dsh` 走 PATH 查找）、路径与其 bin 目录一并抵达远端命令行；假远端照 nohup 那样对找不到的命令失败 | `tests/lib/proto.test.js` §1.2、`tests/fuzz/proto.test.js`、`tests/harness/harness.test.js`（canon 装法拉起 + 漏传即拒）、`tests/integration/flows.test.js`（`SCN:canon-login-only` 端到端） |
 | LAUNCH `--patch` 紧跟 `web`（启动器旗标顺序） | `tests/lib/proto.test.js` §1.2、IT-09 |
 | LAUNCH 注入 env / extraArgs 抵达远端命令行与指纹 | `tests/harness/harness.test.js`、`tests/integration/flows.test.js`、IT-09 |
 | LAUNCH `workdir=null` 时模板逐字不含 cd（回归锁） | `tests/lib/proto.test.js` §1.2、`tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
@@ -143,6 +144,7 @@
 | `SCN:settings-change-before-second-cas` | `tests/integration/settings.test.js`（backup 后外部改写，二次 CAS 拒绝覆盖） |
 | `SCN:no-dsh-missing-bin` | `tests/harness/harness.test.js`、`tests/integration/flows.test.js` |
 | `SCN:no-dsh-unusual-path` | `tests/harness/harness.test.js`、`tests/integration/cli.test.js` |
+| `SCN:canon-login-only` | `tests/integration/flows.test.js`（dsh 只在 canon 目录、不在非交互 PATH：start 必须用探测解析出的绝对路径） |
 | `SCN:no-dsh-no-profile` | 同上 |
 | `SCN:unreachable` | 同上 + IT-01 |
 | `SCN:hostkey-fail` | `tests/harness/harness.test.js` |

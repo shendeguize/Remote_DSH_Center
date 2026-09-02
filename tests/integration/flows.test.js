@@ -100,6 +100,25 @@ test('启动即崩：S2 快败（不等满 5 拍），回滚 ready', async (t) =
   assert.equal((await waitPhase(ctx, 'gpu-1', 'ready')).phase, 'ready');
 });
 
+test('canon 装法（dsh 不在非交互 PATH）：start 用探测解析出的绝对路径，一次成功', async (t) => {
+  // 真机故障回归：探测把 /root/.canon/node/bin/dsh 解析得明明白白，但拉起那一层
+  // 把路径丢了，模板退化成裸 `dsh`，远端日志只留一行
+  // `nohup: failed to run command 'dsh': No such file or directory`。
+  const ctx = await bootServer(t, { hosts: { canon: SCENARIOS['canon-login-only']() } });
+  const events = await ctx.sse();
+
+  const ready = await waitPhase(ctx, 'canon', 'ready');
+  assert.equal(ready.probe.dshPath, '/root/.canon/node/bin/dsh');
+
+  const started = await ctx.api('POST', '/api/hosts/canon/start');
+  const done = await events.wait((f) => f.type === 'operation-done' && f.data.operationId === started.json.operationId);
+  assert.equal(done.data.status, 'ok', done.data.error ?? '');
+
+  const view = await waitPhase(ctx, 'canon', 'running');
+  assert.equal(ctx.harness.liveProcesses('canon').length, 1, '远端进程真的起来了');
+  assert.ok(view.web.pid > 0);
+});
+
 test('停止的不误杀：指纹不符 → KILL_REFUSED，state 与远端进程都不动', async (t) => {
   const ctx = await bootServer(t);
   const events = await ctx.sse();

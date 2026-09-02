@@ -22,25 +22,27 @@ import { canaryVerdict } from './oracle.js';
 
 const run = promisify(execFile);
 const LOG_NAME = 'web-8899.log';
+/** 拉起协议要求已解析绝对路径；语料打的是注入点，路径本身固定。 */
+const DSH_PATH = '/usr/bin/dsh';
 
 /** 语料的注入点 → 真实构建调用。加注入点要同时在这里落地。 */
 export function buildFor(entry) {
   const payload = entry.payload;
   switch (entry.entry) {
     case 'inject.env.value':
-      return buildLaunchScript({ logName: LOG_NAME, port: 8899, env: { CANARY: payload } });
+      return buildLaunchScript({ logName: LOG_NAME, port: 8899, dshPath: DSH_PATH, env: { CANARY: payload } });
     case 'inject.env.key':
-      return buildLaunchScript({ logName: LOG_NAME, port: 8899, env: { [payload]: 'v' } });
+      return buildLaunchScript({ logName: LOG_NAME, port: 8899, dshPath: DSH_PATH, env: { [payload]: 'v' } });
     case 'inject.extraArgs':
-      return buildLaunchScript({ logName: LOG_NAME, port: 8899, extraArgs: [payload] });
+      return buildLaunchScript({ logName: LOG_NAME, port: 8899, dshPath: DSH_PATH, extraArgs: [payload] });
     case 'workdir':
-      return buildLaunchScript({ logName: LOG_NAME, port: 8899, workdir: payload });
+      return buildLaunchScript({ logName: LOG_NAME, port: 8899, dshPath: DSH_PATH, workdir: payload });
     case 'patch.remoteName':
-      return buildLaunchScript({ logName: LOG_NAME, port: 8899, patchRemoteNames: [payload] });
+      return buildLaunchScript({ logName: LOG_NAME, port: 8899, dshPath: DSH_PATH, patchRemoteNames: [payload] });
     case 'logName':
-      return buildLaunchScript({ logName: payload, port: 8899 });
+      return buildLaunchScript({ logName: payload, port: 8899, dshPath: DSH_PATH });
     case 'port':
-      return buildLaunchScript({ logName: LOG_NAME, port: payload });
+      return buildLaunchScript({ logName: LOG_NAME, port: payload, dshPath: DSH_PATH });
     case 'cleanup.keepNames':
       return buildPatchCleanupScript({ keepNames: [payload] });
     case 'stop.fingerprint':

@@ -180,6 +180,7 @@ function protoBuild() {
     bytes += buildLaunchScript({
       logName: `web-${i % 7}.log`,
       port: 8899,
+      dshPath: '/root/.canon/node/bin/dsh',
       env,
       patchRemoteNames,
       extraArgs,

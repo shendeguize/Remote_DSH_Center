@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 拉起真的会用探测解析出的 dsh 绝对路径了。`runLaunchSequence` 重拼内部 spec 时把
+  `dshPath` 漏掉了一层，模板于是退回裸 `dsh` 交给 PATH 查找——canon 那类装法
+  （`$HOME/.canon/node/bin`）不在非交互 SSH 的 PATH 里，远端日志只留一行
+  `nohup: failed to run command 'dsh': No such file or directory`，页面上表现为
+  「远端进程启动后立即退出」。dsh 装在 PATH 里的主机不受影响，这也是它此前没被发现的
+  原因。
+- 拉起模板不再接受「省略 dsh 路径」：缺路径直接 VALIDATION 拒绝拼装，不再静默降级成
+  PATH 查找。此前那条兼容形态正是上面那次漏传能一路跑到真机才现形的原因。
+
 ## [0.9.1] - 2026-09-01
 
 ### 修复

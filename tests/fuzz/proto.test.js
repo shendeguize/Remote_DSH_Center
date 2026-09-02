@@ -21,7 +21,7 @@ import {
   buildLaunchScript, buildLogTailScript, buildPatchCleanupScript, buildStopScript,
   buildVerifyScript, kvOne, parseProtoOutput,
 } from '../../src/lib/proto.js';
-import { isWorkdirPath } from '../../src/lib/shq.js';
+import { isWorkdirPath, shq } from '../../src/lib/shq.js';
 import { canaryVerdict } from '../adversarial/oracle.js';
 import { createHarness } from '../harness/index.js';
 import { dispatchProtocol } from '../harness/fake-ssh.js';
@@ -95,9 +95,21 @@ function gen(rng) {
     [1, ['~', null]],
   ]);
 
+  // dsh 路径与 workdir 同类：构建期就该拒的（相对、空、带换行）必须拒，该收的必须
+  // 逐字落进模板并把所在目录并入 PATH——真机故障正出在这条路径上（曾经缺就退回裸 dsh）。
+  const dshTail = nextTagged(10);
+  const dshPath = rng.pickWeighted([
+    [4, '/usr/bin/dsh'],
+    [3, `/root/.canon/node/bin/${dshTail}/dsh`],
+    [1, 'dsh'],
+    [1, ''],
+    [1, '/bin/d\nsh'],
+  ]);
+
   return {
     logName: safeName(rng),
     port: rng.bool(0.15) ? 0 : rng.int(1, 65_535),
+    dshPath,
     env,
     patches,
     extraArgs,
@@ -135,11 +147,18 @@ function checkLaunch(input, bodies) {
   const build = () => buildLaunchScript({
     logName: input.logName,
     port: input.port,
+    dshPath: input.dshPath,
     env: input.env,
     patchRemoteNames: input.patches,
     extraArgs: input.extraArgs,
     workdir: input.workdir,
   });
+
+  // dsh 路径先于 workdir 校验：缺路径或非绝对路径一律拒绝拼装，绝不退回 PATH 查找
+  if (!/^\/[^\0\r\n]*$/u.test(input.dshPath)) {
+    assert.throws(build, (error) => error?.code === 'VALIDATION', `非法 dshPath 没被拦：${JSON.stringify(input.dshPath)}`);
+    return;
+  }
 
   // workdir 是唯一在构建期就可能被拒的注入点（相对路径、空串、含换行/NUL）。
   // 「该拒的一定拒、拒了就绝不落进模板」和「该收的一定收」是同一条性质的两面。
@@ -153,6 +172,20 @@ function checkLaunch(input, bodies) {
 
   // 端口是**不转义**拼进去的，所以模板里出现的必须是纯数字
   assert.match(body, /--port (?:0|[1-9][0-9]*)(?: |$)/u, `LAUNCH 的端口位不是纯数字：${body}`);
+
+  // 已解析路径必须真被用上：命令词是它，且它的 bin 目录并进 PATH（dsh 常是
+  // `#!/usr/bin/env node`，解释器与它同住一个目录）。
+  // 这里不走 canaryVerdict：路径本身就落在 `PATH=…` 赋值这个「命令位」上，通用判据
+  // 会一律判逃逸；而赋值右侧是 shq 引号包着的，安全性由 shq 的逐字测试盯。
+  const dir = input.dshPath.slice(0, input.dshPath.lastIndexOf('/')) || '/';
+  assert.ok(
+    body.includes(`${shq(input.dshPath)} web`),
+    `命令词不是已解析路径（漏传就会退回裸 dsh 走 PATH 查找）：${body}`,
+  );
+  assert.ok(
+    body.includes(`PATH=${shq(dir)}:"$PATH"; export PATH; nohup `),
+    `缺 PATH 前置或形状不符：${body}`,
+  );
 
   for (const [key, value] of Object.entries(input.env)) {
     assertContained(body, value, { surface: 'launch-argv', entry: 'inject.env.value' });

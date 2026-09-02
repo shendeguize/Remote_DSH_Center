@@ -1613,7 +1613,8 @@ async function main() {
         // eslint-disable-next-line no-await-in-loop -- 逐个占端口再拉起
         const port = await pickPort(43_000);
         // eslint-disable-next-line no-await-in-loop -- 同上；manager 不知情，正是「手动实例」
-        const res = await launcher.runLaunchSequence(host, { port });
+        // 假远端的 dsh 装在 /usr/bin/dsh；拉起协议要已解析绝对路径，缺了即 VALIDATION
+        const res = await launcher.runLaunchSequence(host, { port, dshPath: '/usr/bin/dsh' });
         manual.push({ pid: res.pid, port: res.actualPort });
       }
       await rig.api('POST', `/api/hosts/${host}/probe`);

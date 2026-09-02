@@ -31,6 +31,14 @@ import { syncPatches } from '../../src/patchsync.js';
 /** 拉起协议的 POLL 节奏在测试里压到最小，避免真等 9 秒。 */
 _setWait((ms) => new Promise((r) => { setTimeout(r, Math.min(ms, 20)); }));
 
+/**
+ * 假远端 gpu-1 的 dsh 装在 /usr/bin/dsh（`newHostState` 的缺省）。拉起协议要求已解析
+ * 的绝对路径，缺了即 VALIDATION——各用例的被测对象不是这条路径，故统一在此带上；
+ * 「路径是否真抵达远端命令行」由专门的用例直接调 runLaunchSequence 来断言。
+ */
+const RESOLVED_DSH = '/usr/bin/dsh';
+const launchWithResolvedDsh = (host, spec = {}, opts) => runLaunchSequence(host, { dshPath: RESOLVED_DSH, ...spec }, opts);
+
 function harnessFixture(t, hosts) {
   const h = createHarness(hosts ? { hosts } : undefined);
   const restore = h.activate();
@@ -116,7 +124,7 @@ test('conn-timeout 场景触发 sshExec 强杀链', async (t) => {
 test('LAUNCH → POLL → VERIFY 全路径：拿到实际端口、指纹、真实可连的假 dsh web', async (t) => {
   const h = harnessFixture(t);
 
-  const r = await runLaunchSequence('gpu-1', { port: 18899 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18899 });
   assert.equal(r.actualPort, 18899, '固定端口拉起');
   assert.equal(r.logName, 'web-18899.log');
   assert.equal(r.fingerprint, 'dsh web --no-open --host 127.0.0.1 --port 18899');
@@ -141,9 +149,52 @@ test('LAUNCH → POLL → VERIFY 全路径：拿到实际端口、指纹、真�
   assert.match(log, /dsh web: http:\/\/127\.0\.0\.1:18899/);
 });
 
+test('LAUNCH 用探测解析出的绝对路径，canon 那类不在非交互 PATH 的装法也拉得起来', async (t) => {
+  // canon 把 dsh 装进 $HOME/.canon/node/bin：只有交互 rc 会把它并入 PATH，
+  // 非交互 SSH 的 PATH 里没有。真机上 start 因此必然失败在
+  // `nohup: failed to run command 'dsh'`——路径漏传一层就退化成 PATH 查找。
+  const h = harnessFixture(t, {
+    canon: newHostState({
+      dshPath: '/root/.canon/node/bin/dsh',
+      probePath: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      dshSniffPaths: ['/root/.canon/node/bin/dsh'],
+      dshLoginPath: '/root/.canon/node/bin/dsh',
+      dshSniffVersion: '0.1.1-rc.2',
+    }),
+  });
+
+  const probe = await probeOnce('canon');
+  assert.equal(probe.phase, 'ready');
+  assert.equal(probe.dshPath, '/root/.canon/node/bin/dsh', '探测要解析出绝对路径');
+
+  const r = await runLaunchSequence('canon', { port: 18923, dshPath: probe.dshPath });
+  assert.equal(r.actualPort, 18923);
+  assert.equal(h.liveProcesses('canon').length, 1, '进程真的起来了，而不是 nohup 找不到命令');
+
+  const log = await tailRemoteLog('canon', { logName: r.logName, lines: 50 });
+  assert.doesNotMatch(log, /failed to run command/, `日志里不该有 nohup 找不到命令：\n${log}`);
+});
+
+test('LAUNCH 漏传 dshPath 直接拒绝拼装，不退化成 PATH 查找（真机故障回归）', async (t) => {
+  harnessFixture(t, {
+    canon: newHostState({
+      dshPath: '/root/.canon/node/bin/dsh',
+      probePath: '/usr/bin:/bin',
+      dshLoginPath: '/root/.canon/node/bin/dsh',
+    }),
+  });
+
+  // 曾经的形态：缺路径 → 模板用裸 `dsh` → 假远端照 nohup 那样找不到命令 →
+  // 「远端进程启动后立即退出」。现在在拼装阶段就被挡住，故障不再要真机才现形。
+  await assert.rejects(
+    () => runLaunchSequence('canon', { port: 18924 }),
+    (err) => err.code === 'LAUNCH_FAILED' && /缺少已解析的 dsh 绝对路径/.test(err.message),
+  );
+});
+
 test('注入值（env / extraArgs / patch）进入远端命令行与指纹', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', {
+  const r = await launchWithResolvedDsh('gpu-1', {
     port: 18901,
     env: { GREETING: "hi 'there'" },
     extraArgs: ['--verbose', 'x; rm -rf ~'],
@@ -161,7 +212,7 @@ test('bind-busy-once：降级 --port 0 重拉，actualPort 为 OS 分配值，lo
   const h = harnessFixture(t);
   h.scenario('gpu-1', 'bind-busy-once');
 
-  const r = await runLaunchSequence('gpu-1', { port: 18902 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18902 });
   assert.notEqual(r.actualPort, 18902);
   assert.ok(r.actualPort > 0 && r.actualPort <= 65535);
   assert.match(r.logName, /^web-auto-[a-z0-9]+\.log$/);
@@ -173,7 +224,7 @@ test('bind-busy-twice：两次失败 → LAUNCH_FAILED，detail 含两份日志�
   h.scenario('gpu-1', 'bind-busy-twice');
 
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 18903 }),
+    () => launchWithResolvedDsh('gpu-1', { port: 18903 }),
     (err) => {
       assert.equal(err.code, 'LAUNCH_FAILED');
       assert.match(err.detail, /第 1 次拉起/);
@@ -191,7 +242,7 @@ test('launch-dies：进程启动即崩 → 快败（不等满 5 拍）', async (
 
   const started = Date.now();
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 18913 }),
+    () => launchWithResolvedDsh('gpu-1', { port: 18913 }),
     (err) => {
       assert.equal(err.code, 'LAUNCH_FAILED');
       assert.match(err.message, /立即退出/);
@@ -206,17 +257,17 @@ test('launch-dies：进程启动即崩 → 快败（不等满 5 拍）', async (
 test('workdir：cd 段抵达假远端，绝对路径与 ~ 都还原为远端真实路径', async (t) => {
   const h = harnessFixture(t);
 
-  await runLaunchSequence('gpu-1', { port: 18914, workdir: '/root/my proj' });
+  await launchWithResolvedDsh('gpu-1', { port: 18914, workdir: '/root/my proj' });
   assert.equal(h.hostState('gpu-1').workdir, '/root/my proj', '空格不该被 shell 分词');
   assert.equal(h.liveProcesses('gpu-1')[0].workdir, '/root/my proj');
 
-  await runLaunchSequence('gpu-1', { port: 18915, workdir: '~/proj' });
+  await launchWithResolvedDsh('gpu-1', { port: 18915, workdir: '~/proj' });
   assert.equal(h.hostState('gpu-1').workdir, '/root/proj', '~ 由远端展开，不在 manager 侧拼');
 });
 
 test('workdir=null：脚本无 cd 段，引擎记录 null（回归锁）', async (t) => {
   const h = harnessFixture(t);
-  await runLaunchSequence('gpu-1', { port: 18916 });
+  await launchWithResolvedDsh('gpu-1', { port: 18916 });
   assert.equal(h.hostState('gpu-1').workdir, null);
 });
 
@@ -225,7 +276,7 @@ test('workdir-missing 场景：ERR=workdir + 退出码 8 → LAUNCH_FAILED（不
   h.scenario('gpu-1', 'workdir-missing');
 
   await assert.rejects(
-    () => runLaunchSequence('gpu-1', { port: 18917, workdir: '/no/such/dir' }),
+    () => launchWithResolvedDsh('gpu-1', { port: 18917, workdir: '/no/such/dir' }),
     (err) => {
       assert.equal(err.code, 'LAUNCH_FAILED', '退出码 8 不该被归成 SSH_UNREACHABLE');
       assert.match(err.message, /工作目录不存在或不可进入/);
@@ -239,13 +290,13 @@ test('workdir-missing 场景：ERR=workdir + 退出码 8 → LAUNCH_FAILED（不
 test('workdir-missing 场景对 workdir=null 无效（没有 cd 就没有 cd 失败）', async (t) => {
   const h = harnessFixture(t);
   h.scenario('gpu-1', 'workdir-missing');
-  const r = await runLaunchSequence('gpu-1', { port: 18918 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18918 });
   assert.equal(r.actualPort, 18918);
 });
 
 test('STOP：指纹全等 → term；再停一次 → already-dead', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18904 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18904 });
 
   const stop1 = await stopRemote('gpu-1', { pid: r.pid, fingerprint: r.fingerprint });
   assert.ok(['term', 'force'].includes(stop1.killed));
@@ -257,7 +308,7 @@ test('STOP：指纹全等 → term；再停一次 → already-dead', async (t) =
 
 test('pid-reuse：指纹不符 → KILLED=no 且进程不死（不误杀）', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18905 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18905 });
   h.reusePid('gpu-1', 'dsh web --no-open --host 127.0.0.1 --port 9999');
 
   const stop = await stopRemote('gpu-1', { pid: r.pid, fingerprint: r.fingerprint });
@@ -269,7 +320,7 @@ test('pid-reuse：指纹不符 → KILLED=no 且进程不死（不误杀）', as
 
 test('remote-crash：VERIFY 得 ALIVE=no', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18906 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18906 });
   h.crash('gpu-1');
 
   const v = await verifyRemote('gpu-1', { pid: r.pid, port: r.actualPort, fingerprint: r.fingerprint });
@@ -279,7 +330,7 @@ test('remote-crash：VERIFY 得 ALIVE=no', async (t) => {
 
 test('captureFingerprint 在进程已死时抛 LAUNCH_FAILED', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18907 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18907 });
   h.crash('gpu-1');
   await assert.rejects(
     () => captureFingerprint('gpu-1', { pid: r.pid, port: r.actualPort }),
@@ -290,21 +341,21 @@ test('captureFingerprint 在进程已死时抛 LAUNCH_FAILED', async (t) => {
 test('VERIFY 回带 CWD：反映实际工作目录，不可读时降级为 null', async (t) => {
   const h = harnessFixture(t);
 
-  const withWd = await runLaunchSequence('gpu-1', { port: 18919, workdir: '~/proj' });
+  const withWd = await launchWithResolvedDsh('gpu-1', { port: 18919, workdir: '~/proj' });
   assert.equal(withWd.cwd, '/root/proj', '拉起时顺带取回，不多花一趟 ssh');
 
-  const bare = await runLaunchSequence('gpu-1', { port: 18920 });
+  const bare = await launchWithResolvedDsh('gpu-1', { port: 18920 });
   assert.equal(bare.cwd, '/root', '无 cd 段时就是远端家目录');
 
   h.scenario('gpu-1', 'no-proc-cwd');
-  const blind = await runLaunchSequence('gpu-1', { port: 18921, workdir: '/root/proj' });
+  const blind = await launchWithResolvedDsh('gpu-1', { port: 18921, workdir: '/root/proj' });
   assert.equal(blind.cwd, null, 'CWD=unknown 归 null，绝不当成失败');
   assert.ok(blind.pid > 0, '拿不到 cwd 不影响拉起成功');
 });
 
 test('CWD 不进不误杀判据：cwd 变了照样按指纹停掉', async (t) => {
   const h = harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18922, workdir: '/root/proj' });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18922, workdir: '/root/proj' });
 
   h.faults('gpu-1', { noProcCwd: true }); // 复核拿不到 cwd（进程登记不动）
   const v = await verifyRemote('gpu-1', { pid: r.pid, port: r.actualPort, fingerprint: r.fingerprint });
@@ -316,7 +367,7 @@ test('CWD 不进不误杀判据：cwd 变了照样按指纹停掉', async (t) =>
 test('no-ss 场景：LISTEN=unknown 不作否定证据', async (t) => {
   const h = harnessFixture(t);
   h.scenario('gpu-1', 'no-ss');
-  const r = await runLaunchSequence('gpu-1', { port: 18908 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18908 });
   const v = await verifyRemote('gpu-1', { pid: r.pid, port: r.actualPort, fingerprint: r.fingerprint });
   assert.equal(v.listen, 'unknown');
   assert.equal(v.alive, true);
@@ -377,7 +428,7 @@ test('scp-fail 场景：整个同步快败', async (t) => {
 
 test('探测发现手动实例（RUNNING_DSH_WEB 块 → manualInstances）', async (t) => {
   harnessFixture(t);
-  const r = await runLaunchSequence('gpu-1', { port: 18909 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18909 });
 
   const result = await probeOnce('gpu-1');
   assert.equal(result.phase, 'ready');
@@ -412,7 +463,7 @@ test('探测不把 Center 派给别台的 ssh 探测记成手动实例（本机�
   // 手动实例，一轮 14 台的探测能在本机凭空变出五个，且因为 manualInstances 非空，
   // 本机的一步拉起会被 ADOPTION_AVAILABLE 拦成领养对话框——而那几行还按不动。
   // 垫片按 psMatches 回放这类旁观进程，判据直接取自协议模板。
-  const r = await runLaunchSequence('gpu-1', { port: 18911 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18911 });
   const result = await probeOnce('gpu-1');
 
   assert.deepEqual(
@@ -493,7 +544,7 @@ test('账本每次调用记两行：begin 与 end 成对、id 一致、顺序即
 test('隧道垫片：ssh -N -L 转发到假 dsh web，杀垫片即隧道断', async (t) => {
   harnessFixture(t);
   const { spawn } = await import('node:child_process');
-  const r = await runLaunchSequence('gpu-1', { port: 18910 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 18910 });
 
   const localPort = 27910;
   const child = spawn(process.execPath, [
@@ -570,7 +621,7 @@ test('孤儿看护：装置拥有者进程没了，假 dsh web 自己退（打�
   // 拉起这一趟成不成不是本条的判据（issue #102）。看护每 500ms 自查一次，而 CI runner
   // 上一趟拉起就要近 1s——看护完全可能赶在 VERIFY 之前把垫片收走，于是 captureFingerprint
   // 抛 LAUNCH_FAILED。那恰恰说明看护在工作，此前却让本例本机绿、CI 红。
-  await runLaunchSequence('gpu-1', { port: 0 }).catch((err) => {
+  await launchWithResolvedDsh('gpu-1', { port: 0 }).catch((err) => {
     if (err.code !== 'LAUNCH_FAILED') throw err;
   });
   const [pid] = Object.keys(h.hostState('gpu-1').processes);
@@ -583,7 +634,7 @@ test('孤儿看护：装置拥有者进程没了，假 dsh web 自己退（打�
 test('孤儿看护不误杀：拥有者还活着，假 dsh web 照常服务', async (t) => {
   const h = harnessFixture(t);
 
-  const r = await runLaunchSequence('gpu-1', { port: 0 });
+  const r = await launchWithResolvedDsh('gpu-1', { port: 0 });
   const [pid] = Object.keys(h.hostState('gpu-1').processes);
 
   await new Promise((res) => { setTimeout(res, 1_500); });
