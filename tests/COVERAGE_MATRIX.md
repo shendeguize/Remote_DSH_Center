@@ -307,6 +307,7 @@
 | 跨站防线：环回名判定、同源放行（含不带 Origin 的 CLI）、跨站各形态（换协议/换端口/`null`/非 URL/子域名障眼法）、Host 先判、不回显攻击者域名；集成侧验「跨站 start 被拒且主机确实没被拉起」与「非环回 Host 连 `/`、`/app.js` 一起拒」 | `tests/lib/origin-guard.test.js`、`tests/integration/security.test.js` |
 | 按住期间不重建：鼠标与 Space 的原生激活都在抬起那一刻且要求同一个节点，按住期间表格必须一个节点都不动，松手后又必须追上（松手当场刷也不行——click 在 pointerup 之后才派发，当场重建会把这一次点击掐掉） | S4f、`tests/web/mount.test.js` |
 | 批量同步真键盘链路：打开后聚焦源选择，preview/apply 真请求，secret 不进 dialog 的文本、任意 attribute、动态表单 value 或递归可见的 open shadow root（closed shadow 保持浏览器边界）；360px 对话框与主要操作不越界，Escape 关闭并还焦 | S14、`tests/tooling.test.js`（S14 DOM 观测器）、`tests/integration/ui-live.test.js`、`tests/web/mount.test.js` |
+| 主机表每行的分隔线连成一条：真浏览器里逐行核对 7 个 `td` 的 `display` 与下边框、行内控件顶边（`display:flex` 写在 `td` 上会让那一格退出行高均衡，把行分隔线劈成错位两段；垫片没有排版引擎，只能守住 CSS 与 DOM 形状） | S16、`tests/web/layout.test.js`、`tests/web/mount.test.js` |
 | 60 次 Tab 不落进 `[hidden]` 子树 | S5 |
 | 标签页菜单 Shift+F10 / ArrowDown / Esc | S6 |
 | 真 iframe 跨 origin 取到远端 dsh web（200 + 帧树） | S7 |

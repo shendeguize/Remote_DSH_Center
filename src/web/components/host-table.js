@@ -282,7 +282,8 @@ export function createHostTable({ store, actions }) {
     ]));
 
     tr.append(el('td.autostart-cell', {}, [renderAutoStart(host)]));
-    tr.append(el('td.row-actions', {}, renderActions(host)));
+    // flex 只能落在格子里面：写在 td 上会让这一格退出表格行高均衡，行分隔线断成两段
+    tr.append(el('td.actions-cell', {}, [el('div.row-actions', {}, renderActions(host))]));
     return tr;
   }
 
