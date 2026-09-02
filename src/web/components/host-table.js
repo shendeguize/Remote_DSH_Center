@@ -11,7 +11,7 @@ import {
 import {
   hostDshSummary, hostMappingSummary, hostPhaseHint, hostPhaseMeta,
 } from '../host-presentation.js';
-import { hostActionSlots, isHostEnabled } from '../host-rules.js';
+import { hostActionSlots, isBlockedHost, isHostEnabled } from '../host-rules.js';
 import { field, input } from '../form.js';
 
 const COLUMNS = ['主机', '状态', 'dsh', '本机映射', 'PID', '自启', '操作'];
@@ -29,9 +29,15 @@ export const HOST_GROUPS = Object.freeze([
   }),
   Object.freeze({ id: 'unreachable', label: '不可达', phases: Object.freeze(['unreachable', 'unknown']) }),
   Object.freeze({ id: 'unmanaged', label: '未纳管', phases: Object.freeze([]) }),
+  // 名单挡下的主机：默认折起来收在最后一组，只留计数与一键清理（改名单在「全局默认」卡）
+  Object.freeze({ id: 'blocked', label: '已屏蔽', phases: Object.freeze([]) }),
 ]);
 
+/** 出厂就折起来的分组：屏蔽掉的主机是「不想看见」的，展开只为查证与清理。 */
+const DEFAULT_COLLAPSED = Object.freeze(['blocked']);
+
 export function hostGroupId(host) {
+  if (isBlockedHost(host)) return 'blocked';
   if (!isHostEnabled(host)) return 'unmanaged';
   if (host?.orphaned === true) return 'unreachable';
   return HOST_GROUPS.find((group) => group.phases.includes(host?.phase))?.id ?? 'unreachable';
@@ -65,11 +71,13 @@ export function sortHostViews(hosts, key = 'name', direction = 'asc') {
 const COLLAPSE_STORAGE_KEY = 'dshc.host-table.collapsed-groups';
 
 function loadCollapsedGroups() {
+  const ids = HOST_GROUPS.map(({ id }) => id);
   try {
     const parsed = JSON.parse(globalThis.localStorage?.getItem(COLLAPSE_STORAGE_KEY) ?? '{}');
-    return new Set(HOST_GROUPS.map(({ id }) => id).filter((id) => parsed?.[id] === true));
+    // 缺键才取默认值：用户把「已屏蔽」展开过就记住 false，下次别又替他折起来
+    return new Set(ids.filter((id) => parsed?.[id] ?? DEFAULT_COLLAPSED.includes(id)));
   } catch {
-    return new Set();
+    return new Set(DEFAULT_COLLAPSED);
   }
 }
 
@@ -77,7 +85,8 @@ function saveCollapsedGroups(collapsed) {
   try {
     globalThis.localStorage?.setItem(
       COLLAPSE_STORAGE_KEY,
-      JSON.stringify(Object.fromEntries([...collapsed].map((id) => [id, true]))),
+      // 显式写下每组的真假：默认折起的那组要能记住「用户展开过」
+      JSON.stringify(Object.fromEntries(HOST_GROUPS.map(({ id }) => [id, collapsed.has(id)]))),
     );
   } catch {
     // localStorage 不可用时折叠仍在当前页面内有效
@@ -105,11 +114,20 @@ export function createHostTable({ store, actions }) {
   clearOrphanedButton.classList.add('clear-orphaned');
   clearOrphanedButton.dataset.act = 'clear-orphaned';
   clearOrphanedButton.setAttribute('aria-label', '清空 orphaned 主机');
+  const clearBlockedButton = button('清理已屏蔽', {
+    variant: 'danger',
+    onClick: () => actions.clearBlocked(),
+  });
+  clearBlockedButton.classList.add('clear-blocked');
+  clearBlockedButton.dataset.act = 'clear-blocked';
+  clearBlockedButton.setAttribute('aria-label', '清理已屏蔽主机');
 
   const root = el('section.card.host-table-card', {}, [
     el('header.card-header', {}, [
       el('h2', { text: '主机' }),
-      el('div.row-actions', {}, [countLabel, clearOrphanedButton, localName.root, addLocalButton]),
+      el('div.row-actions', {}, [
+        countLabel, clearBlockedButton, clearOrphanedButton, localName.root, addLocalButton,
+      ]),
     ]),
     el('div.table-scroll', {}, [
       el('table.host-table', {}, [
@@ -188,6 +206,18 @@ export function createHostTable({ store, actions }) {
     clearOrphanedButton.title = orphanedCount === 0
       ? '没有需要清空的 orphaned 主机'
       : (!store.canWrite() ? '与 manager 失联，写操作已暂停' : '删除配置中的 orphaned 条目并清理运行记录');
+    // 没有被挡下的主机时整个按钮不出现：这是个偶发状态，常态下不该占着卡片头
+    const blocked = hosts.filter((host) => isBlockedHost(host));
+    clearBlockedButton.hidden = blocked.length === 0;
+    clearBlockedButton.textContent = `清理已屏蔽（${blocked.length}）`;
+    clearBlockedButton.disabled = blocked.length === 0
+      || !store.canWrite()
+      || store.isPending('blocked:clear');
+    clearBlockedButton.title = !store.canWrite()
+      ? '与 manager 失联，写操作已暂停'
+      : `删除配置中被名单挡下的条目（${
+        [...new Set(blocked.map((host) => host.blocked.pattern))].join('、')
+      }）；还在跑的会跳过`;
     localName.root.hidden = !showAddLocal;
     localName.input.disabled = addLocalDisabled;
     addLocalButton.hidden = !showAddLocal;
@@ -243,6 +273,9 @@ export function createHostTable({ store, actions }) {
         : (host.local ? null : el('small', { text: 'ssh config 中已消失' })),
       !host.local && host.orphaned
         ? el('span.tag.tag-warn', { text: 'orphaned', title: 'config 里还有，ssh config 里已不见' })
+        : null,
+      isBlockedHost(host)
+        ? el('span.tag.tag-warn', { text: '已屏蔽', title: `${host.blocked.reason}；改名单见「全局默认」` })
         : null,
     ]));
 

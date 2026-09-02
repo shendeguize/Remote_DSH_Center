@@ -4,6 +4,7 @@
  */
 
 import { DshError } from './errors.js';
+import { checkHostPattern, HOST_FILTER_LIMITS } from './host-filter.js';
 import { PHASES } from './machine.js';
 import { isWorkdirPath, SAFE_HOST_RE } from './shq.js';
 
@@ -251,10 +252,25 @@ const localPortRangeSchema = V.all(
   ),
 );
 
+/**
+ * 名单里的每条正则都由 host-filter 判形（含指数回溯的形状）。校验层就拒掉，
+ * 免得一条写坏的规则要么静默失效、要么在每次巡检里跑一遍炸弹。
+ */
+const hostPatternSchema = V.custom((v) => checkHostPattern(v) ?? true);
+const hostFilterSchema = V.obj(
+  {
+    allow: V.arr(hostPatternSchema, { max: HOST_FILTER_LIMITS.maxPatterns }),
+    deny: V.arr(hostPatternSchema, { max: HOST_FILTER_LIMITS.maxPatterns }),
+  },
+  { optional: ['allow', 'deny'] },
+);
+
+/** hostFilter 可缺省：老 config 由 store.migrateConfig 补齐，校验层不能因此拒绝启动。 */
 const defaultsSchema = V.obj({
   remoteWebPort: port,
   localPortRange: localPortRangeSchema,
-});
+  hostFilter: hostFilterSchema,
+}, { optional: ['hostFilter'] });
 const cleanupRulesSchema = V.arr(V.str({ pattern: CLEANUP_RULE_RE, max: 32 }));
 const cleanupSchema = V.obj({
   rules: cleanupRulesSchema,
@@ -387,9 +403,10 @@ export const defaultsPatchSchema = V.obj(
   {
     remoteWebPort: port,
     localPortRange: localPortRangeSchema,
+    hostFilter: hostFilterSchema,
     manager: V.obj({ port }),
   },
-  { optional: ['remoteWebPort', 'localPortRange', 'manager'] },
+  { optional: ['remoteWebPort', 'localPortRange', 'hostFilter', 'manager'] },
 );
 
 export { ENV_KEY_RE };

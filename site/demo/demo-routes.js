@@ -21,6 +21,7 @@ const TABLE = Object.freeze([
   ['PUT', /^\/api\/config\/defaults$/, 'defaults-put'],
   ['POST', /^\/api\/reload$/, 'reload'],
   ['POST', /^\/api\/hosts\/clear-orphaned$/, 'clear-orphaned'],
+  ['POST', /^\/api\/hosts\/clear-blocked$/, 'clear-blocked'],
   ['POST', /^\/api\/setup$/, 'setup'],
   ['POST', /^\/api\/hosts\/probe$/, 'probe-all'],
   ['POST', /^\/api\/hosts\/local$/, 'local-create'],
@@ -191,6 +192,7 @@ export function dispatch(manager, {
     case 'defaults-put': return { status: 200, json: manager.saveDefaults(body ?? {}) };
     case 'reload': return { status: 200, json: manager.reload() };
     case 'clear-orphaned': return { status: 200, json: manager.clearOrphaned() };
+    case 'clear-blocked': return { status: 200, json: manager.clearBlocked() };
     case 'setup': return { status: 200, json: manager.setup(body) };
     case 'manager-restart': throw notInDemo('重启 manager');
     case 'manager-shutdown': throw notInDemo('关停 manager');

@@ -5,7 +5,7 @@
  */
 
 import { CONFIG_SYNC_TARGET_LIMIT, HOST_WEB_RESTART_NOTICE } from '../actions.js';
-import { isHostEnabled } from '../host-rules.js';
+import { isHostEnabled, isHostRemoteUsable } from '../host-rules.js';
 import { button, clear, el } from '../utils.js';
 
 const FIELD_LABEL = Object.freeze({
@@ -154,7 +154,7 @@ export function createConfigSyncDialog({ store, actions }) {
       sourceSelect.append(el('option', {
         value: host.name,
         text: host.name,
-        disabled: !host.local && host.orphaned,
+        disabled: !isHostRemoteUsable(host),
       }));
     }
     sourceSelect.value = source;
@@ -171,7 +171,7 @@ export function createConfigSyncDialog({ store, actions }) {
         type: 'checkbox',
         dataset: { host: host.name },
         checked: targets.has(host.name),
-        disabled: host.name === source || (!host.local && host.orphaned),
+        disabled: host.name === source || !isHostRemoteUsable(host),
       });
       input.addEventListener('change', () => {
         if (input.checked && targets.size >= CONFIG_SYNC_TARGET_LIMIT) {
@@ -210,14 +210,14 @@ export function createConfigSyncDialog({ store, actions }) {
     const valid = new Set(names);
 
     const sourceHost = hostList.find((host) => host.name === source);
-    if (!sourceHost || (!sourceHost.local && sourceHost.orphaned)) {
-      source = hostList.find((host) => host.local || !host.orphaned)?.name ?? '';
+    if (!sourceHost || !isHostRemoteUsable(sourceHost)) {
+      source = hostList.find((host) => isHostRemoteUsable(host))?.name ?? '';
     }
     targets = new Set(
       previousTargets
         .filter((name) => {
           const host = hostList.find((item) => item.name === name);
-          return valid.has(name) && name !== source && (host?.local || !host?.orphaned);
+          return valid.has(name) && name !== source && isHostRemoteUsable(host);
         })
         .slice(0, CONFIG_SYNC_TARGET_LIMIT),
     );
@@ -245,7 +245,7 @@ export function createConfigSyncDialog({ store, actions }) {
       const host = store.getHost(input.dataset.host);
       input.disabled = pending
         || input.dataset.host === source
-        || (!host?.local && host?.orphaned);
+        || !isHostRemoteUsable(host);
     }
     previewBtn.disabled = pending || !canRequest;
     applyBtn.disabled = pending
@@ -258,7 +258,7 @@ export function createConfigSyncDialog({ store, actions }) {
   }
 
   function selectAll() {
-    const available = hosts().filter((host) => host.name !== source && (host.local || !host.orphaned));
+    const available = hosts().filter((host) => host.name !== source && isHostRemoteUsable(host));
     targets = new Set(available.slice(0, CONFIG_SYNC_TARGET_LIMIT).map((host) => host.name));
     invalidate('选择已变化，请重新预览。');
     if (available.length > CONFIG_SYNC_TARGET_LIMIT) {

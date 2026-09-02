@@ -24,8 +24,25 @@ export function isManagedHost(host) {
   return host?.web?.startedByUs === true;
 }
 
+export function isBlockedHost(host) {
+  return Boolean(host?.blocked) && host?.local !== true;
+}
+
+/**
+ * 「这台机器现在还能派 ssh 出去吗」。
+ *
+ * 本机永远算能（不走 ssh）；orphaned 是 ssh config 里没了，blocked 是名单不让碰——
+ * 两者都不该出现在配置同步、批量动作这类会真的连出去的入口里。
+ */
+export function isHostRemoteUsable(host) {
+  return host?.local === true || (host?.orphaned !== true && !isBlockedHost(host));
+}
+
 export function isPrimaryHost(host) {
-  return isHostEnabled(host) && !host?.orphaned && isPrimaryHostPhase(host?.phase);
+  return isHostEnabled(host)
+    && !host?.orphaned
+    && !isBlockedHost(host)
+    && isPrimaryHostPhase(host?.phase);
 }
 
 /** @param {Iterable<object>} hosts */
@@ -55,6 +72,11 @@ const ACTIONS = Object.freeze({
  * running 的竞态请求由 actions.js 判为「已自行恢复」。
  */
 export function allowedHostActions(host) {
+  // 被名单挡下的主机退出一切自动化，但「关停」得留着：真有实例在跑时，拒掉关停
+  // 就等于把那个进程扣在远端——只能先去改名单才停得掉，这不合理。
+  if (isBlockedHost(host)) {
+    return isManagedHost(host) ? Object.freeze(['open', 'stop']) : Object.freeze(['open']);
+  }
   if (host?.orphaned === true && host.local !== true) return Object.freeze(['open'])
   switch (host?.phase) {
     case 'ready':
@@ -94,6 +116,7 @@ const ROW_LAYOUT = Object.freeze({
 /** 禁用理由：写给「我明明看得见这个按钮，为什么按不动」的人。 */
 export function hostActionBlockReason(host, action) {
   if (isHostActionAllowed(host, action)) return null;
+  if (isBlockedHost(host)) return `${host.blocked.reason}，只保留打开/关停`;
   if (host?.orphaned === true && host.local !== true) return 'ssh config 已消失，远程动作已禁用';
   if ((action === 'stop' || action === 'restart') && host?.web && !isManagedHost(host)) {
     return '非本工具拉起，禁用关停/重启';
@@ -109,7 +132,7 @@ export function hostActionBlockReason(host, action) {
  */
 export function hostActionSlots(host) {
   // orphaned 主机整台都已出局（主机列有标记，且归到「不可达」组），不必摆一排按不动的按钮
-  const layout = host?.orphaned === true && host.local !== true
+  const layout = (host?.orphaned === true && host.local !== true) || isBlockedHost(host)
     ? allowedHostActions(host)
     : (ROW_LAYOUT[host?.phase] ?? ['probe']);
   return layout.map((action) => ({

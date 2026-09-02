@@ -377,14 +377,27 @@ function requireHost(name) {
   return view;
 }
 
-/** 远程动作的第二层门禁：SSH 条目消失时不能再碰远端。 */
-function requireRemoteHost(name, action) {
+/**
+ * 远程动作的第二层门禁：SSH 条目消失、或被名单挡下时不能再碰远端。
+ *
+ * `allowBlocked` 只留给关停：名单是「不纳管」的声明，不是「把跑着的进程扣在远端」。
+ * 挡下一台正在跑的主机后若连停都不许，用户就只能先去改名单才停得掉。
+ */
+function requireRemoteHost(name, action, { allowBlocked = false } = {}) {
   const view = requireHost(name);
   if (!view.local && view.orphaned) {
     throw new DshError(
       'NOT_ALLOWED',
       `主机 ${view.name} 的 ssh config 已消失，禁止${action}`,
       { host: view.name },
+    );
+  }
+  if (view.blocked && !allowBlocked) {
+    // 名单是「不纳管」的声明，不只是列表过滤：挡下的主机连一次 ssh 都不该被派出去
+    throw new DshError(
+      'NOT_ALLOWED',
+      `主机 ${view.name} 已被主机名单挡下（${view.blocked.reason}），禁止${action}`,
+      { host: view.name, detail: '要继续用它就把它从黑名单移除，或加进白名单。' },
     );
   }
   return view;
@@ -493,6 +506,14 @@ export function createHandler({ managerCtl }) {
       const removed = store.clearOrphanedHosts();
       await tunnel.closeUnconfigured();
       sendJson(res, 200, { removed });
+    }],
+
+    ['POST', /^\/api\/hosts\/clear-blocked$/, async (req, res, _groups, url) => {
+      rejectQuery(req, url);
+      // 还有活实例的一台都不动：名单是发现规则，不是关停命令（skipped 原样回给用户）
+      const { removed, skipped } = store.clearBlockedHosts();
+      await tunnel.closeUnconfigured();
+      sendJson(res, 200, { removed, skipped });
     }],
 
     ['GET', /^\/api\/config$/, (req, res) => {
@@ -637,6 +658,12 @@ export function createHandler({ managerCtl }) {
       store.updateConfig((draft) => {
         if ('remoteWebPort' in body) draft.defaults.remoteWebPort = body.remoteWebPort;
         if ('localPortRange' in body) draft.defaults.localPortRange = [...body.localPortRange];
+        if (body.hostFilter) {
+          // 只覆盖给出的那一半：页面只改黑名单时，白名单不该被顺手清空
+          draft.defaults.hostFilter ??= { allow: [], deny: [] };
+          if ('allow' in body.hostFilter) draft.defaults.hostFilter.allow = [...body.hostFilter.allow];
+          if ('deny' in body.hostFilter) draft.defaults.hostFilter.deny = [...body.hostFilter.deny];
+        }
         if (body.manager && 'port' in body.manager) draft.manager.port = body.manager.port;
       });
       const cfg = store.getConfig();
@@ -653,7 +680,7 @@ export function createHandler({ managerCtl }) {
       // 这一趟可能把某台主机从配置里去掉了。它的隧道此刻既看不见也停不掉，
       // 只能由 manager 自己收（issue #96）。
       await tunnel.closeUnconfigured();
-      sendJson(res, 200, { ...result, orphaned: ssh.orphaned });
+      sendJson(res, 200, { ...result, orphaned: ssh.orphaned, filtered: ssh.filtered ?? [] });
     }],
 
     ['POST', /^\/api\/setup$/, async (req, res) => {
@@ -716,7 +743,7 @@ export function createHandler({ managerCtl }) {
     }],
 
     ['POST', /^\/api\/hosts\/([^/]+)\/stop$/, (req, res, [name]) => {
-      const view = requireRemoteHost(decodeURIComponent(name), '关停');
+      const view = requireRemoteHost(decodeURIComponent(name), '关停', { allowBlocked: true });
       requireManaged(view, '关停');
       requirePhase(view, ['running', 'degraded'], '关停');
       accept(res, { host: view.name, action: 'stop' }, () => launcher.stop(view.name));

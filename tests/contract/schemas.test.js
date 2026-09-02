@@ -17,6 +17,7 @@ const HOST_VIEW = {
   local: false,
   sshInfo: { hostName: '10.0.0.1', user: 'root', port: 22 },
   orphaned: false,
+  blocked: null,
   config: {
     local: false,
     enabled: true,
@@ -79,6 +80,17 @@ test('多出一个顶层键即红（防悄悄扩容）', () => {
 test('缺省与 null 语义区分：可为 null 的键仍必须存在', () => {
   const nulled = { ...HOST_VIEW, probe: null, web: null, tunnel: null, sshInfo: null, mappedUrl: null };
   assert.equal(validate(hostView, nulled).ok, true);
+
+  const blocked = {
+    ...HOST_VIEW,
+    blocked: { rule: 'deny', pattern: 'git\\..*', reason: '命中黑名单 git\\..*' },
+  };
+  assert.equal(validate(hostView, blocked).ok, true, '被名单挡下时三件套齐全');
+  assert.equal(
+    validate(hostView, { ...HOST_VIEW, blocked: { rule: 'nope', pattern: 'x', reason: 'y' } }).ok,
+    false,
+    'rule 只有 allow/deny 两种',
+  );
 
   const missing = structuredClone(HOST_VIEW);
   delete missing.web;

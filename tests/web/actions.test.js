@@ -1671,3 +1671,61 @@ test('ready 打开以 config.enabled 为准，禁用项不触发 start', async (
   );
   assert.deepEqual(h.navigated, ['#/host/config-disabled', '#/host/config-enabled']);
 });
+
+test('清理已屏蔽：确认框点名命中的规则，成功后移出主机表并提示跳过的运行实例', async (t) => {
+  const h = harness(t, {
+    responder: ({ method, path }) => (
+      method === 'POST' && path === '/api/hosts/clear-blocked'
+        ? res(200, { removed: ['gpu-1'], skipped: ['github.com'] })
+        : res(404, { error: 'unexpected', code: 'NOT_FOUND' })
+    ),
+  });
+  seed(h.store, { blocked: { rule: 'deny', pattern: 'gpu-.*', reason: '命中黑名单 gpu-.*' } });
+
+  const result = await h.actions.clearBlocked();
+  assert.deepEqual(result.removed, ['gpu-1']);
+  assert.deepEqual(h.calls.map(({ method, path }) => [method, path]), [
+    ['POST', '/api/hosts/clear-blocked'],
+  ]);
+  assert.equal(h.store.getHost('gpu-1'), null);
+  // 确认框要写清「删的是 config 条目、不动 ssh config」，否则这一步看起来像在改用户的 ssh 配置
+  assert.equal(h.confirms.length, 1);
+  const confirmation = h.confirms[0].lines.join(' ');
+  assert.match(confirmation, /gpu-\.\*/u, '确认框要点名命中的规则');
+  assert.match(confirmation, /ssh config 一个字都不动/u);
+  // 有跳过的就得是 warn：静默成功会让人以为那台也清掉了
+  const toast = h.store.state.toasts.at(-1);
+  assert.equal(toast.level, 'warn');
+  assert.match(toast.summary, /已清理 1 台被屏蔽主机，1 台还在跑，跳过/u);
+  assert.match(toast.detail, /github\.com/u);
+});
+
+test('清理已屏蔽：没有被挡下的主机时不发请求也不弹确认框', async (t) => {
+  const h = harness(t, { responder: () => res(200, { removed: [], skipped: [] }) });
+  seed(h.store);
+
+  assert.equal(await h.actions.clearBlocked(), null);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.confirms.length, 0);
+});
+
+test('屏蔽主机的动作门禁：打开与关停放行，其余当场提示并不发请求', async (t) => {
+  const h = harness(t, { responder: () => res(202, { accepted: true, operationId: 'op-1' }) });
+  seed(h.store, {
+    phase: 'running',
+    web: { pid: 4242, port: 8899, startedByUs: true, startedAt: null },
+    blocked: { rule: 'deny', pattern: 'gpu-.*', reason: '命中黑名单 gpu-.*' },
+  });
+
+  // 关停必须放行：拒掉它就等于把远端那个进程扣死，只能改名单才停得掉
+  await h.actions.hostAction('stop', 'gpu-1');
+  assert.deepEqual(h.calls.map(({ path }) => path), ['/api/hosts/gpu-1/stop']);
+
+  for (const action of ['probe', 'start', 'restart', 'reconnect']) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个动作查门禁
+    assert.equal(await h.actions.hostAction(action, 'gpu-1'), null, action);
+    assert.equal(h.store.state.toasts.at(-1).level, 'warn');
+    assert.match(h.store.state.toasts.at(-1).summary, /命中黑名单 gpu-\.\*，已退出自动化/u);
+  }
+  assert.equal(h.calls.length, 1, '被挡下的动作一个请求都不许发出去');
+});

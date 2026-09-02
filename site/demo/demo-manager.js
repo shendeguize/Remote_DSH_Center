@@ -394,6 +394,7 @@ function assertSyncRequest(request) {
  */
 export function createFakeManager({
   machine,
+  hostFilter: hostFilterLib,
   timing = DEFAULT_TIMING,
   setupCompleted = true,
   // iframe 的 src 就是这个值：站内同源假页面，路径相对 /demo/ 上一级
@@ -569,6 +570,28 @@ export function createFakeManager({
     host.mappedUrl = mockUrl(host.name, localPort);
   }
 
+  /**
+   * 名单判定走**产品真身** src/lib/host-filter.js（经 `hostFilter` 注入，与 machine 同规矩）。
+   *
+   * 不在这儿手抄一份：抄的那份既会跟产品的语义漂移，又漏掉 ReDoS 判形——demo 的名单
+   * 输入框是公开可编辑的，敲一条 `(a+)+` 就能把访客的标签页挂死。
+   */
+  function compiledHostFilter() {
+    const filter = config.defaults.hostFilter ?? { allow: [], deny: [] };
+    return hostFilterLib.compileHostFilter(filter);
+  }
+
+  /** 名单一改就重算全表（产品侧由 store.recomputeBlocked 承担）。 */
+  function applyHostFilter() {
+    const matcher = compiledHostFilter();
+    for (const host of hosts.values()) {
+      const verdict = host.local ? null : matcher.match(host.name);
+      host.blocked = verdict
+        ? { ...verdict, reason: hostFilterLib.hostFilterReason(verdict) }
+        : null;
+    }
+  }
+
   function buildHost(seed, phase, { persistConfig = true } = {}) {
     const at = iso(now() - SEED_AGE_MS.probe);
     const local = seed.local === true;
@@ -586,6 +609,7 @@ export function createFakeManager({
       local,
       sshInfo: local ? null : { ...seed.sshInfo },
       orphaned: false,
+      blocked: null,
       config: hostConfig,
       phase,
       effectiveRemotePort: hostConfig.remoteWebPort ?? config.defaults.remoteWebPort,
@@ -631,6 +655,7 @@ export function createFakeManager({
     for (const seed of DEMO_HOSTS) {
       buildHost(seed, mode === 'setup' ? 'unknown' : seed.initial);
     }
+    applyHostFilter();
 
     if (mode === 'setup') {
       // 与产品 server 一致：setup 额外暴露恰好一台只驻内存的本机候选。
@@ -1151,6 +1176,29 @@ export function createFakeManager({
       config.defaults.remoteWebPort = patch.remoteWebPort;
       changed.push('defaults.remoteWebPort');
     }
+    if (patch.hostFilter !== undefined) {
+      config.defaults.hostFilter ??= { allow: [], deny: [] };
+      // 先按产品的校验判一遍：坏正则不许落进 config，否则下一次重算就带着它跑
+      const next = {
+        allow: [...(patch.hostFilter.allow ?? config.defaults.hostFilter.allow ?? [])],
+        deny: [...(patch.hostFilter.deny ?? config.defaults.hostFilter.deny ?? [])],
+      };
+      try {
+        hostFilterLib.compileHostFilter(next);
+      } catch (err) {
+        throw new FakeApiError(400, 'VALIDATION', err?.message ?? '主机名单不合法');
+      }
+      if (patch.hostFilter.allow !== undefined) {
+        config.defaults.hostFilter.allow = [...patch.hostFilter.allow];
+        changed.push('defaults.hostFilter.allow');
+      }
+      if (patch.hostFilter.deny !== undefined) {
+        config.defaults.hostFilter.deny = [...patch.hostFilter.deny];
+        changed.push('defaults.hostFilter.deny');
+      }
+      applyHostFilter();
+      for (const host of hosts.values()) bumpGen(host.name);
+    }
     if (patch.localPortRange !== undefined) {
       config.defaults.localPortRange = [...patch.localPortRange];
       changed.push('defaults.localPortRange');
@@ -1175,7 +1223,26 @@ export function createFakeManager({
   function reload() {
     gate();
     pushLog({ level: 'info', msg: '已重载配置（demo 中配置只存在内存里）' });
-    return { changed: [], orphaned: [...hosts.values()].filter((host) => host.orphaned).map((host) => host.name) };
+    return {
+      changed: [],
+      orphaned: [...hosts.values()].filter((host) => host.orphaned).map((host) => host.name),
+      filtered: [],
+    };
+  }
+
+  function clearBlocked() {
+    gate();
+    const live = new Set(['starting', 'running', 'degraded', 'stopping']);
+    const candidates = [...hosts.values()].filter((host) => host.blocked && !host.local);
+    const skipped = candidates.filter((host) => host.web || live.has(host.phase)).map((h) => h.name);
+    const removed = candidates.filter((host) => !skipped.includes(host.name)).map((h) => h.name);
+    for (const name of removed) {
+      bumpGen(name);
+      hosts.delete(name);
+      meta.delete(name);
+      delete config.hosts[name];
+    }
+    return { removed, skipped };
   }
 
   function clearOrphaned() {
@@ -1204,7 +1271,9 @@ export function createFakeManager({
       defaults: clone(submitted.defaults ?? config.defaults),
       hosts: {},
     };
+    config.defaults.hostFilter ??= clone(DEMO_DEFAULTS.hostFilter);
     gateOpen = true;
+    applyHostFilter();
 
     const autoStarts = [];
     for (const [name, hostCfg] of Object.entries(submitted.hosts ?? {})) {
@@ -1313,6 +1382,7 @@ export function createFakeManager({
     saveHostConfig,
     saveDefaults,
     reload,
+    clearBlocked,
     clearOrphaned,
     setup,
     createLocalHost,

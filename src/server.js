@@ -188,6 +188,7 @@ async function postSetupBoot() {
 async function recoverState() {
   const targets = store.listHostNames().filter((n) => (
     !store.getHostView(n)?.orphaned
+    && !store.getHostView(n)?.blocked
     && (
       ['running', 'degraded'].includes(store.getPhase(n))
       || (store.getPhase(n) === 'ready' && store.getHostState(n)?.web)
@@ -208,6 +209,7 @@ export async function runAutoStart() {
   const targets = store.listHostNames().filter((n) => {
     const host = cfg.hosts[n];
     return !store.getHostView(n)?.orphaned
+      && !store.getHostView(n)?.blocked
       && host?.enabled && host?.autoStart && store.getPhase(n) === 'ready';
   });
   if (targets.length === 0) return [];

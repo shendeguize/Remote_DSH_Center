@@ -4,6 +4,7 @@
     "local": true,
     "sshInfo": null,
     "orphaned": false,
+    "blocked": null,
     "config": {
       "local": true,
       "enabled": true,
@@ -27,7 +28,9 @@
       "profileWeb": true,
       "noDshReason": null,
       "sniff": {
-        "paths": ["/usr/local/bin/dsh"],
+        "paths": [
+          "/usr/local/bin/dsh"
+        ],
         "loginPath": null,
         "version": null,
         "probePath": "/usr/local/bin:/usr/bin:/bin"
@@ -51,6 +54,7 @@
       "port": 22
     },
     "orphaned": false,
+    "blocked": null,
     "config": {
       "local": false,
       "enabled": true,
@@ -98,6 +102,7 @@
       "port": 22
     },
     "orphaned": true,
+    "blocked": null,
     "config": {
       "local": false,
       "enabled": true,
@@ -121,7 +126,9 @@
       "profileWeb": true,
       "noDshReason": null,
       "sniff": {
-        "paths": ["/usr/bin/dsh"],
+        "paths": [
+          "/usr/bin/dsh"
+        ],
         "loginPath": null,
         "version": null,
         "probePath": "/usr/local/bin:/usr/bin:/bin"
@@ -145,6 +152,7 @@
       "port": 22
     },
     "orphaned": false,
+    "blocked": null,
     "config": {
       "local": false,
       "enabled": true,
@@ -168,7 +176,9 @@
       "profileWeb": true,
       "noDshReason": null,
       "sniff": {
-        "paths": ["/usr/bin/dsh"],
+        "paths": [
+          "/usr/bin/dsh"
+        ],
         "loginPath": null,
         "version": null,
         "probePath": "/usr/local/bin:/usr/bin:/bin"

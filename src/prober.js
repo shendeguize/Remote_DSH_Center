@@ -214,6 +214,9 @@ export async function probeHost(name) {
     if (!view.local && view.orphaned) {
       throw new DshError('NOT_ALLOWED', `主机 ${name} 的 ssh config 已消失，禁止探测`, { host: name });
     }
+    if (view.blocked) {
+      throw new DshError('NOT_ALLOWED', `主机 ${name} 已被主机名单挡下（${view.blocked.reason}），禁止探测`, { host: name });
+    }
     const local = view.local === true;
     const result = await probeOnce(name, { local, signal });
     applyProbe(name, result);
@@ -264,6 +267,7 @@ export function probeAll(names = null) {
     .filter((name) => {
       const view = store.getHostView(name);
       return view?.config?.enabled !== false
+        && !view?.blocked
         && (!view?.orphaned || view?.local);
     });
   // 有闸：主机一多，无闸的扇出会把共用跳板机的 MaxStartups 打爆（issue #85）

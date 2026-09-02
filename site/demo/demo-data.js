@@ -18,6 +18,20 @@ export const DEMO_MANAGER = Object.freeze({
 export const DEMO_DEFAULTS = Object.freeze({
   remoteWebPort: 8899,
   localPortRange: Object.freeze([17701, 17799]),
+  /** 与产品出厂表同一份名单（src/defaults.js）：demo 里也别把 git 入口当算力机 */
+  hostFilter: Object.freeze({
+    allow: Object.freeze([]),
+    deny: Object.freeze([
+      'git\\..*',
+      'github\\.com',
+      'gitlab\\..*',
+      'gitee\\.com',
+      'bitbucket\\.org',
+      'ssh\\.dev\\.azure\\.com',
+      'vs-ssh\\.visualstudio\\.com',
+      '.*\\.git',
+    ]),
+  }),
 });
 
 /**

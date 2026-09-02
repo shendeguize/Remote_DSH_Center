@@ -247,6 +247,7 @@ export const api = {
   saveDefaults: (patch) => call('PUT', '/api/config/defaults', { body: patch }),
   reload: () => call('POST', '/api/reload'),
   clearOrphaned: () => call('POST', '/api/hosts/clear-orphaned'),
+  clearBlocked: () => call('POST', '/api/hosts/clear-blocked'),
 
   setup: (config) => call('POST', '/api/setup', { body: config, timeoutMs: 30_000 }),
   restartManager: () => call('POST', '/api/manager/restart'),

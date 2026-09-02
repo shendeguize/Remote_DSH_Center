@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import * as store from '../src/store.js';
 import { CONFIG_VERSION, newHostConfig, resolvePaths } from '../src/defaults.js';
-import { bus, _resetForTest } from '../src/lib/bus.js';
+import { bus, recentLogs, _resetForTest } from '../src/lib/bus.js';
 
 function fixture(t, { config, state } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshc-store-'));
@@ -455,9 +455,10 @@ test('HostView 形状符合 13 §1.3：顶层键固定、mappedUrl 仅隧道可�
 
   const view = store.getHostView('gpu-1');
   assert.deepEqual(Object.keys(view).sort(), [
-    'config', 'effectiveRemotePort', 'local', 'manualInstances', 'mappedUrl', 'name',
+    'blocked', 'config', 'effectiveRemotePort', 'local', 'manualInstances', 'mappedUrl', 'name',
     'orphaned', 'patchSync', 'phase', 'probe', 'sshInfo', 'tunnel', 'web',
   ]);
+  assert.equal(view.blocked, null, '没被名单挡下就是 null');
   assert.equal(view.local, false);
   assert.equal(view.config.local, false);
   assert.equal(view.effectiveRemotePort, 8899, 'null 覆写继承 defaults');
@@ -530,4 +531,168 @@ test('hostCounts 统计 running/degraded/crashed', async (t) => {
   store.setPhase('gpu-2', 'degraded', 't');
 
   assert.deepEqual(store.hostCounts(), { total: 2, running: 1, degraded: 1, crashed: 0 });
+});
+
+// ── 主机名白/黑名单（defaults.hostFilter） ──────────────────────────────
+
+/** 名单相关用例共用：一台正常算力机 + 一台已经躺在 config 里的 git 入口。 */
+const filterConfig = (hostFilter) => fullConfig({
+  defaults: { remoteWebPort: 8899, localPortRange: [17701, 17799], hostFilter },
+  hosts: {
+    'gpu-1': newHostConfig(),
+    'git.example.com': newHostConfig(),
+  },
+});
+
+test('名单挡下的 ssh 主机不自动纳管，且照样不算 orphaned', async (t) => {
+  // git\..* 只吃「git 后面跟一个真的点」：github.com 得靠自己那条规则，别指望前一条兜住
+  const { paths } = fixture(t, {
+    config: filterConfig({ allow: [], deny: ['git\\..*', 'github\\.com'] }),
+  });
+  await store.init({ pathsOverride: paths });
+
+  const merged = store.mergeSshHosts([
+    { name: 'gpu-1', hostName: '10.0.0.1' },
+    { name: 'gpu-2', hostName: '10.0.0.2' },
+    { name: 'git.example.com', hostName: '10.0.0.3' },
+    { name: 'github.com', hostName: '140.82.0.1' },
+  ]);
+
+  assert.deepEqual(merged.added, ['gpu-2'], '只有没被挡下的新主机进配置');
+  assert.deepEqual(merged.filtered, ['github.com'], '挡下的新名字报出来，不静默丢');
+  assert.equal(Object.hasOwn(store.getConfig().hosts, 'github.com'), false);
+
+  // 已经在 config 里的那台：留在配置里但带上判定，且不是 orphaned——
+  // 它在 ssh config 里确实还在，判定该是「屏蔽」而不是「消失了」
+  const view = store.getHostView('git.example.com');
+  assert.deepEqual(view.blocked, {
+    rule: 'deny',
+    pattern: 'git\\..*',
+    reason: '命中黑名单 git\\..*',
+  });
+  assert.equal(view.orphaned, false);
+  assert.equal(store.getHostView('gpu-1').blocked, null);
+  assert.deepEqual(store.listBlockedHostNames(), ['git.example.com']);
+});
+
+test('升级即屏蔽要留痕：启动时把已纳管却被挡下的主机记进事件日志', async (t) => {
+  // 只看主机表的人能从「已屏蔽」分组看懂；只用 CLI 的人只有这行日志能解释
+  // 「我的 git.example.com 怎么突然不巡检了」。静默改默认行为是最难查的那类问题。
+  const { paths } = fixture(t, {
+    config: filterConfig({ allow: [], deny: ['git\\..*'] }),
+  });
+  await store.init({ pathsOverride: paths });
+
+  const line = recentLogs(50).find((entry) => /主机名单挡下/u.test(entry.msg));
+  assert.ok(line, `启动日志里应有一行说明屏蔽：${JSON.stringify(recentLogs(50).map((l) => l.msg))}`);
+  assert.match(line.msg, /1 台已纳管主机/u);
+  assert.match(line.msg, /git\.example\.com（命中黑名单 git\\\.\.\*）/u);
+  assert.equal(line.host, null, '这是 manager 级别的一行，不挂在某台主机上');
+
+  // 反面：一台都没挡下时不许留这行，否则日志里天天一条无信息量的噪声
+  store._reset();
+  _resetForTest(); // 日志缓冲挂在 bus 上，不清就会把上一段的那行算进来
+  const clean = fixture(t, { config: filterConfig({ allow: [], deny: [] }) });
+  await store.init({ pathsOverride: clean.paths });
+  assert.equal(recentLogs(50).filter((entry) => /主机名单挡下/u.test(entry.msg)).length, 0);
+});
+
+test('白名单非空即只认名单内的，本机永远豁免', async (t) => {
+  const { paths } = fixture(t, {
+    config: fullConfig({
+      defaults: {
+        remoteWebPort: 8899,
+        localPortRange: [17701, 17799],
+        hostFilter: { allow: ['gpu-.*'], deny: [] },
+      },
+      hosts: {
+        'gpu-1': newHostConfig(),
+        jps: newHostConfig(),
+        'my-mac': { ...newHostConfig(), local: true, localPort: null },
+      },
+    }),
+  });
+  await store.init({ pathsOverride: paths });
+  store.mergeSshHosts([{ name: 'gpu-1' }, { name: 'jps' }]);
+
+  assert.equal(store.getHostView('gpu-1').blocked, null);
+  assert.equal(store.getHostView('jps').blocked.rule, 'allow');
+  assert.equal(store.getHostView('my-mac').blocked, null, '本机不是从 ssh config 扫来的，不参与名单');
+});
+
+test('改名单当场生效：不必等下一次 reload', async (t) => {
+  const { paths } = fixture(t, { config: filterConfig({ allow: [], deny: [] }) });
+  await store.init({ pathsOverride: paths });
+  store.mergeSshHosts([{ name: 'gpu-1' }, { name: 'git.example.com' }]);
+  assert.deepEqual(store.listBlockedHostNames(), []);
+
+  const changed = [];
+  bus.on('host-changed', (host) => changed.push(host));
+  store.updateConfig((draft) => {
+    draft.defaults.hostFilter.deny = ['git\\..*'];
+  });
+  assert.deepEqual(store.listBlockedHostNames(), ['git.example.com']);
+  await Promise.resolve(); // host-changed 走 microtask 合批
+  assert.ok(changed.includes('git.example.com'), '判定变了要发事件，页面才会重画那一行');
+
+  store.updateConfig((draft) => {
+    draft.defaults.hostFilter.deny = [];
+  });
+  assert.deepEqual(store.listBlockedHostNames(), [], '名单撤了就该放回来');
+});
+
+test('清理已屏蔽：删配置与运行记录，跑着的一台都不动', async (t) => {
+  const { paths } = fixture(t, {
+    config: filterConfig({ allow: [], deny: ['git\\..*'] }),
+    state: {
+      hosts: {
+        'git.example.com': { phase: 'ready' },
+        'git.running.com': {
+          phase: 'running',
+          web: { pid: 4242, port: 8899, startedByUs: true, cmdFingerprint: 'dsh web', startedAt: new Date(0).toISOString() },
+        },
+      },
+    },
+  });
+  await store.init({ pathsOverride: paths });
+  store.updateConfig((draft) => {
+    draft.hosts['git.running.com'] = newHostConfig();
+  });
+  store.mergeSshHosts([{ name: 'gpu-1' }, { name: 'git.example.com' }, { name: 'git.running.com' }]);
+  assert.deepEqual(store.listBlockedHostNames(), ['git.example.com', 'git.running.com']);
+
+  const { removed, skipped } = store.clearBlockedHosts();
+  assert.deepEqual(removed, ['git.example.com']);
+  assert.deepEqual(skipped, ['git.running.com'], '有实例在跑就跳过：名单是发现规则，不是关停命令');
+  assert.equal(Object.hasOwn(store.getConfig().hosts, 'git.example.com'), false);
+  assert.equal(store.getHostState('git.example.com'), null, '运行记录一并清掉');
+  assert.ok(store.getHostView('git.running.com'), '跳过的那台原样留着');
+  assert.deepEqual(store.clearBlockedHosts(), { removed: [], skipped: ['git.running.com'] },
+    '再点一次也只会重复报同一台，不会误删');
+});
+
+test('老 config 缺 hostFilter：回填出厂名单，升级即享默认屏蔽', async (t) => {
+  const legacy = fullConfig();
+  delete legacy.defaults.hostFilter;
+  const { paths } = fixture(t, { config: legacy });
+  await store.init({ pathsOverride: paths });
+
+  const { hostFilter } = store.getConfig().defaults;
+  assert.deepEqual(hostFilter.allow, []);
+  assert.ok(hostFilter.deny.includes('github\\.com'), `出厂黑名单应含 github：${hostFilter.deny}`);
+  assert.deepEqual(store.mergeSshHosts([{ name: 'gpu-1' }, { name: 'github.com' }]).filtered, ['github.com']);
+});
+
+test('名单里的正则写坏了：配置写入整份放弃（校验层就拦住）', async (t) => {
+  const { paths } = fixture(t, { config: filterConfig({ allow: [], deny: [] }) });
+  await store.init({ pathsOverride: paths });
+
+  for (const bad of ['(', '(a+)+', '', 'x'.repeat(201)]) {
+    assert.throws(
+      () => store.updateConfig((draft) => { draft.defaults.hostFilter.deny = [bad]; }),
+      /校验失败/,
+      `应拒绝 ${JSON.stringify(bad)}`,
+    );
+  }
+  assert.deepEqual(store.getConfig().defaults.hostFilter.deny, [], '失败的那次一个字都没写进去');
 });

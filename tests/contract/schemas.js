@@ -60,6 +60,12 @@ export const hostView = V.obj({
     port: V.nullable(port),
   })),
   orphaned: V.bool(),
+  // 名单挡下的主机：留在 config 里但退出一切自动化，判定原因随视图一起给出
+  blocked: V.nullable(V.obj({
+    rule: V.enum_(['allow', 'deny']),
+    pattern: V.str({ min: 1 }),
+    reason: V.str({ min: 1 }),
+  })),
   config: hostConfigView,
   phase: V.enum_(PHASES),
   effectiveRemotePort: port,
@@ -137,9 +143,15 @@ export const workspaceRegisterResponse = V.obj({
   path: absolutePosixPath,
 });
 
+const hostFilterView = V.obj({
+  allow: V.arr(V.str({ min: 1 })),
+  deny: V.arr(V.str({ min: 1 })),
+});
+
 const defaultsView = V.obj({
   remoteWebPort: port,
   localPortRange: V.tuple([V.int({ min: 1024, max: 65535 }), V.int({ min: 1024, max: 65535 })]),
+  hostFilter: hostFilterView,
 });
 
 export const configBody = V.obj({
@@ -294,9 +306,16 @@ export const defaultsPutResponse = V.obj({
 export const reloadResponse = V.obj({
   changed: V.arr(V.str()),
   orphaned: V.arr(V.str({ min: 1 })),
+  // 本轮被名单挡下、因此没有纳管的 ssh config 条目（静默过滤是陷阱，得报出来）
+  filtered: V.arr(V.str({ min: 1 })),
 });
 export const orphanedClearResponse = V.obj({
   removed: V.arr(V.str({ min: 1 })),
+});
+export const blockedClearResponse = V.obj({
+  removed: V.arr(V.str({ min: 1 })),
+  // 还有实例在跑的不动它：名单是发现规则，不是关停命令
+  skipped: V.arr(V.str({ min: 1 })),
 });
 
 export const setupResponse = V.obj({

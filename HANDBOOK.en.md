@@ -294,6 +294,62 @@ Host-level settings and injection take effect on the **next start** and never mo
 instance. Changing `manager.port` only writes config; `dshc restart` is required to move the
 listener.
 
+### Host allowlist / denylist
+
+`~/.ssh/config` is written for ssh, not for this tool: it mixes in code-hosting endpoints
+(`git.example.com`, `github.com`), jump-host aliases used only for forwarding, and one-off
+entries shared by colleagues. Adopting those automatically only parks permanent
+`SSH unreachable` rows in the host table while consuming fan-out budget on every patrol.
+
+`defaults.hostFilter` decides by regex which ssh config entries are worth adopting:
+
+```bash
+dshc config set defaults.hostFilter.deny 'git\..*,github\.com,gitlab\..*'
+dshc config set defaults.hostFilter.allow 'gpu-.*,cpu-.*'   # empty = allow everything
+dshc config set defaults.hostFilter.deny none                # clear the denylist
+```
+
+The same lists are editable under **Manage → Global defaults**, one regex per line.
+
+Three matching rules:
+
+- **Whole-string anchored**: `git.*` matches `git.neodrive.neolix.net` and `gitlab-runner`,
+  but not `mygit-box`. A half-way match is more surprising than no match, so there is no
+  substring search.
+- **Case-insensitive**: host name casing comes from a hand-written config, and `GitHub.com`
+  means the same place as `github.com`.
+- **Deny wins**: the allowlist means "only these", the denylist means "not these"; an entry
+  hit by both is denied. An empty allowlist allows everything; once non-empty, only matching
+  entries are adopted.
+
+The factory denylist blocks common code-hosting endpoints: `git\..*`, `github\.com`,
+`gitlab\..*`, `gitee\.com`, `bitbucket\.org`, `ssh\.dev\.azure\.com`,
+`vs-ssh\.visualstudio\.com`, `.*\.git`. **This changes default behaviour after upgrading**:
+such hosts already adopted before the upgrade move into the "Blocked" group.
+
+For a blocked entry:
+
+- Scanning `~/.ssh/config` (`dshc init`, `dshc reload`, "Reload config" in the UI) no longer
+  adopts it. Reload reports these separately as `filtered`, not mixed into `orphaned`.
+- An entry already in config is **not deleted**. It moves into the "Blocked" group at the
+  bottom of the host table, collapsed by default, and leaves probing, auto-start, and patrol.
+  The card header offers "Clear blocked (N)", which after confirmation deletes only those
+  config entries and the manager's runtime records — `~/.ssh/config` is never touched.
+- If an instance is still running, "Open" and "Stop" stay available and cleanup skips that
+  host. Refusing to stop would pin the process on the remote with no way out except editing
+  the lists, which is not reasonable. Every other remote action returns `NOT_ALLOWED`.
+- Editing the lists recomputes the whole table immediately; no manager restart needed.
+
+The lists are user-editable regexes, which lets strings in a config file drive the manager's
+regex engine, so there are guardrails: at most 32 patterns per list, 200 characters each, no
+control characters; **repeating a group whose inside has a variable-length quantifier or an
+alternation more than once** (`(a+)+`, `(a{2,4})+`, `(x|xx)+`, `(a+){12}`) is rejected on the
+spot with a reason. Against a long host name such shapes take an astronomical number of
+backtracking steps and would freeze the manager inside one config save. The shape is judged
+before compiling, because the "run it and time it" run *is* that freeze. The cost is that
+legal-but-pointless-for-host-names shapes such as `(git|hub)+` are rejected too; shapes that
+actually get used (`(gitlab|github)\..*`) are untouched.
+
 ### Launch directory and dsh Workspace
 
 `hosts.<host>.workdir` sets the target `dsh web` process working directory. It is also the

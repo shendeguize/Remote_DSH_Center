@@ -11,10 +11,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_VERSION, PATHS, newFactoryConfig, newHostConfig, resolvePaths } from './defaults.js';
+import {
+  CONFIG_VERSION, PATHS, newFactoryConfig, newHostConfig, newHostFilter, resolvePaths,
+} from './defaults.js';
 import { DshError } from './lib/errors.js';
 import { assertTransition } from './lib/machine.js';
 import { emitConfigChanged, emitHostChanged, logEvent } from './lib/bus.js';
+import { compileHostFilter, hostFilterReason } from './lib/host-filter.js';
 import { configSchema, hostStateSchema, validate } from './lib/validate.js';
 import { assertSafeHost } from './lib/shq.js';
 
@@ -31,6 +34,14 @@ let state = { hosts: {} };
 let sshInfoByName = new Map();
 /** config 有而 ssh config 无的主机（内存标记，不持久化，不删配置）。 */
 let orphaned = new Set();
+/**
+ * 被 defaults.hostFilter 挡下的主机（内存标记，不持久化，不删配置）。
+ * name → {rule, pattern}。与 orphaned 并列而不合并：orphaned 是「ssh config 里没了」，
+ * blocked 是「ssh config 里有，但按名单不该纳管」，两者给人的下一步动作完全不同。
+ */
+let blocked = new Map();
+/** hostFilter 的编译缓存（键 = 名单的 JSON），避免每台每轮重编译正则。 */
+let hostFilterCache = { key: null, matcher: null };
 /** setup 向导内置的本机候选（只驻内存，绝不写入 config）。 */
 let setupLocalCandidate = null;
 /** 由 server.js 注入，避免 store → tunnel 依赖（防环规则 3）。 */
@@ -214,6 +225,10 @@ function migrateConfig(raw) {
   cfg.defaults ??= factory.defaults;
   cfg.defaults.remoteWebPort ??= factory.defaults.remoteWebPort;
   cfg.defaults.localPortRange ??= factory.defaults.localPortRange;
+  // 名单缺省即出厂名单：老 config（本字段之前的版本）升上来就直接享受默认屏蔽
+  cfg.defaults.hostFilter ??= factory.defaults.hostFilter;
+  cfg.defaults.hostFilter.allow ??= [];
+  cfg.defaults.hostFilter.deny ??= [];
   cfg.cleanup ??= factory.cleanup;
   cfg.cleanup.rules ??= [...factory.cleanup.rules];
   cfg.hosts ??= {};
@@ -306,6 +321,16 @@ export async function init({ pathsOverride } = {}) {
   }
   state = loadStateFile();
   revision = 0;
+  blocked = new Map();
+  hostFilterCache = { key: null, matcher: null };
+  recomputeBlocked();
+  if (blocked.size > 0) {
+    // 升级到带出厂黑名单的版本时，config 里已有的 git.*/github.com 会在这里第一次被挡下。
+    // 只看主机表的人能从「已屏蔽」分组看懂，只用 CLI 的人得靠这行日志才知道发生了什么。
+    logEvent(null, 'info', `${blocked.size} 台已纳管主机被主机名单挡下，已退出自动化：${
+      listBlockedHostNames().map((n) => `${n}（${hostFilterReason(blocked.get(n))}）`).join('、')
+    }`);
+  }
   return { fresh: loaded.fresh };
 }
 
@@ -319,6 +344,8 @@ export function _reset() {
   state = { hosts: {} };
   sshInfoByName = new Map();
   orphaned = new Set();
+  blocked = new Map();
+  hostFilterCache = { key: null, matcher: null };
   setupLocalCandidate = null;
   tunnelStatusProvider = () => null;
   revision = 0;
@@ -461,6 +488,8 @@ export function updateConfig(mutator) {
   const globalTouched = changed.some((p) => !p.startsWith('hosts.'));
   for (const name of touchedHosts) emitHostChanged(name);
   if (globalTouched) emitConfigChanged(changed);
+  // 名单改完当场生效：不必等下一次 reload，否则页面上「保存了但没反应」
+  recomputeBlocked();
   return { changed };
 }
 
@@ -469,6 +498,9 @@ export function saveConfigFromSetup(incoming) {
   const draft = structuredClone(incoming);
   draft.configVersion = CONFIG_VERSION;
   draft.setupCompleted = true;
+  // setup 提交的整份 config 可能来自不认识 hostFilter 的旧客户端；缺就补出厂名单
+  draft.defaults ??= {};
+  draft.defaults.hostFilter ??= newHostFilter();
   draft.hosts ??= {};
   for (const [name, host] of Object.entries(draft.hosts)) {
     const base = newHostConfig();
@@ -489,6 +521,7 @@ export function saveConfigFromSetup(incoming) {
   config = draft;
   emitConfigChanged(['setup']);
   for (const name of Object.keys(config.hosts)) emitHostChanged(name);
+  recomputeBlocked();
   return getConfig();
 }
 
@@ -511,6 +544,7 @@ export function reloadConfig() {
   const globalTouched = changed.some((p) => !p.startsWith('hosts.'));
   for (const name of touchedHosts) emitHostChanged(name);
   if (globalTouched || changed.length > 0) emitConfigChanged(changed);
+  recomputeBlocked();
   return { changed };
 }
 
@@ -542,11 +576,99 @@ function diffPaths(a, b, prefix = '') {
   return out;
 }
 
+// ── 主机名白/黑名单（defaults.hostFilter） ──────────────────────────────
+
+/**
+ * 当前名单的判定器。名单在 config 里，config 已过 schema（每条正则都判过形），
+ * 所以这里编译不会抛；缓存只为省掉「每台每轮重新 new RegExp」。
+ */
+function hostFilterMatcher() {
+  const filter = config?.defaults?.hostFilter ?? { allow: [], deny: [] };
+  const key = JSON.stringify(filter);
+  if (hostFilterCache.key !== key) {
+    hostFilterCache = { key, matcher: compileHostFilter(filter) };
+  }
+  return hostFilterCache.matcher;
+}
+
+/**
+ * 名单判定：本机豁免（是用户自己添的，不是从 ssh config 扫来的）。
+ * @returns {{rule:'allow'|'deny', pattern:string}|null}
+ */
+export function hostFilterVerdict(name) {
+  if (config?.hosts?.[name]?.local === true) return null;
+  return hostFilterMatcher().match(name);
+}
+
+/**
+ * 重算 blocked 集合，并对判定发生变化的主机发事件。
+ * 名单一改就要立刻见效（不必等下一次 reload），故 config 落盘后统一走这里。
+ * @returns {string[]} 判定发生变化的主机名
+ */
+function recomputeBlocked() {
+  const next = new Map();
+  for (const name of Object.keys(config?.hosts ?? {})) {
+    const verdict = hostFilterVerdict(name);
+    if (verdict) next.set(name, verdict);
+  }
+  const changedNames = [...new Set([...next.keys(), ...blocked.keys()])].filter(
+    (name) => JSON.stringify(next.get(name) ?? null) !== JSON.stringify(blocked.get(name) ?? null),
+  );
+  blocked = next;
+  for (const name of changedNames) emitHostChanged(name);
+  return changedNames;
+}
+
+/** 被名单挡下的主机名（升序）。 */
+export function listBlockedHostNames() {
+  return [...blocked.keys()].sort();
+}
+
+/** HostView.blocked 的形状：判定 + 一句人话。 */
+function blockedView(name) {
+  const verdict = blocked.get(name) ?? null;
+  return verdict ? { ...verdict, reason: hostFilterReason(verdict) } : null;
+}
+
+/**
+ * 取消纳管被名单挡下的主机：删配置行 + 清运行记录。
+ *
+ * 还有活实例的（web 记录在、或正在起停）一台都不动——「不误杀」优先于「清干净」：
+ * 名单是发现规则，不是关停命令。跳过的会原样报回去，由调用方告诉用户先停再清。
+ * @returns {{removed:string[], skipped:string[]}}
+ */
+export function clearBlockedHosts() {
+  const live = new Set(['starting', 'running', 'degraded', 'stopping']);
+  const candidates = listBlockedHostNames().filter((name) => Object.hasOwn(config?.hosts ?? {}, name));
+  const skippedSet = new Set(candidates.filter(
+    (name) => Boolean(state.hosts[name]?.web) || live.has(getPhase(name)),
+  ));
+  const skipped = [...skippedSet];
+  const names = candidates.filter((name) => !skippedSet.has(name));
+  if (names.length === 0) return { removed: [], skipped };
+
+  const namesSet = new Set(names);
+  updateConfig((draft) => {
+    for (const name of namesSet) {
+      if (blocked.has(name)) delete draft.hosts[name];
+    }
+  });
+  for (const name of names) {
+    dropHostState(name);
+    blocked.delete(name);
+  }
+  return { removed: names, skipped };
+}
+
 // ── ssh config 合并（mergeSshHosts） ────────────────────────────────────
 
 /**
  * 启动/reload 时并入 ssh config 清单：新主机以 hostDefaults 写入 config；
  * config 有而 ssh config 无 → 内存标记 orphaned（不持久化，不删配置）。
+ *
+ * 被 defaults.hostFilter 挡下的名字**不自动纳管**——`~/.ssh/config` 里大半条目不是
+ * 「能跑 dsh 的机器」，自动纳管只会让主机表长期挂着一排不可达。注意挡下的名字仍留在
+ * sshInfoByName 里：它在 ssh config 里确实存在，判定该是「屏蔽」而不是「消失了」。
  * @param {{name:string, hostName?:string, user?:string, port?:number}[]} sshHosts
  * @param {{skipAdding?:Iterable<string}} [options] names explicitly removed by this reload
  */
@@ -556,9 +678,18 @@ export function mergeSshHosts(sshHosts, { skipAdding = [] } = {}) {
   assertNoLocalSshConflict(config, nextSshInfo);
   sshInfoByName = nextSshInfo;
 
-  const added = sshHosts
-    .filter((h) => !skipped.has(h.name) && !Object.hasOwn(config.hosts, h.name))
-    .map((h) => h.name);
+  /** @type {{name:string, rule:string, pattern:string}[]} */
+  const filteredOut = [];
+  const added = [];
+  for (const host of sshHosts) {
+    if (skipped.has(host.name) || Object.hasOwn(config.hosts, host.name)) continue;
+    const verdict = hostFilterMatcher().match(host.name);
+    if (verdict) {
+      filteredOut.push({ name: host.name, ...verdict });
+      continue;
+    }
+    added.push(host.name);
+  }
   if (added.length > 0) {
     updateConfig((draft) => {
       draft.hosts = {
@@ -567,11 +698,18 @@ export function mergeSshHosts(sshHosts, { skipAdding = [] } = {}) {
       };
     });
   }
+  if (filteredOut.length > 0) {
+    // 静默过滤是陷阱：人会以为工具没看见这台机器。记一行，说清是哪条规则挡的
+    logEvent(null, 'info', `ssh config 有 ${filteredOut.length} 台被名单挡下，未纳管：${
+      filteredOut.map((h) => `${h.name}（${hostFilterReason(h)}）`).join('、')
+    }`);
+  }
 
   orphaned = new Set(Object.keys(config.hosts)
     .filter((n) => config.hosts[n]?.local !== true && !sshInfoByName.has(n)));
   for (const name of orphaned) emitHostChanged(name);
-  return { added, orphaned: [...orphaned] };
+  recomputeBlocked();
+  return { added, orphaned: [...orphaned], filtered: filteredOut.map((h) => h.name) };
 }
 
 /**
@@ -752,6 +890,8 @@ export function getHostView(name) {
       ? { hostName: ssh.hostName ?? null, user: ssh.user ?? null, port: ssh.port ?? null }
       : null,
     orphaned: local ? false : orphaned.has(name),
+    // 名单挡下的主机留在 config 里但退出一切自动化，页面另开一组收着（见 host-rules）
+    blocked: local ? null : blockedView(name),
     config: {
       local,
       enabled: hostConfig.enabled,

@@ -932,7 +932,8 @@ async function cmdLs(parsed) {
       ['主机', '状态', '本机映射', 'PID', '版本', '自启'],
       hosts.map((h) => [
         h.name,
-        PHASE_LABEL[h.phase] ?? h.phase,
+        // 挡下的主机 phase 停在最后一次探测的结果，不标一下会让人以为它还在被照看
+        h.blocked ? `已屏蔽（${h.blocked.pattern}）` : (PHASE_LABEL[h.phase] ?? h.phase),
         h.mappedUrl ? `127.0.0.1:${h.tunnel.localPort}` : '—',
         h.web ? `${h.web.pid}${h.web.startedByUs ? '' : '(手动)'}` : '—',
         h.probe?.version ?? '—',
@@ -1199,7 +1200,7 @@ async function cmdConfig(parsed) {
 
     const body = buildDefaultsPatchFor(key, parsedValue);
     if (!body) {
-      errOut(`不支持直接 set ${key}；可写：manager.port、defaults.remoteWebPort、defaults.localPortRange、hosts.<主机>.workdir`);
+      errOut(`不支持直接 set ${key}；可写：manager.port、defaults.remoteWebPort、defaults.localPortRange、defaults.hostFilter.deny、defaults.hostFilter.allow、hosts.<主机>.workdir`);
       return EXIT.usage;
     }
     const res = await apiRequest(port, 'PUT', '/api/config/defaults', body);
@@ -1234,7 +1235,20 @@ export function buildDefaultsPatchFor(key, value) {
   if (key === 'manager.port') return { manager: { port: value } };
   if (key === 'defaults.remoteWebPort') return { remoteWebPort: value };
   if (key === 'defaults.localPortRange') return { localPortRange: value };
+  if (key === 'defaults.hostFilter.deny') return { hostFilter: { deny: parsePatternList(value) } };
+  if (key === 'defaults.hostFilter.allow') return { hostFilter: { allow: parsePatternList(value) } };
   return null;
+}
+
+/**
+ * 名单是「一串正则」，命令行只有一个 value，故约定逗号分隔；空串/none = 清空这一份名单。
+ * 正则里逗号极罕见（`a{1,2}` 才用得上），需要时改页面或直接编辑 config.json。
+ */
+export function parsePatternList(value) {
+  if (Array.isArray(value)) return value.map((v) => String(v));
+  const raw = String(value ?? '').trim();
+  if (raw === '' || raw === 'none' || raw === 'null') return [];
+  return raw.split(',').map((v) => v.trim()).filter((v) => v !== '');
 }
 
 // ── dshc init（ENG-18） ─────────────────────────────────────────────────
@@ -1287,7 +1301,18 @@ async function cmdInit({ flags }) {
     const { loadHosts } = await import('./ssh-config.js');
     const { probeOnce } = await import('./prober.js');
     const preferredLocalName = os.hostname();
-    const sshNames = loadHosts().map((host) => host.name);
+    const { compileHostFilter, hostFilterReason } = await import('./lib/host-filter.js');
+    // 向导跑在 manager 之前，名单只能自己从（已有或出厂）配置里取
+    const filter = compileHostFilter(
+      existing?.defaults?.hostFilter ?? FACTORY_DEFAULTS.defaults.hostFilter,
+    );
+    const discovered = loadHosts().map((host) => host.name);
+    const sshNames = [];
+    for (const name of discovered) {
+      const verdict = filter.match(name);
+      if (verdict) out(`跳过 ${name}：${hostFilterReason(verdict)}`);
+      else sshNames.push(name);
+    }
     const candidates = withLocalCandidate(
       sshNames,
       preferredLocalName,

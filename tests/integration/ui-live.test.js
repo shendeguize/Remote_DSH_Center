@@ -295,7 +295,7 @@ test('#/manage 重载配置：真 POST 返回空 changed 并显示“配置无�
   const post = requests.find((request) => request.path === '/api/reload'
     && request.method === 'POST');
   assert.equal(post.status, 200);
-  assert.deepEqual(JSON.parse(post.responseText), { changed: [], orphaned: [] });
+  assert.deepEqual(JSON.parse(post.responseText), { changed: [], orphaned: [], filtered: [] });
   await waitFor(
     () => !app.store.isPending('config:reload')
       && !reload.disabled

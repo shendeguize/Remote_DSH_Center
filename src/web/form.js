@@ -150,15 +150,51 @@ export function buildDefaultsPatch(raw, { minWidth = 1 } = {}) {
   const managerPort = parsePort(raw.managerPort, { field: 'manager 端口' });
   if (!managerPort.ok) errors.managerPort = managerPort.error;
 
+  const deny = parsePatternList(raw.hostFilterDeny, { field: '黑名单' });
+  if (!deny.ok) errors.hostFilterDeny = deny.error;
+  const allow = parsePatternList(raw.hostFilterAllow, { field: '白名单' });
+  if (!allow.ok) errors.hostFilterAllow = allow.error;
+
   if (Object.keys(errors).length > 0) return { ok: false, errors };
   return {
     ok: true,
     value: {
       remoteWebPort: remote.value,
       localPortRange: range.value,
+      hostFilter: { allow: allow.value, deny: deny.value },
       manager: { port: managerPort.value },
     },
   };
+}
+
+/**
+ * 主机名单输入框（每行一条正则）→ 数组。
+ *
+ * 这里只做「语法能编译 + 条数长度不越界」这类当场看得出的判断；「会不会指数回溯」
+ * 那套判形在服务端（src/lib/host-filter.js，页面不许引后端模块），拒绝理由由响应带回来。
+ * 注意：页面从不拿这些正则去匹配任何东西——`blocked` 判定全在服务端，浏览器这侧没有
+ * 回溯风险；`new RegExp` 只用来验语法。
+ * 上限与 src/lib/host-filter.js 的 HOST_FILTER_LIMITS 对齐，由 tests/web/form.test.js 盯住。
+ */
+export function parsePatternList(raw, { field: label = '名单', maxPatterns = 32, maxLength = 200 } = {}) {
+  const list = String(raw ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  if (list.length > maxPatterns) {
+    return { ok: false, error: `${label}最多 ${maxPatterns} 条，现在有 ${list.length} 条` };
+  }
+  for (const pattern of list) {
+    if (pattern.length > maxLength) {
+      return { ok: false, error: `${label}单条最长 ${maxLength} 字符：${pattern.slice(0, 24)}…` };
+    }
+    try {
+      new RegExp(`^(?:${pattern})$`, 'i');
+    } catch (err) {
+      return { ok: false, error: `${label}里「${pattern}」不是合法正则：${err.message}` };
+    }
+  }
+  return { ok: true, value: list };
 }
 
 /** 只提交真正改动的键，避免把未触碰的字段“全量替换”成当前显示值。 */
