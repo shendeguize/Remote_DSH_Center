@@ -13,6 +13,26 @@ export const FACTORY_DEFAULTS = Object.freeze({
   defaults: Object.freeze({
     remoteWebPort: 8899,
     localPortRange: Object.freeze([17701, 17799]),
+    /**
+     * ssh config 主机名的白/黑名单（正则，整串锚定不分大小写；语义与守卫见
+     * src/lib/host-filter.js）。出厂黑名单只挡常见代码托管入口：它们后面站着的是 git 的
+     * ssh 端点，不是能跑 dsh web 的机器，连 `command -v dsh` 都执行不了（多半直接
+     * Disallowed command / Permission denied），被自动纳管后只会长期挂着「SSH 不可达」，
+     * 还白吃每轮巡检的扇出额度。
+     */
+    hostFilter: Object.freeze({
+      allow: Object.freeze([]),
+      deny: Object.freeze([
+        'git\\..*',
+        'github\\.com',
+        'gitlab\\..*',
+        'gitee\\.com',
+        'bitbucket\\.org',
+        'ssh\\.dev\\.azure\\.com',
+        'vs-ssh\\.visualstudio\\.com',
+        '.*\\.git',
+      ]),
+    }),
   }),
   cleanup: Object.freeze({
     rules: Object.freeze(['owned-web', 'test-workdir']),
@@ -48,6 +68,14 @@ export function newHostConfig() {
   };
 }
 
+/** 深拷贝出厂名单（FACTORY_DEFAULTS 全冻结，草稿里要可写）。 */
+export function newHostFilter() {
+  return {
+    allow: [...FACTORY_DEFAULTS.defaults.hostFilter.allow],
+    deny: [...FACTORY_DEFAULTS.defaults.hostFilter.deny],
+  };
+}
+
 /** 出厂 config 骨架（setup 未完成状态）。 */
 export function newFactoryConfig() {
   return {
@@ -57,6 +85,7 @@ export function newFactoryConfig() {
     defaults: {
       remoteWebPort: FACTORY_DEFAULTS.defaults.remoteWebPort,
       localPortRange: [...FACTORY_DEFAULTS.defaults.localPortRange],
+      hostFilter: newHostFilter(),
     },
     cleanup: { rules: [...FACTORY_DEFAULTS.cleanup.rules] },
     hosts: {},

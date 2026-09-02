@@ -5,7 +5,7 @@
  */
 
 import { ApiError, api } from './api.js';
-import { isHostEnabled, isManagedHost } from './host-rules.js';
+import { isBlockedHost, isHostEnabled, isManagedHost } from './host-rules.js';
 import { ACTION_TIMEOUT_MS, pendingKey } from './store.js';
 import { phaseMeta } from './utils.js';
 
@@ -164,6 +164,11 @@ export function createActions({ store, confirm, navigate }) {
     }
     if (isOrphaned(host) && action !== 'open') {
       store.addToast({ level: 'warn', summary: `${name}：${ORPHANED_ACTION_MESSAGE}` });
+      return null;
+    }
+    // 关停留着：名单挡下的主机若真有实例在跑，得让人能停（与后端门禁同口径）
+    if (isBlockedHost(host) && action !== 'open' && action !== 'stop') {
+      store.addToast({ level: 'warn', summary: `${name}：${host.blocked.reason}，已退出自动化` });
       return null;
     }
     // 点击前重新读 store：自动恢复可能已经跑在手动重连之前（10 §7 第 12 条）
@@ -459,6 +464,36 @@ export function createActions({ store, confirm, navigate }) {
     return res;
   }
 
+  async function clearBlocked() {
+    const blocked = store.listHosts().filter((host) => isBlockedHost(host));
+    if (blocked.length === 0) return null;
+    const patterns = [...new Set(blocked.map((host) => host.blocked.pattern))];
+    const ok = await confirm({
+      title: `清理 ${blocked.length} 台被名单挡下的主机？`,
+      lines: [
+        `命中的规则：${patterns.join('、')}。`,
+        '只删除 config 里的这些条目并清理 manager 运行记录；ssh config 一个字都不动。',
+        '还有实例在跑的会被跳过——先关停它，或把规则改掉。',
+      ],
+      confirmLabel: '清理已屏蔽',
+    });
+    if (!ok) return null;
+    const res = await guarded({
+      action: 'blocked:clear',
+      settleOnResolve: true,
+      run: () => api.clearBlocked(),
+    });
+    if (!res || !Array.isArray(res.removed)) return res;
+    const removed = store.removeHosts(res.removed);
+    const skipped = res.skipped ?? [];
+    store.addToast({
+      level: skipped.length > 0 ? 'warn' : 'success',
+      summary: `已清理 ${removed.length} 台被屏蔽主机${skipped.length > 0 ? `，${skipped.length} 台还在跑，跳过` : ''}`,
+      detail: skipped.length > 0 ? `仍在运行：${skipped.join('、')}\n先关停再清理，或把它从黑名单移除。` : null,
+    });
+    return res;
+  }
+
   async function restartManager() {
     const ok = await confirm({
       title: '重启 manager？',
@@ -520,6 +555,7 @@ export function createActions({ store, confirm, navigate }) {
     registerDshWorkspace,
     saveDefaults,
     reload,
+    clearBlocked,
     clearOrphaned,
     restartManager,
     openHost,

@@ -143,7 +143,9 @@ export async function installDemo({ win = globalThis } = {}) {
     : DEFAULT_TIMING;
 
   const machine = await import('./lib/machine.js');
-  const manager = createFakeManager({ machine, timing, setupCompleted: !wantSetup });
+  // 名单判定也用产品真身：否则 demo 里敲一条 (a+)+ 就把这个标签页挂死
+  const hostFilter = await import('./lib/host-filter.js');
+  const manager = createFakeManager({ machine, hostFilter, timing, setupCompleted: !wantSetup });
 
   const originalFetch = win.fetch.bind(win);
   const apiRouter = createApiRouter(manager, { baseUrl: win.location.href });

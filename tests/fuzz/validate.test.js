@@ -47,6 +47,18 @@ const HOSTILE_KEYS = Object.freeze([
 
 // ── 合法 config 生成 ────────────────────────────────────────────────────
 
+/** 主机名单里「本该被放行」的写法：真实用得上的那几种形态。 */
+const VALID_PATTERNS = Object.freeze([
+  'git\\..*', 'github\\.com', '.*\\.git', '(gitlab|github)\\..*',
+  'gpu-[0-9]+', 'GPU_Node_.*-pfs', '.*', 'a{2,4}', '[a-z]+\\.[a-z]+',
+]);
+
+/** 按构造非法的名单条目：语法错、空串、控制字符、超长、以及会指数回溯的形状。 */
+const BAD_PATTERNS = Object.freeze([
+  '(', ')', '[', '*', '(?<', '\\', '', 'a\nb', 'a\u0000b',
+  '(a+)+', '([a-z]*)*', '(x|xx)+', '((a+))+', '(a*)+', '(\\d+)*',
+]);
+
 function hostName(rng) {
   return rng.string({ min: 1, max: 10, alphabet: 'abcdefghijkl0123456789-_.' });
 }
@@ -81,6 +93,10 @@ function validConfig(rng) {
     defaults: {
       remoteWebPort: rng.int(1, 65_535),
       localPortRange: [lo, rng.int(lo, 65_535)],
+      hostFilter: {
+        allow: Array.from({ length: rng.int(0, 2) }, () => rng.pick(VALID_PATTERNS)),
+        deny: Array.from({ length: rng.int(0, 3) }, () => rng.pick(VALID_PATTERNS)),
+      },
     },
     hosts,
   };
@@ -158,6 +174,35 @@ const MUTATORS = Object.freeze([
     apply(cfg, rng) {
       cfg.defaults.localPortRange = rng.pick([[1_100], [1_100, 2_000, 3_000], []]);
       return { path: 'defaults.localPortRange', why: 'tuple' };
+    },
+  },
+  {
+    id: 'host-filter-bad-pattern',
+    apply(cfg, rng) {
+      const rule = rng.pick(['allow', 'deny']);
+      cfg.defaults.hostFilter = { allow: [], deny: [], ...cfg.defaults.hostFilter };
+      cfg.defaults.hostFilter[rule] = [rng.pick(BAD_PATTERNS)];
+      // 语法错、空串、控制字符、指数回溯的形状，一律该在前门被拦住：
+      // 放过去的每一条都会被每一台主机、每一轮巡检拿去跑
+      return { path: `defaults.hostFilter.${rule}[0]`, why: '' };
+    },
+  },
+  {
+    id: 'host-filter-too-long',
+    apply(cfg, rng) {
+      const rule = rng.pick(['allow', 'deny']);
+      cfg.defaults.hostFilter = { allow: [], deny: [], ...cfg.defaults.hostFilter };
+      cfg.defaults.hostFilter[rule] = ['x'.repeat(rng.int(201, 400))];
+      return { path: `defaults.hostFilter.${rule}[0]`, why: '长度须' };
+    },
+  },
+  {
+    id: 'host-filter-not-array',
+    apply(cfg, rng) {
+      const rule = rng.pick(['allow', 'deny']);
+      cfg.defaults.hostFilter = { allow: [], deny: [], ...cfg.defaults.hostFilter };
+      cfg.defaults.hostFilter[rule] = rng.pick(['git.*', 42, null, {}]);
+      return { path: `defaults.hostFilter.${rule}`, why: 'expected array' };
     },
   },
   {

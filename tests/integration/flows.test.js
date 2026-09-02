@@ -393,3 +393,78 @@ test('远端日志端点：裸文本、缺日志兜底', async (t) => {
   assert.equal(after.status, 200);
   assert.match(after.text, /dsh web: http:\/\/127\.0\.0\.1:\d+/);
 });
+
+test('主机名单：挡下的主机退出自动化、拒远程动作、可一键清理且不会被下一次 reload 拉回来', async (t) => {
+  const ctx = await bootServer(t, {
+    hosts: { 'gpu-1': SCENARIOS.healthy(), 'git.example.com': SCENARIOS.healthy() },
+    defaults: { hostFilter: { allow: [], deny: ['git\\..*'] } },
+  });
+
+  const listed = await ctx.get('/api/hosts');
+  assertRest(listed, { status: 200, schema: hostsList, label: 'GET /api/hosts' });
+  assert.equal(byName(listed, 'gpu-1').blocked, null);
+  assert.deepEqual(byName(listed, 'git.example.com').blocked, {
+    rule: 'deny',
+    pattern: 'git\\..*',
+    reason: '命中黑名单 git\\..*',
+  });
+
+  // 挡下就是「一次 ssh 也不派」：探测与拉起都在 preflight 被拒
+  for (const [route, action] of [['probe', '探测'], ['start', '启动']]) {
+    // eslint-disable-next-line no-await-in-loop -- 逐个断言拒绝理由
+    const denied = await ctx.api('POST', `/api/hosts/git.example.com/${route}`);
+    assert.equal(denied.status, 409, `${action} 应被拒`);
+    assert.equal(denied.json.code, 'NOT_ALLOWED');
+    assert.match(denied.json.error, /已被主机名单挡下/);
+  }
+  assert.equal(
+    ctx.harness.transportCalls().some((call) => call.host === 'git.example.com'),
+    false,
+    '被挡下的主机一次 ssh 都不该派出去（启动序列的全量探测也跳过它）',
+  );
+
+  // 名单写坏了当场拒收，配置不动
+  const badPattern = await ctx.api('PUT', '/api/config/defaults', { hostFilter: { deny: ['(a+)+'] } });
+  assert.equal(badPattern.status, 400);
+  assert.equal(badPattern.json.code, 'VALIDATION');
+
+  // 只给一半的名单不该把另一半清空
+  const half = await ctx.api('PUT', '/api/config/defaults', { hostFilter: { allow: ['gpu-.*'] } });
+  assertRest(half, { status: 200, schema: defaultsPutResponse, label: 'PUT defaults hostFilter' });
+  assert.deepEqual(half.json.defaults.hostFilter, { allow: ['gpu-.*'], deny: ['git\\..*'] });
+
+  const cleared = await ctx.api('POST', '/api/hosts/clear-blocked');
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(cleared.json, { removed: ['git.example.com'], skipped: [] });
+  assert.equal((await ctx.get('/api/hosts')).json.hosts.some((h) => h.name === 'git.example.com'), false);
+
+  // 清完之后再 reload：ssh config 里它还在，但名单还挡着，不许悄悄回来
+  const reload = await ctx.api('POST', '/api/reload');
+  assertRest(reload, { status: 200, schema: reloadResponse, label: 'POST reload' });
+  assert.deepEqual(reload.json.filtered, ['git.example.com']);
+  assert.equal((await ctx.get('/api/hosts')).json.hosts.some((h) => h.name === 'git.example.com'), false);
+});
+
+test('主机名单：跑着的实例不会被名单闷死——照样能关停，清理时跳过它', async (t) => {
+  const ctx = await bootServer(t, { hosts: { 'gpu-1': SCENARIOS.healthy() } });
+
+  await ctx.api('POST', '/api/hosts/gpu-1/start');
+  await waitPhase(ctx, 'gpu-1', 'running');
+
+  // 先跑起来，再把它加进黑名单（真实顺序：人是看烦了才去写规则的）
+  await ctx.api('PUT', '/api/config/defaults', { hostFilter: { deny: ['gpu-.*'] } });
+  const blocked = byName(await ctx.get('/api/hosts'), 'gpu-1');
+  assert.equal(blocked.blocked.rule, 'deny');
+  assert.equal(blocked.phase, 'running', '名单不碰已经跑着的实例');
+
+  const skipped = await ctx.api('POST', '/api/hosts/clear-blocked');
+  assert.deepEqual(skipped.json, { removed: [], skipped: ['gpu-1'] });
+
+  const stopped = await ctx.api('POST', '/api/hosts/gpu-1/stop');
+  assert.equal(stopped.status, 202, '关停是挡下之后唯一还许做的远程动作');
+  await waitPhase(ctx, 'gpu-1', 'ready');
+  assert.equal(ctx.harness.liveProcesses('gpu-1').length, 0, '远端 dsh web 确实停了');
+
+  const cleared = await ctx.api('POST', '/api/hosts/clear-blocked');
+  assert.deepEqual(cleared.json, { removed: ['gpu-1'], skipped: [] }, '停完再点就能清掉');
+});

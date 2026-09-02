@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import * as machine from '../src/lib/machine.js';
+import * as hostFilter from '../src/lib/host-filter.js';
 import { PHASES } from '../src/lib/machine.js';
 import { drawerCopy } from '../src/web/components/host-drawer.js';
 import { overlayFor } from '../src/web/components/iframe-pane.js';
@@ -64,7 +65,7 @@ const FAST = Object.freeze({
  */
 function rig({ setupCompleted = true } = {}) {
   const frames = [];
-  const manager = createFakeManager({ machine, timing: FAST, setupCompleted });
+  const manager = createFakeManager({ machine, hostFilter, timing: FAST, setupCompleted });
   const unsubscribe = manager.subscribe((type, data) => frames.push({ type, data }));
   return {
     manager,
@@ -170,8 +171,8 @@ test('drawer 与 iframe 的本机文案不把本机称作远端或隧道', () =>
 // ── 端点覆盖 ─────────────────────────────────────────────────────────────
 
 test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => {
-  // 20 个真实实现 + manager 自身 restart/shutdown 两个降级提示
-  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 20, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
+  // 21 个真实实现 + manager 自身 restart/shutdown 两个降级提示
+  assert.equal(ROUTE_IDS.length - DEGRADED_ROUTES.length, 21, `实现端点数变了：${ROUTE_IDS.join(', ')}`);
   assert.equal(new Set(ROUTE_IDS).size, ROUTE_IDS.length, '路由 id 有重复');
 
   const cases = [
@@ -181,6 +182,7 @@ test('路由表覆盖 13 §2 的全部端点，且每条都真接了线', () => 
     ['PUT', '/api/config/defaults', 'defaults-put'],
     ['POST', '/api/reload', 'reload'],
     ['POST', '/api/hosts/clear-orphaned', 'clear-orphaned'],
+    ['POST', '/api/hosts/clear-blocked', 'clear-blocked'],
     ['POST', '/api/setup', 'setup'],
     ['POST', '/api/hosts/probe', 'probe-all'],
     ['POST', '/api/hosts/local', 'local-create'],
@@ -1505,4 +1507,34 @@ test('重置回到初始态：状态、端口分配与日志都复位', async ()
 
   // 重置会重新广播 snapshot，前端据此整体替换（13 §3.1）
   assert.equal(r.frames.at(-1).type, 'snapshot');
+});
+
+test('demo 的主机名单判定就是产品真身：语义一致，回溯炸弹一样当场 400', async () => {
+  const { manager, settle } = rig();
+
+  // 语义：整串锚定 + 忽略大小写 + 黑名单优先，判定结果进 HostView.blocked
+  req(manager, 'PUT', '/api/config/defaults', { body: { hostFilter: { deny: ['GPU-.*'] } } });
+  await settle();
+  for (const host of req(manager, 'GET', '/api/hosts').json.hosts) {
+    const expected = !host.local && /^(?:gpu-.*)$/i.test(host.name);
+    assert.equal(
+      Boolean(host.blocked), expected,
+      `${host.name} 的 blocked 判定与「整串锚定、忽略大小写」不符`,
+    );
+    if (host.blocked) {
+      assert.equal(host.blocked.rule, 'deny');
+      assert.equal(host.blocked.pattern, 'GPU-.*');
+      assert.match(host.blocked.reason, /命中黑名单/u);
+    }
+  }
+
+  // 炸弹：demo 的名单输入框是公开可编辑的，放进去就是挂死访客的标签页
+  const err = grab(() => req(manager, 'PUT', '/api/config/defaults', {
+    body: { hostFilter: { deny: ['(a+)+'] } },
+  }));
+  assert.equal(err.status, 400);
+  assert.equal(err.code, 'VALIDATION');
+  assert.match(err.message, /嵌套量词/u);
+  // 拒了就不许落盘：否则下一次重算会带着炸弹跑
+  assert.deepEqual(req(manager, 'GET', '/api/config').json.defaults.hostFilter.deny, ['GPU-.*']);
 });

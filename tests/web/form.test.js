@@ -85,17 +85,29 @@ test('buildHostPatch 组装 PUT 请求体', () => {
   assert.deepEqual(Object.keys(bad.errors).sort(), ['env', 'patches', 'remoteWebPort', 'workdir']);
 });
 
-test('buildDefaultsPatch 聚合三键并逐字段报错', () => {
-  const built = buildDefaultsPatch({ remoteWebPort: '8899', rangeFrom: '17701', rangeTo: '17799', managerPort: '7788' });
+test('buildDefaultsPatch 聚合四键并逐字段报错', () => {
+  const built = buildDefaultsPatch({
+    remoteWebPort: '8899',
+    rangeFrom: '17701',
+    rangeTo: '17799',
+    managerPort: '7788',
+    hostFilterDeny: 'git\\..*\n\n  github\\.com  \n',
+    hostFilterAllow: '',
+  });
   assert.deepEqual(built.value, {
     remoteWebPort: 8899,
     localPortRange: [17_701, 17_799],
+    hostFilter: { allow: [], deny: ['git\\..*', 'github\\.com'] },
     manager: { port: 7788 },
-  });
+  }, '名单按行切分，空行与两侧空格都吃掉');
 
-  const bad = buildDefaultsPatch({ remoteWebPort: 'x', rangeFrom: '20', rangeTo: '10', managerPort: '' });
+  const bad = buildDefaultsPatch({
+    remoteWebPort: 'x', rangeFrom: '20', rangeTo: '10', managerPort: '', hostFilterDeny: '(',
+  });
   assert.equal(bad.ok, false);
-  assert.deepEqual(Object.keys(bad.errors).sort(), ['localPortRange', 'managerPort', 'remoteWebPort']);
+  assert.deepEqual(Object.keys(bad.errors).sort(),
+    ['hostFilterDeny', 'localPortRange', 'managerPort', 'remoteWebPort']);
+  assert.match(bad.errors.hostFilterDeny, /不是合法正则/);
 
   const lowBindable = buildDefaultsPatch({
     remoteWebPort: '1', rangeFrom: '1023', rangeTo: '1024', managerPort: '1',

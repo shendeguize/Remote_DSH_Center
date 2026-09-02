@@ -6,6 +6,38 @@
 
 ## [Unreleased]
 
+### 新增
+
+- `defaults.hostFilter` 用正则决定哪些 `~/.ssh/config` 条目值得纳管，白名单与黑名单
+  各一份：整串锚定（`git.*` 命中 `git.neodrive.neolix.net`，不命中 `mygit-box`）、
+  忽略大小写、黑名单优先；白名单为空表示全放行，一旦非空就只纳管命中的条目。
+  改名单立即重算全表，不需重启 manager。界面在「管理 → 全局默认」里编辑（每行一条
+  正则），CLI 为 `dshc config set defaults.hostFilter.deny 'git\..*,github\.com'`
+  （`none` 清空）。
+- 主机表新增默认折叠的「已屏蔽」分组与「清理已屏蔽（N）」：确认后只删除 config 里被
+  名单挡下的条目与 manager 运行记录，`~/.ssh/config` 一个字都不动；仍有实例在跑的会
+  被跳过并在提示里点名。新增端点 `POST /api/hosts/clear-blocked`。
+- `POST /api/reload` 的响应新增 `filtered`（本轮被名单挡下、因此未纳管的条目），与
+  `orphaned` 分开回报；`dshc ls` 给被挡下的主机标「已屏蔽（命中的规则）」。
+  `HostView` 新增 `blocked` 字段（`null` 或 `{rule, pattern, reason}`）。
+
+### 变更
+
+- **出厂黑名单默认挡下常见代码托管入口**：`git\..*`、`github\.com`、`gitlab\..*`、
+  `gitee\.com`、`bitbucket\.org`、`ssh\.dev\.azure\.com`、`vs-ssh\.visualstudio\.com`、
+  `.*\.git`。**这会改变升级后的默认行为**：此前已纳管的这类主机不会被删除，但会移入
+  「已屏蔽」分组并退出探测、自动拉起与巡检。要继续用其中某台，把它从黑名单移除或加进
+  白名单即可。
+- 被名单挡下的主机退出一切自动化（探测、全量探测、自动拉起、manager 重启后的状态恢复、
+  巡检、`dshc init` 的候选、批量配置同步的源与目标），远程动作返回 `NOT_ALLOWED`。
+  **例外是「关停」**：真有实例在跑时关停始终可用——拒掉它等于把那个进程扣死在远端，
+  只能靠改名单才停得掉。「打开」也保留。
+- 名单是用户可编辑的正则，因此有护栏：每份最多 32 条、单条最长 200 字符、不接受控制
+  字符；**把「内部有变长量词或分支」的分组重复两次以上**（`(a+)+`、`(a{2,4})+`、
+  `(x|xx)+`、`(a+){12}`）会被 VALIDATION 当场拒收并说明理由，因为这类写法撞上长主机名
+  要走天文数字的回溯步数，会把 manager 卡死在一次配置保存里。`(gitlab|github)\..*`
+  这类真正用得上的写法不受影响。
+
 ## [0.9.3] - 2026-09-02
 
 ### 修复

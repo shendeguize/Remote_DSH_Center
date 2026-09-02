@@ -554,6 +554,7 @@ plugin/）；其测试由 `plugin/tests`（`npm run verify` 内含）+ CI 的 pl
 | `API:POST /api/hosts/local` | `tests/api.test.js`、`tests/demo-contract.test.js` |
 | `API:POST /api/hosts/sync-config` | `tests/api.test.js`、`tests/config-sync.test.js`、`tests/integration/ui-live.test.js` |
 | `API:POST /api/hosts/clear-orphaned` | `tests/api.test.js`、`tests/demo-contract.test.js`、`tests/web/actions.test.js` |
+| `API:POST /api/hosts/clear-blocked` | `tests/integration/flows.test.js`、`tests/demo-contract.test.js`、`tests/web/actions.test.js` |
 | `API:PUT /api/hosts/:name/config` | `tests/api.test.js`、`tests/integration/flows.test.js`、`tests/integration/cli.test.js` |
 | `API:PUT /api/config/defaults` | `tests/integration/flows.test.js`、`tests/integration/setup.test.js` |
 | `API:POST /api/reload` | `tests/integration/flows.test.js`、`tests/integration/resilience.test.js` |

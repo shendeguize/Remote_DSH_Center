@@ -347,6 +347,10 @@ body {
 .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-size: 12px; color: var(--text-dim); }
+/* 名单是「每行一条正则」的多行输入：跟端口那几个数字框挤在同一网格里会被压成一条缝 */
+.field-grid-wide { grid-template-columns: 1fr; }
+.field-grid-wide .field textarea { min-height: 84px; }
+
 .field input, .field textarea, .field select {
   font: inherit; padding: 5px 8px;
   border: 1px solid var(--border); border-radius: 6px;

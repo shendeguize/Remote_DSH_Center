@@ -53,6 +53,9 @@ install option and first-start detail.
   only a genuinely dead process becomes `crashed`.
 - **Never kills the wrong process.** Stop compares the `ps` command-line fingerprint verbatim;
   manual instances are read-only, and a mismatch refuses the kill.
+- **Only adopts what is worth adopting.** Code-hosting endpoints in `~/.ssh/config` (`git.*`,
+  `github.com`) are blocked by the factory denylist instead of parking permanent
+  `SSH unreachable` rows; the lists are whole-string anchored regexes and both are editable.
 - **Zero npm dependencies.** Runtime and tests use Node ≥ 22 built-ins; the frontend is native
   ESM with no build step.
 

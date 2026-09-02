@@ -20,6 +20,16 @@ export function createDefaultsCard({ store, actions }) {
   const managerPort = field('manager 监听端口', input('number', '', { min: PORT_MIN, max: PORT_MAX }), {
     hint: '改动仅落盘，需重启 manager 生效',
   });
+  const hostFilterDeny = field(
+    '主机黑名单（每行一条正则）',
+    input('textarea', '', { rows: '4', spellcheck: 'false', autocapitalize: 'off' }),
+    { hint: '整串匹配、不分大小写。命中的 ssh config 条目不纳管，如 git\\..*' },
+  );
+  const hostFilterAllow = field(
+    '主机白名单（每行一条正则，留空=全放行）',
+    input('textarea', '', { rows: '3', spellcheck: 'false', autocapitalize: 'off' }),
+    { hint: '一旦非空就只纳管命中的；黑名单优先' },
+  );
 
   const saveBtn = button('保存', { variant: 'primary', compact: false, onClick: submit });
   const resetBtn = button('还原', { compact: false, onClick: resetDraft });
@@ -28,6 +38,7 @@ export function createDefaultsCard({ store, actions }) {
   const root = el('article.card.defaults-card', {}, [
     el('header.card-header', {}, [el('h2', { text: '全局默认' })]),
     el('div.field-grid', {}, [remote.root, managerPort.root, rangeFrom.root, rangeTo.root]),
+    el('div.field-grid.field-grid-wide', {}, [hostFilterDeny.root, hostFilterAllow.root]),
     notice,
     el('footer.card-footer', {}, [saveBtn, resetBtn]),
   ]);
@@ -37,6 +48,8 @@ export function createDefaultsCard({ store, actions }) {
     managerPort,
     rangeFrom,
     rangeTo,
+    hostFilterDeny,
+    hostFilterAllow,
   };
   const draftKeys = Object.keys(controls);
   let baseline = configFromStore();
@@ -49,6 +62,10 @@ export function createDefaultsCard({ store, actions }) {
     return {
       remoteWebPort: defaults?.remoteWebPort ?? null,
       localPortRange: Array.isArray(defaults?.localPortRange) ? [...defaults.localPortRange] : null,
+      hostFilter: {
+        allow: [...(defaults?.hostFilter?.allow ?? [])],
+        deny: [...(defaults?.hostFilter?.deny ?? [])],
+      },
       manager: { port: configuredPort },
     };
   }
@@ -59,6 +76,8 @@ export function createDefaultsCard({ store, actions }) {
       managerPort: config?.manager?.port == null ? '' : String(config.manager.port),
       rangeFrom: config?.localPortRange?.[0] == null ? '' : String(config.localPortRange[0]),
       rangeTo: config?.localPortRange?.[1] == null ? '' : String(config.localPortRange[1]),
+      hostFilterDeny: (config?.hostFilter?.deny ?? []).join('\n'),
+      hostFilterAllow: (config?.hostFilter?.allow ?? []).join('\n'),
     };
   }
 
@@ -165,12 +184,16 @@ export function createDefaultsCard({ store, actions }) {
       rangeFrom: rangeFrom.input.value,
       rangeTo: rangeTo.input.value,
       managerPort: managerPort.input.value,
+      hostFilterDeny: hostFilterDeny.input.value,
+      hostFilterAllow: hostFilterAllow.input.value,
     }, { minWidth: Math.max(1, store.state.hosts.size) });
 
     remote.setError(built.errors?.remoteWebPort ?? null);
     rangeFrom.setError(built.errors?.localPortRange ?? null);
     rangeTo.setError(null);
     managerPort.setError(built.errors?.managerPort ?? null);
+    hostFilterDeny.setError(built.errors?.hostFilterDeny ?? null);
+    hostFilterAllow.setError(built.errors?.hostFilterAllow ?? null);
     if (!built.ok) return;
 
     const patch = diffPatch(built.value, baseline);

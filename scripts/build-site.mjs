@@ -33,8 +33,8 @@ export const PAGES_BASE_URL = 'https://shendeguize.github.io/Remote_DSH_Center/'
 /** sitemap 只发布真实生成 HTML 的公开路由，路径均相对 PAGES_BASE_URL。 */
 export const SITEMAP_ROUTES = Object.freeze(['', 'demo/']);
 
-/** 从 src/lib 借到 demo 的模块：必须是浏览器安全的纯模块（machine 只依赖 errors）。 */
-export const BORROWED_LIB = Object.freeze(['machine.js', 'errors.js']);
+/** 从 src/lib 借到 demo 的模块：必须是浏览器安全的纯模块（machine/host-filter 只依赖 errors）。 */
+export const BORROWED_LIB = Object.freeze(['machine.js', 'errors.js', 'host-filter.js']);
 
 /** 构建产物里必须存在的文件（相对 outDir）。少一个就说明拷漏了。 */
 export const REQUIRED_OUTPUTS = Object.freeze([

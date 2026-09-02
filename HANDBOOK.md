@@ -280,6 +280,53 @@ running → crashed → starting → running          （进程死亡后人工�
 主机级配置与注入项保存后在**下次拉起**生效，不修改正在运行的实例。`manager.port` 修改只落盘，
 需要 `dshc restart` 才切换监听端口。
 
+### 主机名单（白名单/黑名单）
+
+`~/.ssh/config` 是写给 ssh 用的，不是写给本工具用的：里面混着代码托管入口
+（`git.example.com`、`github.com`）、只用于转发的跳板别名、同事共享的一次性条目。
+它们被自动纳管后只会在主机表里长期挂着 `SSH 不可达`，还要占用每轮巡检的扇出额度。
+
+`defaults.hostFilter` 用正则决定哪些 ssh config 条目值得纳管：
+
+```bash
+dshc config set defaults.hostFilter.deny 'git\..*,github\.com,gitlab\..*'
+dshc config set defaults.hostFilter.allow 'gpu-.*,cpu-.*'   # 留空 = 全放行
+dshc config set defaults.hostFilter.deny none                # 清空黑名单
+```
+
+界面上同一份名单在「管理 → 全局默认」里编辑，每行一条正则。
+
+三条判定规则：
+
+- **整串锚定**：`git.*` 命中 `git.neodrive.neolix.net` 与 `gitlab-runner`，不命中
+  `mygit-box`。半截命中比不命中更让人吃惊，所以不做子串搜索。
+- **忽略大小写**：主机名的大小写来自人手写的 config，`GitHub.com` 与 `github.com`
+  指同一个地方。
+- **黑名单优先**：白名单是「只认这些」，黑名单是「这些不要」；同时命中按不要算。
+  白名单为空表示全放行，一旦非空就只纳管命中的条目。
+
+出厂黑名单挡下常见的代码托管入口：`git\..*`、`github\.com`、`gitlab\..*`、
+`gitee\.com`、`bitbucket\.org`、`ssh\.dev\.azure\.com`、`vs-ssh\.visualstudio\.com`、
+`.*\.git`。**这会改变升级后的默认行为**：升级前已被纳管的这类主机会移入「已屏蔽」分组。
+
+被名单挡下的条目：
+
+- 扫描 `~/.ssh/config`（`dshc init`、`dshc reload`、界面「配置重载」）时不再自动纳管，
+  重载结果里以 `filtered` 单独回报，不与 `orphaned` 混在一起。
+- 已在 config 里的条目**不会被删掉**。它们移入主机表末尾默认折叠的「已屏蔽」分组，
+  退出探测、自动拉起与巡检；卡片头显示「清理已屏蔽（N）」，确认后只删除 config 里
+  的这些条目与 manager 运行记录，`~/.ssh/config` 一个字都不动。
+- 若仍有实例在跑，「打开」与「关停」保留可用，清理会跳过它——拒掉关停等于把那个进程
+  扣死在远端，只能改名单才停得掉，这不合理。其余远程动作返回 `NOT_ALLOWED`。
+- 名单一改立即重算全表，无需重启 manager。
+
+名单是用户可编辑的正则，等于让配置文件里的字符串驱动 manager 的正则引擎，因此有护栏：
+每份名单最多 32 条、单条最长 200 字符，不接受控制字符；**把「内部有变长量词或分支」的
+分组重复两次以上**（`(a+)+`、`(a{2,4})+`、`(x|xx)+`、`(a+){12}`）会被当场拒收并说明理由。
+这类写法撞上长主机名要走天文数字的回溯步数，会把 manager 卡死在一次配置保存里；判形在
+编译前完成，因为「跑一遍看耗时」的那一遍本身就是那次卡死。代价是 `(git|hub)+` 这类
+合法但对主机名毫无意义的写法也被拒掉，真正用得上的形态（`(gitlab|github)\..*`）一条不伤。
+
 ### 启动目录与 dsh Workspace
 
 `hosts.<主机>.workdir` 指定目标 `dsh web` 的进程工作目录，也是新会话未显式选择

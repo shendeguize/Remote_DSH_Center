@@ -200,12 +200,12 @@ export function createStore(preset = {}) {
     settleByPhase(host);
   };
 
-  /** 清理 orphaned 响应的前端镜像；只删除当前仍标记 orphaned 的条目。 */
+  /** 清理 orphaned / 已屏蔽响应的前端镜像；只删除当前确实带着该标记的条目。 */
   const removeHosts = (names) => {
     const removed = [];
     for (const name of names ?? []) {
       const host = state.hosts.get(name);
-      if (!host?.orphaned || host.local) continue;
+      if ((!host?.orphaned && !host?.blocked) || host.local) continue;
       state.hosts.delete(name);
       removed.push(name);
     }
