@@ -140,7 +140,9 @@ export const workspaceRegisterResponse = V.obj({
 const defaultsView = V.obj({
   remoteWebPort: port,
   localPortRange: V.tuple([V.int({ min: 1024, max: 65535 }), V.int({ min: 1024, max: 65535 })]),
-});
+  // 顶部主机标签的自定义顺序；缺省（旧配置）时视为字母序，契约上可缺。
+  hostOrder: V.arr(V.str({ min: 1 })),
+}, { optional: ['hostOrder'] });
 
 export const configBody = V.obj({
   configVersion: V.int({ min: 1 }),

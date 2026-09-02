@@ -3903,3 +3903,43 @@ test('manager 不可达：给可重试的错误页', async (t) => {
   assert.ok(skeleton.querySelectorAll('.btn').find((b) => b.textContent === '重试'));
   assert.equal(dom.app.querySelector('.toast-error') !== null, true);
 });
+
+test('拖拽顶部主机标签可重排并持久化到 defaults.hostOrder', async (t) => {
+  const hosts = [running('gpu-1'), running('gpu-2'), running('gpu-3')];
+  const { dom, calls } = await mount(t, {
+    hosts,
+    responder: (req) => {
+      if (req.method === 'PUT' && req.path === '/api/config/defaults') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            defaults: { ...DEFAULTS, hostOrder: req.body.hostOrder ?? [] },
+            manager: { port: MANAGER_INFO.port },
+            restartRequired: false,
+          }),
+        };
+      }
+      return null;
+    },
+  });
+
+  const tabs = () => dom.app.querySelectorAll('.host-tabs .tab');
+  assert.deepEqual([...tabs()].map((n) => n.dataset.host), ['gpu-1', 'gpu-2', 'gpu-3']);
+
+  const first = dom.app.querySelector('.tab[data-host="gpu-1"]');
+  const third = dom.app.querySelector('.tab[data-host="gpu-3"]');
+  const tablist = dom.app.querySelector('.host-tabs');
+
+  first.dispatchEvent({ type: 'dragstart', dataTransfer: { setData() {}, effectAllowed: null } });
+  third.dispatchEvent({ type: 'dragover' });
+  tablist.dispatchEvent({ type: 'drop' });
+  first.dispatchEvent({ type: 'dragend' });
+  await flush();
+
+  const put = calls.find((c) => c.path === '/api/config/defaults' && c.method === 'PUT');
+  assert.ok(put, '拖动后应调用 PUT /api/config/defaults 保存新顺序');
+  assert.deepEqual(put.body.hostOrder, ['gpu-2', 'gpu-1', 'gpu-3']);
+  // 保存成功后 tabbar 按新顺序重渲染
+  assert.deepEqual([...tabs()].map((n) => n.dataset.host), ['gpu-2', 'gpu-1', 'gpu-3']);
+});

@@ -393,3 +393,22 @@ test('远端日志端点：裸文本、缺日志兜底', async (t) => {
   assert.equal(after.status, 200);
   assert.match(after.text, /dsh web: http:\/\/127\.0\.0\.1:\d+/);
 });
+
+test('defaults.hostOrder 整写往返：PUT 保存顺序，GET /api/config 与 PUT 响应一致', async (t) => {
+  const ctx = await bootServer(t, { hosts: { 'gpu-1': SCENARIOS.healthy(), 'gpu-2': SCENARIOS.healthy() } });
+
+  const before = await ctx.get('/api/config');
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.json.defaults.hostOrder, [], '出厂配置缺失 hostOrder，迁移器应补为空数组');
+
+  const put = await ctx.api('PUT', '/api/config/defaults', { hostOrder: ['gpu-2', 'gpu-1'] });
+  assertRest(put, { status: 200, schema: defaultsPutResponse, label: 'PUT defaults hostOrder' });
+  assert.deepEqual(put.json.defaults.hostOrder, ['gpu-2', 'gpu-1']);
+
+  const after = await ctx.get('/api/config');
+  assert.deepEqual(after.json.defaults.hostOrder, ['gpu-2', 'gpu-1'], '顺序应整写持久化');
+
+  // 只提交 port 不得清掉 hostOrder
+  const onlyPort = await ctx.api('PUT', '/api/config/defaults', { remoteWebPort: 9102 });
+  assert.deepEqual(onlyPort.json.defaults.hostOrder, ['gpu-2', 'gpu-1']);
+});

@@ -45,6 +45,25 @@ test('主标签之外统一收纳：unreachable/no_dsh/unknown/disabled 都可�
   );
 });
 
+test('主标签按 hostOrder 重排：未排序主机按名排末尾，收纳桶集合不变', () => {
+  const hosts = [
+    host('gpu-c', 'running'),
+    host('gpu-a', 'running'),
+    host('gpu-b', 'running'),
+    host('offline', 'unreachable'),
+    host('disabled-running', 'running', { enabled: false }),
+  ];
+  assert.deepEqual(
+    visibleTabs(hosts, ['gpu-b', 'gpu-c']).map((h) => h.name),
+    ['gpu-b', 'gpu-c', 'gpu-a'],
+  );
+  // spill 桶（不可用/禁用）不受顺序影响，集合与字母序都不变
+  assert.deepEqual(
+    overflowHosts(hosts, ['gpu-b', 'gpu-c']).map((h) => h.name),
+    ['disabled-running', 'offline'],
+  );
+});
+
 test('ready fallback panel id 对任意主机名稳定编码，且不占用 iframe panel id', () => {
   const name = 'gpu a/1';
   assert.equal(hostFallbackPanelId(name), 'host-fallback-panel-gpu%20a%2F1');

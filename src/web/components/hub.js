@@ -14,9 +14,9 @@ import {
 } from '../host-presentation.js';
 
 /** @param {Iterable<object>} hosts */
-export function hubHosts(hosts) {
+export function hubHosts(hosts, order = []) {
   const all = [...hosts];
-  const primary = primaryHosts(all);
+  const primary = primaryHosts(all, order);
   const primarySet = new Set(primary);
   const byName = (a, b) => a.name.localeCompare(b.name);
   const unavailable = all.filter((host) => !primarySet.has(host)).sort(byName);
@@ -83,7 +83,8 @@ export function createHub({ store, actions }) {
 
   function render() {
     const hosts = store.listHosts();
-    const { primary, unavailable } = hubHosts(hosts);
+    const order = Array.isArray(store.state.defaults?.hostOrder) ? store.state.defaults.hostOrder : [];
+    const { primary, unavailable } = hubHosts(hosts, order);
     const body = [];
 
     if (!store.state.hostsLoaded) {
@@ -130,6 +131,7 @@ export function createHub({ store, actions }) {
     store.on('pending:changed', render),
     store.on('connection:changed', render),
     store.on('route:changed', render),
+    store.on('defaults:changed', render),
   ];
   render();
 

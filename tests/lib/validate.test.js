@@ -278,3 +278,31 @@ test('assertValid 抛 VALIDATION，detail 为逐条错误路径', () => {
   );
   assert.doesNotThrow(() => assertValid(configSchema, goodConfig(), 'x'));
 });
+
+test('configSchema/defaultsPatchSchema 接受 defaults.hostOrder，空的或缺省均合法', () => {
+  const withOrder = goodConfig();
+  withOrder.defaults.hostOrder = ['gpu-z', 'gpu-1'];
+  assert.equal(validate(configSchema, withOrder).ok, true);
+
+  // 缺省 hostOrder（旧配置）仍通过 —— 迁移器会补，契约上可缺
+  assert.equal(validate(configSchema, goodConfig()).ok, true);
+
+  // 空数组 = 字母序，合法
+  const empty = goodConfig();
+  empty.defaults.hostOrder = [];
+  assert.equal(validate(configSchema, empty).ok, true);
+
+  // PUT /api/config/defaults 允许只提交 hostOrder
+  assert.equal(validate(defaultsPatchSchema, { hostOrder: ['gpu-1', 'gpu-2'] }).ok, true);
+});
+
+test('defaults.hostOrder 成员必须是合法主机名', () => {
+  const withBad = goodConfig();
+  withBad.defaults.hostOrder = ['gpu-1', '-bad', 'bad name'];
+  assert.equal(validate(configSchema, withBad).ok, false);
+  assert.match(validate(configSchema, withBad).errors.join(), /hostOrder\[1\]/);
+
+  const notString = goodConfig();
+  notString.defaults.hostOrder = ['gpu-1', 5];
+  assert.match(validate(configSchema, notString).errors.join(), /hostOrder\[1\].*合法主机名/);
+});

@@ -250,6 +250,7 @@
 | 路由反转：`#/hub` 默认起始页、`#/manage` 次级管理页、非法路由回 Hub；根入口只在 lastHost 仍可开且启用时恢复，品牌链接始终直达 Hub | `tests/web/router.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S1/S10 |
 | Hub：五种可开态卡片、不可用/禁用折叠、空态添加本机；ready 卡片复用统一动作，一步提交 start 并进入标签，不乐观改 phase | `tests/web/hub.test.js`、`tests/web/mount.test.js`、`scripts/ui-smoke.mjs` S4h |
 | 常驻标签与收纳：enabled 的 ready/starting/running/degraded/crashed 常驻；其余进入 `+N`，可探测或去管理；ready 标签一步拉起 | `tests/web/tabbar.test.js`、`tests/web/mount.test.js`、`tests/web/ui-live.test.js` |
+| 顶部主机标签拖拽排序：`defaults.hostOrder` 决定可见主标签顺序，未排序主机按名排末尾；拖到新位置后整写回 `defaults.hostOrder` 并即时重渲染，收纳桶（不可用/禁用）集合与顺序不受影响 | `tests/web/host-rules.test.js`、`tests/web/tabbar.test.js`、`tests/web/hub.test.js`、`tests/web/mount.test.js`（拖拽挂载）、`tests/lib/validate.test.js`、`tests/integration/flows.test.js` |
 | 管理次级入口：顶栏 `⌂ 管理`、Hub 链接、标签菜单「在管理台查看」并展开抽屉；manage 页头有原生按钮直达 Hub，断线时导航仍可用而全量探测/重载禁用 | `tests/web/mount.test.js`、`tests/web/ui-live.test.js`、`tests/integration/ui-live.test.js`、`scripts/ui-smoke.mjs` S9/S9b |
 | 管理布局：页头操作与主机卡内容共用 border+padding token 的 15px 内缘；≤620px 页头动作和双卡区稳定换为单列 | `tests/web/layout.test.js` |
 | 标签菜单「在新窗口打开」只消费后端 `mappedUrl`，切断 opener；本机显示徽标且不暴露 SSH/orphan/reconnect 文案 | `tests/web/mount.test.js`、`tests/web/tabbar.test.js` |

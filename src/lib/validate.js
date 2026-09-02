@@ -251,10 +251,20 @@ const localPortRangeSchema = V.all(
   ),
 );
 
+// defaults.hostOrder：主机名数组，空数组 = 按名字字母序。
+const hostOrderName = V.custom(
+  (v) => (
+    (typeof v === 'string' && SAFE_HOST_RE.test(v) && !v.startsWith('-'))
+    || '须为合法主机名（字母数字 . _ -，不以 - 开头）'
+  ),
+);
+const hostOrderSchema = V.arr(hostOrderName);
+
 const defaultsSchema = V.obj({
   remoteWebPort: port,
   localPortRange: localPortRangeSchema,
-});
+  hostOrder: hostOrderSchema,
+}, { optional: ['hostOrder'] });
 const cleanupRulesSchema = V.arr(V.str({ pattern: CLEANUP_RULE_RE, max: 32 }));
 const cleanupSchema = V.obj({
   rules: cleanupRulesSchema,
@@ -388,8 +398,9 @@ export const defaultsPatchSchema = V.obj(
     remoteWebPort: port,
     localPortRange: localPortRangeSchema,
     manager: V.obj({ port }),
+    hostOrder: hostOrderSchema,
   },
-  { optional: ['remoteWebPort', 'localPortRange', 'manager'] },
+  { optional: ['remoteWebPort', 'localPortRange', 'manager', 'hostOrder'] },
 );
 
 export { ENV_KEY_RE };

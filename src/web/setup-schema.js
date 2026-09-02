@@ -193,6 +193,7 @@ export function buildConfigFromAnswers(answers, candidates, probeResults, factor
     defaults: {
       remoteWebPort: getByPath(answers, 'defaults.remoteWebPort'),
       localPortRange: [...getByPath(answers, 'defaults.localPortRange')],
+      hostOrder: [],
     },
     hosts,
   };

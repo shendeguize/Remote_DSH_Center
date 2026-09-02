@@ -214,6 +214,7 @@ function migrateConfig(raw) {
   cfg.defaults ??= factory.defaults;
   cfg.defaults.remoteWebPort ??= factory.defaults.remoteWebPort;
   cfg.defaults.localPortRange ??= factory.defaults.localPortRange;
+  cfg.defaults.hostOrder ??= [...factory.defaults.hostOrder];
   cfg.cleanup ??= factory.cleanup;
   cfg.cleanup.rules ??= [...factory.cleanup.rules];
   cfg.hosts ??= {};
@@ -470,6 +471,8 @@ export function saveConfigFromSetup(incoming) {
   draft.configVersion = CONFIG_VERSION;
   draft.setupCompleted = true;
   draft.hosts ??= {};
+  draft.defaults ??= {};
+  draft.defaults.hostOrder ??= [];
   for (const [name, host] of Object.entries(draft.hosts)) {
     const base = newHostConfig();
     draft.hosts[name] = {

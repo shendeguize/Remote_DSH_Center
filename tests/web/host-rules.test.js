@@ -11,6 +11,7 @@ import {
   isManagedHost,
   isPrimaryHost,
   isPrimaryHostPhase,
+  orderedHosts,
   primaryHosts,
 } from '../../src/web/host-rules.js';
 
@@ -99,6 +100,39 @@ test('primaryHosts 为 Hub/Tab 提供同一份稳定 name 排序，且不改输�
   );
   assert.deepEqual(source, before);
   assert.equal(source[0].name, 'gpu-z', '排序不得原地修改调用方数组');
+});
+
+test('orderedHosts 按 hostOrder 排序，未排序主机按名字字母序排末尾且不改为输入', () => {
+  const hosts = [
+    managed('running', { name: 'gpu-b' }),
+    managed('running', { name: 'gpu-a' }),
+    managed('running', { name: 'gpu-c' }),
+    managed('running', { name: 'gpu-z' }),
+  ];
+  const before = [...hosts];
+  const ordered = orderedHosts(hosts, ['gpu-z', 'gpu-a']);
+  assert.deepEqual(ordered.map((h) => h.name), ['gpu-z', 'gpu-a', 'gpu-b', 'gpu-c']);
+  assert.deepEqual(hosts, before, '不得原地修改输入');
+  // 空 order 退化为按名排序
+  assert.deepEqual(orderedHosts(hosts).map((h) => h.name), ['gpu-a', 'gpu-b', 'gpu-c', 'gpu-z']);
+  // 排名重复（order 里有重复名）时仍稳定
+  assert.deepEqual(
+    orderedHosts(hosts, ['gpu-a', 'gpu-a']).map((h) => h.name),
+    ['gpu-a', 'gpu-b', 'gpu-c', 'gpu-z'],
+  );
+});
+
+test('primaryHosts 应用顺序：拖拽后的主标签顺序即 hostOrder 在可见集里的投影', () => {
+  const source = [
+    managed('crashed', { name: 'gpu-z' }),
+    managed('ready', { name: 'gpu-b' }),
+    manual('running', { name: 'gpu-c' }),
+    managed('starting', { name: 'gpu-a' }),
+    managed('unknown', { name: 'waiting' }),
+    managed('running', { name: 'disabled', config: { enabled: false } }),
+  ];
+  const ordered = primaryHosts(source, ['gpu-c', 'gpu-a', 'gpu-z']);
+  assert.deepEqual(ordered.map((h) => h.name), ['gpu-c', 'gpu-a', 'gpu-z', 'gpu-b']);
 });
 
 const ACTION_MATRIX = [

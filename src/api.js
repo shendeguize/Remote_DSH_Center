@@ -637,6 +637,7 @@ export function createHandler({ managerCtl }) {
       store.updateConfig((draft) => {
         if ('remoteWebPort' in body) draft.defaults.remoteWebPort = body.remoteWebPort;
         if ('localPortRange' in body) draft.defaults.localPortRange = [...body.localPortRange];
+        if ('hostOrder' in body) draft.defaults.hostOrder = [...body.hostOrder];
         if (body.manager && 'port' in body.manager) draft.manager.port = body.manager.port;
       });
       const cfg = store.getConfig();

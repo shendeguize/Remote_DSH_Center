@@ -166,3 +166,18 @@ test('应用内空态的添加本机出口复用既有 API', async (t) => {
 
   assert.equal(calls.some((call) => call.path === '/api/hosts/local' && call.method === 'POST'), true);
 });
+
+test('Hub 主卡片与顶部标签共享同一份 hostOrder 顺序', () => {
+  const hosts = [
+    host('gpu-c', 'running'),
+    host('gpu-a', 'running'),
+    host('gpu-b', 'running'),
+  ];
+  const grouped = hubHosts(hosts, ['gpu-b', 'gpu-c']);
+  assert.deepEqual(
+    grouped.primary.map((item) => item.name),
+    ['gpu-b', 'gpu-c', 'gpu-a'],
+  );
+  // hub 与 Tab 必须投影同一顺序（单一规则源）
+  assert.deepEqual(grouped.primary.map((item) => item.name), visibleTabs(hosts, ['gpu-b', 'gpu-c']).map((item) => item.name));
+});

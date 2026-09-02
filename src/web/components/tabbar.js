@@ -22,16 +22,18 @@ export function hostFallbackPanelId(name) {
 
 /**
  * 日常主机常驻区：只按「已启用 + 可用态」判断，不再要求先从管理台打开。
+ * `order` 是 defaults.hostOrder 的主机名数组（空 = 按名字字母序）。
  * @param {Iterable<object>} hosts
+ * @param {string[]} [order]
  */
-export function visibleTabs(hosts) {
-  return primaryHosts(hosts);
+export function visibleTabs(hosts, order = []) {
+  return primaryHosts(hosts, order);
 }
 
 /** 主标签之外的主机集中到 +N 菜单，保证不可用/禁用主机仍然找得到。 */
-export function overflowHosts(hosts) {
+export function overflowHosts(hosts, order = []) {
   const all = [...hosts];
-  const primary = new Set(visibleTabs(all).map((host) => host.name));
+  const primary = new Set(visibleTabs(all, order).map((host) => host.name));
   return all.filter((host) => !primary.has(host.name)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -123,6 +125,61 @@ export function createTabbar({
   });
   let menuHost = null;
   let pressCycle = null;
+
+  // ── 标签拖拽排序（顶部主机标签可拖动调整顺序） ──────────────────────────
+
+  /** 当前正在拖动的标签信息；null = 没有拖动在飞。 */
+  let drag = null;
+
+  function hostTabsOrder() {
+    return [...hostTabs.querySelectorAll('.tab')].map((node) => node.dataset.host);
+  }
+
+  function orderFromStore() {
+    return Array.isArray(store.state.defaults?.hostOrder) ? store.state.defaults.hostOrder : [];
+  }
+
+  function beginDrag(host, event) {
+    clearDrag();
+    drag = { host: host.name, fromOrder: hostTabsOrder() };
+    event.dataTransfer?.setData?.('text/plain', host.name);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    hostTabs.querySelector(`.tab[data-host="${CSS.escape(host.name)}"]`)?.classList.add('is-dragging');
+  }
+
+  function clearDrag() {
+    if (!drag) return;
+    hostTabs.querySelector(`.tab[data-host="${CSS.escape(drag.host)}"]`)?.classList.remove('is-dragging');
+    drag = null;
+  }
+
+  /** drop 或 dragend 落定：顺序变了才持久化（复用 defaults 保存通道）。 */
+  function commitDrag() {
+    if (!drag) return;
+    const order = hostTabsOrder();
+    const changed = JSON.stringify(order) !== JSON.stringify(drag.fromOrder);
+    clearDrag();
+    if (changed && order.length > 1) actions.reorderHosts(order);
+  }
+
+  hostTabs.addEventListener('dragover', (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    const over = e.target?.closest?.('.tab');
+    const dragged = hostTabs.querySelector(`.tab[data-host="${CSS.escape(drag.host)}"]`);
+    if (!over || !dragged || over === dragged) return;
+    const rect = over.getBoundingClientRect?.();
+    // 垫片环境没有布局（尺寸全 0），一律放到目标之前；真浏览器按指针落在前半/后半判断。
+    const before = rect && rect.width > 0 && e.clientX != null
+      ? e.clientX < rect.left + rect.width / 2
+      : true;
+    hostTabs.insertBefore(dragged, before ? over : over.nextSibling);
+  });
+  hostTabs.addEventListener('drop', (e) => {
+    if (!drag) return;
+    e.preventDefault();
+    commitDrag();
+  });
 
   // ── 菜单 ─────────────────────────────────────────────────────────────
 
@@ -276,7 +333,7 @@ export function createTabbar({
   }
 
   function openOverflowMenu() {
-    const hosts = overflowHosts(store.listHosts());
+    const hosts = overflowHosts(store.listHosts(), orderFromStore());
     if (hosts.length === 0) return;
     closeMenu();
     fillOverflowMenu(hosts);
@@ -437,6 +494,7 @@ export function createTabbar({
       id: hostTabId(host.name),
       type: 'button',
       role: 'tab',
+      draggable: true,
       dataset: { host: host.name },
       title: `${host.name} — ${meta.label}${host.local === true ? ' — 本机' : ''}`,
       'aria-selected': String(selected),
@@ -445,6 +503,7 @@ export function createTabbar({
       class: selected ? 'is-active' : '',
       on: {
         click: (event) => {
+          if (drag) return; // 拖动中不当作「切页」点击
           if (consumeLongPressClick(host.name, event)) {
             event.preventDefault();
             event.stopPropagation();
@@ -473,6 +532,8 @@ export function createTabbar({
         pointerup: finishPress,
         pointercancel: cancelPress,
         pointerleave: cancelPress,
+        dragstart: (e) => beginDrag(host, e),
+        dragend: () => commitDrag(),
       },
     }, [
       el('span.status-dot', { dataset: { dot: meta.dot }, class: `dot-${meta.tone}` }),
@@ -488,8 +549,9 @@ export function createTabbar({
   function render() {
     const route = store.state.route;
     const hosts = store.listHosts();
-    const tabs = visibleTabs(hosts);
-    const overflow = overflowHosts(hosts);
+    const order = orderFromStore();
+    const tabs = visibleTabs(hosts, order);
+    const overflow = overflowHosts(hosts, order);
 
     // 标签整片重建，旧节点带着焦点被移除，浏览器只能把焦点交回 body——方向键走到
     // 一半来一帧 SSE 就丢位置。认「同一个标签」靠 data-host（issue #110）。
@@ -557,6 +619,7 @@ export function createTabbar({
     store.on('route:changed', render),
     store.on('pending:changed', render),
     store.on('connection:changed', render),
+    store.on('defaults:changed', render),
   ];
   render();
 
@@ -566,6 +629,7 @@ export function createTabbar({
     overflowMenu,
     render,
     destroy() {
+      clearDrag();
       clearPressCycle();
       for (const off of offs) off();
       document.removeEventListener('pointerdown', onDocPointerDown);

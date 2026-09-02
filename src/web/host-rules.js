@@ -28,11 +28,31 @@ export function isPrimaryHost(host) {
   return isHostEnabled(host) && !host?.orphaned && isPrimaryHostPhase(host?.phase);
 }
 
+/**
+ * 按自定义顺序排序主机（顶部标签的拖拽顺序）。
+ *
+ * `order` 是 defaults.hostOrder 的主机名数组；不在数组里的主机排后面、彼此按名字
+ * 字母序。排未出现的主机放在末尾，是为了容错「刚添加尚未排过」的主机与「已被移除
+ * 却残留在 order 里」的名字——后者随被移除主机一同消失，永远不会占位。
+ * 纯函数、不改输入；`hosts` 接受数组或可迭代对象。
+ * @param {Iterable<object>} hosts
+ * @param {string[]} [order]
+ */
+export function orderedHosts(hosts, order = []) {
+  const rank = new Map();
+  order.forEach((name, i) => rank.set(name, i));
+  const rankOf = (host) => (rank.has(host.name) ? rank.get(host.name) : Number.MAX_SAFE_INTEGER);
+  return [...hosts].sort((a, b) => {
+    const ra = rankOf(a);
+    const rb = rankOf(b);
+    if (ra !== rb) return ra - rb;
+    return a.name.localeCompare(b.name); // 同序（含未排序）落 batch 内仍按名稳定
+  });
+}
+
 /** @param {Iterable<object>} hosts */
-export function primaryHosts(hosts) {
-  return [...hosts]
-    .filter(isPrimaryHost)
-    .sort((a, b) => a.name.localeCompare(b.name));
+export function primaryHosts(hosts, order = []) {
+  return orderedHosts([...hosts].filter(isPrimaryHost), order);
 }
 
 const ACTIONS = Object.freeze({

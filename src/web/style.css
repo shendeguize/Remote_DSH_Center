@@ -462,6 +462,10 @@ body {
 }
 .tab:hover { background: var(--surface); }
 .tab.is-active { background: var(--surface); border-color: var(--border); font-weight: 600; }
+/* 标签可拖拽排序：默认抓手光标，拖动中半透明 */
+.tab { cursor: grab; }
+.tab:active { cursor: grabbing; }
+.tab.is-dragging { opacity: 0.5; }
 .tab .status-dot { color: var(--neutral); }
 .tab .dot-running { color: var(--running); }
 .tab .dot-degraded { color: var(--degraded); }
